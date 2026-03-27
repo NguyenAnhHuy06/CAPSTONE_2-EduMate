@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edumate - Upload Document</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --bg-color: #f8fafc;
+            --sidebar-bg: #ffffff;
+            --text-main: #334155;
+            --text-muted: #64748b;
+            --border-color: #e2e8f0;
+            --card-bg: #ffffff;
+        }
+
+        /* Khóa scroll body để chia vùng cuộn riêng */
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+
+        /* --- SIDEBAR CỐ ĐỊNH --- */
+        .sidebar {
+            width: 260px;
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border-color);
+            padding: 24px 20px;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            height: 100vh;
+            box-sizing: border-box;
+            z-index: 10;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 35px;
+        }
+
+        .logo img {
+            height: 60px;
+            width: auto;
+        }
+
+        .logo-text-group {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .logo-main-text {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--primary-color);
+            line-height: 1.2;
+        }
+
+        .logo-sub-text {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 500;
+            line-height: 1.2;
+        }
+
+        .sidebar nav ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .sidebar nav li {
+            padding: 12px 16px;
+            border-radius: 10px;
+            cursor: pointer;
+            color: #475569;
+            margin-bottom: 5px;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        .sidebar nav li i {
+            margin-right: 15px;
+            width: 20px;
+            font-size: 18px;
+            color: #94a3b8;
+        }
+
+        .sidebar nav li.active {
+            background: #f1f5ff;
+            color: var(--primary-color);
+        }
+
+        .sidebar nav li.active i {
+            color: var(--primary-color);
+        }
+
+        .sidebar nav li:hover:not(.active) {
+            background: #f8fafc;
+            color: var(--primary-color);
+        }
+
+        /* User Info & Logout ở đáy Sidebar */
+        .sidebar-footer {
+            margin-top: auto;
+            padding-top: 20px;
+        }
+
+        .user-card {
+            background: #f8fafc;
+            padding: 12px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+            border: 1px solid #f1f5f9;
+        }
+
+        .user-avatar {
+            width: 36px;
+            height: 36px;
+            background: #e0e7ff;
+            color: var(--primary-color);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 12px;
+        }
+
+        .user-info-text p {
+            margin: 0;
+            font-size: 14px;
+            font-weight: 700;
+            color: #1e293b;
+        }
+
+        .user-info-text span {
+            font-size: 12px;
+            color: var(--text-muted);
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 140px;
+        }
+
+        .logout-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            color: #475569;
+            text-decoration: none;
+            font-size: 16px;
+            font-weight: 600;
+            padding: 10px 16px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        .logout-btn:hover {
+            color: #ef4444;
+        }
+
+        /* --- VÙNG NỘI DUNG CUỘN ĐỘC LẬP --- */
+        .content {
+            flex: 1;
+            padding: 0;
+            overflow-y: auto;
+            /* Cho phép cuộn vùng này */
+            background-color: var(--bg-color);
+        }
+
+        .content-inner {
+            max-width: 1250px;
+            margin: 0 auto;
+            padding: 30px 40px 80px 40px;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        header h2 {
+            font-size: 24px;
+            font-weight: 700;
+            margin: 0;
+            color: #0f172a;
+        }
+
+        .badge-verified {
+            background: #f5f3ff;
+            color: #6366f1;
+            padding: 6px 14px;
+            border-radius: 50px;
+            font-size: 12px;
+            font-weight: 600;
+            border: 1px solid #e0e7ff;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .badge-verified::before {
+            content: '●';
+            font-size: 8px;
+        }
+
+        /* Title Section */
+        .page-title-group {
+            margin-bottom: 25px;
+        }
+
+        .page-title-group h3 {
+            font-size: 22px;
+            font-weight: 700;
+            margin: 0 0 5px 0;
+            color: #1e293b;
+        }
+
+        .page-title-group p {
+            font-size: 16px;
+            color: var(--text-muted);
+            margin: 0;
+        }
+
+        /* --- FLASHCARD DASHBOARD --- */
+        .ai-banner {
+            background: #059669;
+            /* Màu xanh lục như ảnh */
+            color: white;
+            padding: 32px;
+            border-radius: 16px;
+            margin-bottom: 30px;
+            position: relative;
+        }
+
+        .ai-banner h1 {
+            margin: 0 0 10px 0;
+            font-size: 28px;
+        }
+
+        .ai-banner p {
+            margin: 0;
+            opacity: 0.9;
+            font-size: 15px;
+        }
+
+        .deck-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            /* 2 cột như ảnh */
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .deck-card {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .deck-icon {
+            width: 45px;
+            height: 45px;
+            background: #ecfdf5;
+            color: #10b981;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            font-size: 20px;
+        }
+
+        .deck-info h4 {
+            margin: 0;
+            font-size: 18px;
+            color: #1e293b;
+        }
+
+        .deck-tag {
+            display: inline-block;
+            background: #f1f5f9;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            margin: 5px 0;
+        }
+
+        .btn-study {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: 0.2s;
+        }
+
+        .btn-study:hover {
+            background: #059669;
+        }
+
+        /* Tips & Recent Section */
+        .info-section {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+
+        .info-section h4 {
+            margin: 0 0 15px 0;
+            color: #1e293b;
+        }
+
+        .info-section ul {
+            padding-left: 20px;
+            color: var(--text-muted);
+            line-height: 1.8;
+        }
+
+        /* --- STUDY MODE UI --- */
+        #study-mode {
+            display: none;
+        }
+
+        .study-progress-container {
+            background: white;
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 20px;
+        }
+
+        .progress-track {
+            height: 10px;
+            background: #e2e8f0;
+            border-radius: 20px;
+            margin: 15px 0;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: #0f172a;
+            width: 0%;
+            transition: width 0.4s ease;
+        }
+
+        .flashcard-box {
+            background: white;
+            height: 350px;
+            border-radius: 20px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px;
+            cursor: pointer;
+            position: relative;
+            transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            transform-style: preserve-3d;
+        }
+
+        .flashcard-box.flipped {
+            transform: rotateY(180deg);
+        }
+
+        .card-face {
+            position: absolute;
+            backface-visibility: hidden;
+            padding: 40px;
+        }
+
+        .card-back {
+            transform: rotateY(180deg);
+            color: #059669;
+        }
+
+        .feedback-controls {
+            display: none;
+            /* Hiện sau khi lật */
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .btn-feedback {
+            padding: 14px;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+            background: white;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .btn-knew {
+            background: #10b981;
+            color: white;
+            border: none;
+        }
+
+        .nav-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* --- RECENT STUDY SESSIONS --- */
+        .recent-sessions {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            margin-top: 30px;
+        }
+
+        .session-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .session-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            border-radius: 12px;
+            transition: 0.2s;
+            background: transparent;
+        }
+
+        .session-item:hover {
+            background: #f8fafc;
+        }
+
+        .session-item h5 {
+            margin: 0;
+            font-size: 16px;
+            color: #1e293b;
+        }
+
+        .session-item span.time {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .mastery-tag {
+            text-align: right;
+        }
+
+        .mastery-tag strong {
+            display: block;
+            font-size: 16px;
+            color: #1e293b;
+        }
+
+        .mastery-tag small {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .dot-item {
+            width: 35px;
+            height: 35px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            background: #f1f5f9;
+            cursor: pointer;
+            font-weight: bold;
+            color: #64748b;
+            transition: all 0.2s ease;
+            border: 1px solid transparent;
+        }
+
+        .dot-item:hover {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <div class="logo">
+                <img src="\img\logo2.png" alt="Logo Edumate">
+                <div class="logo-text-group">
+                    <span class="logo-main-text">EDUMATE</span>
+                    <span class="logo-sub-text">Lecture Portal</span>
+                </div>
+            </div>
+
+            <nav>
+                <ul>
+                    <li><i class="fa-solid fa-table-cells-large"></i> Dashboard</li>
+                    <li><i class="fa-regular fa-file-lines"></i> Documents</li>
+                    <li><i class="fa-solid fa-cloud-arrow-up"></i> Upload</li>
+                    <li><i class="fa-solid fa-magnifying-glass-plus"></i> Quizz</li>
+                    <li class="active"><i class="fa-solid fa-layer-group"></i> Flashcards</li>
+                    <li><i class="fa-solid fa-chart-pie"></i> Progress</li>
+                    <li><i class="fa-solid fa-award"></i> Leaderboard</li>
+                    <li><i class="fa-regular fa-circle-user"></i> Profile</li>
+                </ul>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="user-card">
+                    <div class="user-avatar">STT</div>
+                    <div class="user-info-text">
+                        <p>Mr. Truong Thi</p>
+                        <span>truongthi@gmail.com</span>
+                    </div>
+                </div>
+                <div class="logout-btn">
+                    <i class="fa-solid fa-arrow-right-from-bracket" style="font-size: 20px;"></i>
+                    <span>Logout</span>
+                </div>
+            </div>
+        </aside>
+
+        <main class="content">
+            <div class="content-inner">
+                <header>
+                    <h2 id="header-title">Flashcards</h2>
+                    <div class="badge-verified">Verified Lecturer</div>
+                </header>
+                <div class="page-title-group">
+                    <h3>AI Flashcard Generator</h3>
+                    <p>Select a document to generate flashcards from</p>
+                </div>
+
+                <div id="dashboard-view">
+                    <div class="ai-banner" style="background: #10b981; padding: 20px; margin-top: -15px;">
+                        <div style="display:flex; align-items:center; gap:10px">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            <strong>AI-Generated Flashcards</strong>
+                        </div>
+                        <p style="font-size: 13px; margin-top: 5px;">Our AI extracts key concepts from your documents
+                            and creates effective flashcards...</p>
+                    </div>
+
+                    <div class="deck-grid" id="deck-list">
+                    </div>
+
+                    <div class="info-section">
+                        <h4>Study Tips</h4>
+                        <ul>
+                            <li>Click the card to flip and reveal the answer</li>
+                            <li>Mark cards you know well to track your progress</li>
+                            <li>Review regularly for better retention</li>
+                        </ul>
+                    </div>
+                    <div class="recent-sessions">
+                        <h4 style="margin: 0 0 20px 0; font-size: 18px; color: #1e293b;">Recent Study Sessions</h4>
+                        <div class="session-list" id="recent-session-list">
+                        </div>
+                    </div>
+                </div>
+
+                <div id="study-mode">
+                    <div class="study-progress-container">
+                        <div style="display:flex; justify-content:space-between; align-items:center">
+                            <div>
+                                <h3 id="current-deck-name" style="margin:0">Tên tài liệu</h3>
+                                <span id="current-card-counter" style="color:var(--text-muted)">Card 0 of 0</span>
+                            </div>
+                            <button class="btn-feedback" onclick="exitStudy()"><i class="fa-solid fa-xmark"></i> Back to
+                                Decks</button>
+                        </div>
+
+                        <div class="progress-track">
+                            <div class="progress-fill" id="pb-fill"></div>
+                        </div>
+
+                        <div style="display:flex; justify-content:space-between; font-size:13px; font-weight:700">
+                            <span id="pb-text">0% Complete</span>
+                            <span style="color: #10b981"><span id="known-count">0</span> known</span>
+                        </div>
+                    </div>
+
+                    <div class="flashcard-box" id="main-card"
+                        onclick="this.classList.toggle('flipped'); checkFlipped()">
+                        <div class="card-face card-front">
+                            <i class="fa-solid fa-book-open"
+                                style="font-size:40px; color:#2563eb; margin-bottom:20px"></i>
+                            <h2 id="q-text">Loading...</h2>
+                            <p style="color:#94a3b8">Click to reveal answer</p>
+                        </div>
+                        <div class="card-face card-back">
+                            <i class="fa-solid fa-circle-check" style="font-size:40px; margin-bottom:20px"></i>
+                            <h3 id="a-text">Answer</h3>
+                        </div>
+                    </div>
+
+                    <div class="feedback-controls" id="feedback-ui">
+                        <button class="btn-feedback" onclick="markCard(false)"><i class="fa-solid fa-xmark"></i> Need to
+                            Review</button>
+                        <button class="btn-feedback btn-knew" onclick="markCard(true)"><i class="fa-solid fa-check"></i>
+                            I Knew This</button>
+                    </div>
+
+                    <div class="nav-controls" style="margin-top:20px">
+                        <button class="btn-feedback" onclick="moveCard(-1)"><i class="fa-solid fa-chevron-left"></i>
+                            Previous</button>
+                        <div style="color:var(--text-muted); cursor:pointer"
+                            onclick="document.getElementById('main-card').classList.toggle('flipped'); checkFlipped()">
+                            <i class="fa-solid fa-rotate"></i> Flip Card
+                        </div>
+                        <button class="btn-feedback" onclick="moveCard(1)">Next <i
+                                class="fa-solid fa-chevron-right"></i></button>
+                    </div>
+                    <div class="progress-footer"
+                        style="margin-top: 30px; background: white; padding: 20px; border-radius: 12px; border: 1px solid var(--border-color);">
+                        <h4 style="margin: 0 0 15px 0; font-size: 14px; color: var(--text-muted);">Card Progress</h4>
+                        <div id="card-dots-container" style="display: flex; gap: 10px; flex-wrap: wrap;"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script>
+        const dbDecks = [
+            {
+                id: 101,
+                title: "Linear Algebra Fundamentals",
+                code: "MATH301",
+                cards: [
+                    { q: "What is a matrix?", a: "A rectangular array of numbers arranged in rows and columns." },
+                    { q: "What is a Vector?", a: "An object with magnitude and direction." },
+                    { q: "What is an Identity Matrix?", a: "A square matrix with ones on the diagonal." },
+                    { q: "What is Rank?", a: "The dimension of the vector space generated by its columns." },
+                    { q: "What is a Determinant?", a: "A scalar value computed from a square matrix." }
+                ]
+            },
+            {
+                id: 102,
+                title: "Data Structures and Algorithms",
+                code: "CS202",
+                cards: [
+                    { q: "What is a Linked List?", a: "A linear data structure where elements are nodes." },
+                    { q: "What is a Stack?", a: "A Last-In-First-Out (LIFO) data structure." },
+                    { q: "What is a Queue?", a: "A First-In-First-Out (FIFO) data structure." }
+                ]
+            },
+            {
+                id: 103,
+                title: "Operating Systems",
+                code: "CS301",
+                cards: [{ q: "What is a Process?", a: "A program in execution." }]
+            },
+            {
+                id: 104,
+                title: "Database Management",
+                code: "CS401",
+                cards: [{ q: "What is SQL?", a: "Structured Query Language." }]
+            }
+        ];
+
+        const dbRecentSessions = [
+            { title: "Linear Algebra Deck", time: "2 hours ago", mastered: 18, total: 24 },
+            { title: "Data Structures Deck", time: "Yesterday", mastered: 28, total: 32 }
+        ];
+
+        let session = {
+            currentDeck: null,
+            index: 0,
+            knownCards: new Set()
+        };
+
+        function init() {
+            const list = document.getElementById('deck-list');
+            if (list) {
+                list.innerHTML = dbDecks.map(deck => `
+            <div class="deck-card">
+                <div style="display:flex; gap:15px">
+                    <div class="deck-icon"><i class="fa-solid fa-book"></i></div>
+                    <div class="deck-info">
+                        <h4>${deck.title}</h4>
+                        <span class="deck-tag">${deck.code}</span>
+                        <p style="margin:5px 0; font-size:13px; color:#64748b">${deck.cards.length} flashcards</p>
+                    </div>
+                </div>
+                <button class="btn-study" onclick="goStudy(${deck.id})">
+                    <i class="fa-solid fa-book-open"></i> Study Now
+                </button>
+            </div>
+        `).join('');
+            }
+
+            // Gọi hàm render danh sách gần đây
+            renderRecentList();
+        }
+
+        // Hàm render riêng cho danh sách lịch sử
+        function renderRecentList() {
+            const recentList = document.getElementById('recent-session-list');
+            if (recentList) {
+                recentList.innerHTML = dbRecentSessions.map(s => `
+            <div class="session-item">
+                <div><h5>${s.title}</h5><span class="time">${s.time}</span></div>
+                <div class="mastery-tag"><strong>${s.mastered}/${s.total}</strong><small>mastered</small></div>
+            </div>
+        `).join('');
+            }
+        }
+
+        function goStudy(id) {
+            const selectedDeck = dbDecks.find(d => d.id === id);
+            if (!selectedDeck) return;
+
+            // RESET TRIỆT ĐỂ CHO BÀI MỚI
+            session.currentDeck = selectedDeck;
+            session.index = 0;
+            session.knownCards.clear();
+
+            document.getElementById('dashboard-view').style.display = 'none';
+            document.getElementById('study-mode').style.display = 'block';
+            document.getElementById('header-title').innerText = "Study Mode";
+            document.getElementById('current-deck-name').innerText = session.currentDeck.title;
+
+            // Cập nhật lại toàn bộ UI
+            renderDots();
+            updateProgress();
+            renderCard();
+        }
+
+        function renderCard() {
+            const card = session.currentDeck.cards[session.index];
+            document.getElementById('q-text').innerText = card.q;
+            document.getElementById('a-text').innerText = card.a;
+            document.getElementById('current-card-counter').innerText = `Card ${session.index + 1} of ${session.currentDeck.cards.length}`;
+
+            document.getElementById('main-card').classList.remove('flipped');
+            document.getElementById('feedback-ui').style.display = 'none';
+
+            updateDotsUI();
+        }
+
+        function renderDots() {
+            const container = document.getElementById('card-dots-container');
+            if (!container) return;
+            container.innerHTML = session.currentDeck.cards.map((_, i) => `
+        <div class="dot-item" id="dot-${i}" onclick="jumpToCard(${i})" >
+            ${i + 1}
+        </div>
+    `).join('');
+        }
+
+        function updateDotsUI() {
+            document.querySelectorAll('.dot-item').forEach((dot, i) => {
+                dot.style.background = (i === session.index) ? '#2563eb' : '#f1f5f9';
+                dot.style.color = (i === session.index) ? 'white' : '#64748b';
+            });
+        }
+
+        function jumpToCard(idx) {
+            session.index = idx;
+            renderCard();
+        }
+
+        function markCard(known) {
+            if (known) session.knownCards.add(session.index);
+            else session.knownCards.delete(session.index);
+
+            updateProgress();
+            if (session.index < session.currentDeck.cards.length - 1) {
+                setTimeout(() => moveCard(1), 300);
+            }
+        }
+
+        function moveCard(step) {
+            const next = session.index + step;
+            if (next >= 0 && next < session.currentDeck.cards.length) {
+                session.index = next;
+
+                //Reset thẻ về mặt trước trước khi nạp dữ liệu câu mới
+                const cardElement = document.getElementById('main-card');
+                cardElement.classList.remove('flipped');
+
+                renderCard();
+            }
+        }
+
+        function updateProgress() {
+            const total = session.currentDeck.cards.length;
+            const known = session.knownCards.size;
+            const percent = total > 0 ? Math.round((known / total) * 100) : 0;
+
+            const pbFill = document.getElementById('pb-fill');
+            if (pbFill) pbFill.style.width = percent + "%";
+
+            document.getElementById('pb-text').innerText = percent + "% Complete";
+            document.getElementById('known-count').innerText = known;
+        }
+
+        function checkFlipped() {
+            const isFlipped = document.getElementById('main-card').classList.contains('flipped');
+            document.getElementById('feedback-ui').style.display = isFlipped ? 'flex' : 'none';
+        }
+
+        function exitStudy() {
+            // Trước khi thoát, cập nhật lại lịch sử
+            updateRecentSessions();
+
+            document.getElementById('dashboard-view').style.display = 'block';
+            document.getElementById('study-mode').style.display = 'none';
+            document.getElementById('header-title').innerText = "Flashcards";
+        }
+        function updateRecentSessions() {
+            if (!session.currentDeck) return;
+
+            // 1. Tạo một object session mới từ kết quả vừa học
+            const newSession = {
+                title: session.currentDeck.title,
+                time: "Just now", 
+                mastered: session.knownCards.size,
+                total: session.currentDeck.cards.length
+            };
+
+            // 2. Đẩy vào đầu mảng dữ liệu (dùng unshift thay vì push)
+            dbRecentSessions.unshift(newSession);
+
+            // 3. Giới hạn chỉ hiện 3-4 session gần nhất 
+            if (dbRecentSessions.length > 4) dbRecentSessions.pop();
+
+            // 4. Gọi lại hàm render để cập nhật giao diện
+            renderRecentList();
+        }
+        window.onload = init;
+    </script>
+</body>
+</html>
