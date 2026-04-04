@@ -1,4 +1,30 @@
 {
+FE
+  "name": "capstone_2-edumate",
+  "version": "1.0.0",
+  "description": "**EduMate** là hệ thống hỗ trợ học tập thông minh và chia sẻ tài liệu học thuật, được xây dựng cho sinh viên, giảng viên và quản trị viên trong môi trường DTU/CMU. Dự án giúp tập trung hóa tài liệu học tập chính thống, hỗ trợ tìm kiếm thông minh, đồng thời tích hợp AI hỏi đáp học thuật kèm trích dẫn nguồn để nâng cao hiệu quả học tập và giảm tải việc hỗ trợ lặp lại.",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NguyenAnhHuy06/CAPSTONE_2-EduMate.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/NguyenAnhHuy06/CAPSTONE_2-EduMate/issues"
+  },
+  "homepage": "https://github.com/NguyenAnhHuy06/CAPSTONE_2-EduMate#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "multer": "^2.1.1"
+=======
   "name": "edumate-be",
   "version": "1.0.0",
   "private": true,
@@ -18,5 +44,6 @@
     "p-limit": "^3.1.0",
     "pdf-parse": "^1.1.1",
     "word-extractor": "^1.0.4"
+ main
   }
 }

@@ -552,7 +552,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                                     <div className="flex gap-2">
                                         <button
                                             type="button"
-                                            aria-label="Chỉnh sửa câu hỏi"
+                                            aria-label="Edit question"
                                             onClick={() => setEditingId(editingId === question.id ? null : question.id)}
                                             className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
                                         >
@@ -560,7 +560,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                                         </button>
                                         <button
                                             type="button"
-                                            aria-label="Xóa câu hỏi"
+                                            aria-label="Delete question"
                                             onClick={() => deleteQuestion(question.id)}
                                             className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                                         >

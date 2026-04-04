@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
     FileText,
     Search,
@@ -11,6 +11,7 @@ import {
     X,
 } from 'lucide-react';
 import { useNotification } from '../NotificationContext';
+import api from '@/services/api';
 
 interface StudentQuizSectionProps {
     user: any;
@@ -21,6 +22,77 @@ type QuizTab = 'available' | 'completed' | 'my-practice';
 interface QuizAnswer {
     questionId: string;
     selectedAnswer: number;
+}
+
+const LETTERS = ['A', 'B', 'C', 'D'];
+
+/** Chuỗi dùng để tìm kiếm (title, mã môn, giảng viên, file, ngày…). */
+function buildQuizSearchHaystack(quiz: Record<string, unknown>): string {
+    const parts = [
+        quiz?.title,
+        quiz?.subject,
+        quiz?.subjectCode,
+        quiz?.courseCode,
+        quiz?.instructor,
+        quiz?.fileName,
+        quiz?.s3Key,
+        quiz?.createdDate,
+        quiz?.completedDate,
+        quiz?.dueDate,
+        quiz?.status,
+    ];
+    return parts.map((p) => String(p ?? '').toLowerCase()).join(' \n ');
+}
+
+function quizMatchesSearchQuery(quiz: Record<string, unknown>, rawQuery: string): boolean {
+    const q = String(rawQuery || '').trim().toLowerCase();
+    if (!q) return true;
+    const hay = buildQuizSearchHaystack(quiz);
+    const words = q.split(/\s+/).filter(Boolean);
+    return words.every((w) => hay.includes(w));
+}
+
+function normalizeQuestions(quizItems: any[] = []) {
+    return quizItems.map((q: any, idx: number) => {
+        const optionsObj = q?.options || {};
+        const options = LETTERS.map((k) => optionsObj[k]).filter(Boolean);
+        const correctLetter = String(q?.correct_answer || 'A').toUpperCase();
+        const correctAnswer = Math.max(0, LETTERS.indexOf(correctLetter));
+        return {
+            id: q?.id || `q-${idx + 1}`,
+            question: q?.question || `Question ${idx + 1}`,
+            options: options.length ? options : ['Option A', 'Option B', 'Option C', 'Option D'],
+            correctAnswer,
+        };
+    });
+}
+
+/** Khớp backend: 1–25 câu; ưu tiên estimatedQuestions từ /documents/for-quiz. */
+function numQuestionsForGenerate(quiz: { estimatedQuestions?: unknown }): number {
+    const raw = Number(quiz?.estimatedQuestions);
+    if (Number.isFinite(raw) && raw > 0) {
+        return Math.min(25, Math.max(1, Math.floor(raw)));
+    }
+    return 10;
+}
+
+function normalizeStoredQuestions(rows: any[] = []) {
+    return rows.map((q: any, idx: number) => {
+        const options = [
+            q?.option_a ?? q?.options?.A ?? '',
+            q?.option_b ?? q?.options?.B ?? '',
+            q?.option_c ?? q?.options?.C ?? '',
+            q?.option_d ?? q?.options?.D ?? '',
+        ].map((x: any) => String(x || '').trim()).filter(Boolean);
+        const correctLetter = String(q?.correct_answer || 'A').toUpperCase();
+        const correctAnswer = Math.max(0, LETTERS.indexOf(correctLetter));
+        return {
+            id: q?.question_id || q?.id || `stored-q-${idx + 1}`,
+            question: q?.question_text || q?.question || `Question ${idx + 1}`,
+            options: options.length ? options : ['Option A', 'Option B', 'Option C', 'Option D'],
+            correctAnswer,
+        };
+    });
 }
 
 export function StudentQuizSection({ user }: StudentQuizSectionProps) {
@@ -37,131 +109,293 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     const [quizSubmitted, setQuizSubmitted] = useState(false);
     const [quizResult, setQuizResult] = useState<any>(null);
     const [timerId, setTimerId] = useState<NodeJS.Timeout | null>(null);
+    const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
 
-    // Mock quiz data
-    const [availableQuizzes, setAvailableQuizzes] = useState([
-        {
-            id: 1,
-            title: 'Introduction to Algorithms - Midterm',
-            subject: 'CS201',
-            instructor: 'Dr. Sarah Johnson',
-            questions: [
-                {
-                    id: 'q1',
-                    question: 'What is the time complexity of binary search?',
-                    options: ['O(n)', 'O(log n)', 'O(n²)', 'O(1)'],
-                    correctAnswer: 1,
-                },
-                {
-                    id: 'q2',
-                    question: 'Which data structure uses LIFO?',
-                    options: ['Queue', 'Stack', 'Array', 'List'],
-                    correctAnswer: 1,
-                },
-            ],
-            duration: 60,
-            myAttempts: 0,
-            maxAttempts: 2,
-            dueDate: '2026-04-15',
-            status: 'available',
-        },
-        {
-            id: 2,
-            title: 'Data Structures Week 5 Quiz',
-            subject: 'CS202',
-            instructor: 'Dr. Michael Chen',
-            questions: [
-                {
-                    id: 'q3',
-                    question: 'What is a Hash Table?',
-                    options: ['Linear structure', 'Tree structure', 'Key-value mapping', 'Graph'],
-                    correctAnswer: 2,
-                },
-            ],
-            duration: 30,
-            myAttempts: 1,
-            maxAttempts: 3,
-            dueDate: '2026-04-10',
-            status: 'available',
-        },
-    ]);
+    const [availableQuizzes, setAvailableQuizzes] = useState<any[]>([]);
+    const [completedQuizzes, setCompletedQuizzes] = useState<any[]>([]);
 
-    const [completedQuizzes, setCompletedQuizzes] = useState([
-        {
-            id: 3,
-            title: 'Database Design Practice',
-            subject: 'CS301',
-            instructor: 'Dr. Emily Brown',
-            questions: [
-                {
-                    id: 'q4',
-                    question: 'What is normalization?',
-                    options: ['Data organization', 'Data deletion', 'Data backup', 'Data encryption'],
-                    correctAnswer: 0,
-                },
-            ],
-            duration: 45,
-            myScore: 85,
-            attempts: 2,
-            completedDate: '2026-03-25',
-            status: 'completed',
-            userAnswers: [0],
-        },
-    ]);
+    const [practiceQuizzes, setPracticeQuizzes] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
 
-    const [practiceQuizzes, setPracticeQuizzes] = useState([
-        {
-            id: 5,
-            title: 'My Practice: Sorting Algorithms',
-            subject: 'CS201',
-            questions: [
-                {
-                    id: 'q5',
-                    question: 'Which sorting algorithm has O(n log n) complexity?',
-                    options: ['Bubble Sort', 'Merge Sort', 'Selection Sort', 'Insertion Sort'],
-                    correctAnswer: 1,
-                },
-            ],
-            duration: 20,
-            myScore: 78,
-            attempts: 3,
-            createdDate: '2026-03-28',
-            type: 'practice',
-        },
-    ]);
+    const loadConnectedData = async (opts?: { quiet?: boolean }) => {
+        if (!opts?.quiet) setLoading(true);
+        try {
+            const uid = user?.user_id ?? user?.id ?? user?.userId;
+            const [docsRes, historyRes, publishedRes] = await Promise.all([
+                api.get('/documents/for-quiz'),
+                api.get('/quizzes/history', {
+                    params: {
+                        limit: 200,
+                        ...(uid != null && uid !== '' ? { userId: uid } : {}),
+                    },
+                }),
+                api.get('/quizzes/published'),
+            ]);
+
+            const rows = Array.isArray(historyRes?.data) ? historyRes.data : [];
+            const attemptsByTitle = new Map<string, number>();
+            rows.forEach((h: any) => {
+                const k = String(h?.title || '').trim().toLowerCase();
+                if (!k) return;
+                attemptsByTitle.set(k, Number(h?.attemptsCount || 0));
+            });
+
+            const docs = Array.isArray(docsRes?.data) ? docsRes.data : [];
+            const mappedAvailable = docs.map((d: any, idx: number) => ({
+                id: d?.documentId || d?.id || `doc-${idx + 1}`,
+                title: d?.title || d?.fileName || `Document ${idx + 1}`,
+                subject: d?.courseCode || d?.subjectCode || 'DOC',
+                s3Key: d?.s3Key || '',
+                instructor: 'AI Generated',
+                questions: [],
+                chunkCount: Number(d?.chunkCount || 0),
+                estimatedQuestions: Number(d?.estimatedQuestions || 0) || 5,
+                duration: 10,
+                myAttempts: Number(
+                    d?.attemptsCount ??
+                        attemptsByTitle.get(String(d?.title || d?.fileName || '').trim().toLowerCase()) ??
+                        0
+                ),
+                dueDate: 'No due date',
+                status: 'available',
+            }));
+            setAvailableQuizzes(mappedAvailable);
+            const mappedCompleted = rows.map((h: any) => ({
+                id: h?.quizId || h?.id,
+                title: h?.title || 'Quiz',
+                subject: h?.courseCode || 'DOC',
+                instructor: 'AI Generated',
+                questions: Array.from({ length: Number(h?.questionCount || 5) }).map((_, i) => ({ id: `h-q-${i}`, question: '', options: [], correctAnswer: 0 })),
+                duration: 10,
+                myScore: Number(h?.scorePercent ?? 0),
+                attempts: Number(h?.attemptsCount ?? 0),
+                completedDate: h?.lastAttemptAt || h?.createdAt || '',
+                status: 'completed',
+                userAnswers: [],
+            }));
+            setCompletedQuizzes(mappedCompleted);
+
+            const pubRows = Array.isArray(publishedRes?.data) ? publishedRes.data : [];
+            const mappedPublished = pubRows.map((h: any) => ({
+                id: h?.quizId || h?.id,
+                title: h?.title || 'Published Quiz',
+                subject: h?.courseCode || 'DOC',
+                instructor: h?.creatorName || 'Lecturer',
+                questions: [],
+                estimatedQuestions: Number(h?.questionCount || 0) || 5,
+                duration: 10,
+                attempts: Number(h?.attemptsCount ?? 0),
+                createdDate: h?.publishedAt || h?.createdAt || '',
+                status: 'published',
+            }));
+            setPracticeQuizzes(mappedPublished);
+        } catch {
+            // Do not surface connection errors in the UI; fall back to empty lists.
+            setAvailableQuizzes([]);
+            setCompletedQuizzes([]);
+            setPracticeQuizzes([]);
+        } finally {
+            if (!opts?.quiet) setLoading(false);
+        }
+    };
+
+    const historyUserKey = user?.user_id ?? user?.id ?? user?.userId;
+
+    useEffect(() => {
+        loadConnectedData();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [historyUserKey]);
+
+    const currentTabQuizzes = useMemo(() => {
+        if (activeTab === 'available') return availableQuizzes;
+        if (activeTab === 'completed') return completedQuizzes;
+        return practiceQuizzes;
+    }, [activeTab, availableQuizzes, completedQuizzes, practiceQuizzes]);
+
+    const subjectOptions = useMemo(() => {
+        const set = new Set<string>();
+        [...availableQuizzes, ...completedQuizzes, ...practiceQuizzes].forEach((q) => {
+            const s = String(q?.subject ?? '').trim();
+            if (s) set.add(s);
+        });
+        return Array.from(set).sort((a, b) => a.localeCompare(b));
+    }, [availableQuizzes, completedQuizzes, practiceQuizzes]);
+
+    useEffect(() => {
+        if (filterSubject !== 'all' && !subjectOptions.includes(filterSubject)) {
+            setFilterSubject('all');
+        }
+    }, [filterSubject, subjectOptions]);
 
     const filteredQuizzes = () => {
-        let quizzes = activeTab === 'available' ? availableQuizzes :
-            activeTab === 'completed' ? completedQuizzes : practiceQuizzes;
-
-        return quizzes.filter((quiz) => {
-            const matchesSearch = quiz.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                quiz.subject.toLowerCase().includes(searchQuery.toLowerCase());
-            const matchesSubject = filterSubject === 'all' || quiz.subject === filterSubject;
+        return currentTabQuizzes.filter((quiz) => {
+            const matchesSearch = quizMatchesSearchQuery(quiz as Record<string, unknown>, searchQuery);
+            const subj = String(quiz?.subject ?? '');
+            const matchesSubject = filterSubject === 'all' || subj === filterSubject;
             return matchesSearch && matchesSubject;
         });
     };
 
-    const startQuiz = (quiz: any) => {
-        setSelectedQuiz(quiz);
-        setCurrentQuestionIndex(0);
-        setAnswers([]);
-        setTimeRemaining(quiz.duration * 60); // Convert to seconds
-        setQuizSubmitted(false);
-        setShowQuizTaking(true);
+    const hasActiveFilters = Boolean(searchQuery.trim()) || filterSubject !== 'all';
 
-        // Start timer
-        const timer = setInterval(() => {
-            setTimeRemaining((prev) => {
-                if (prev <= 1) {
-                    clearInterval(timer);
-                    handleSubmitQuiz(true); // Auto-submit when time runs out
-                    return 0;
-                }
-                return prev - 1;
+    const safeQuizQuestions = Array.isArray(selectedQuiz?.questions) ? selectedQuiz.questions : [];
+
+    /** Each successful Take Quiz records one attempt (phase start) for accurate counts. */
+    const recordAttemptStart = async (quizId: string | number | undefined) => {
+        const id = Number(quizId);
+        if (!Number.isFinite(id) || id <= 0) return;
+        try {
+            await api.post('/quiz/attempts', {
+                quizId: id,
+                userId: user?.user_id ?? user?.id ?? user?.userId,
+                phase: 'start',
             });
-        }, 1000);
-        setTimerId(timer);
+            await loadConnectedData({ quiet: true });
+        } catch (err: unknown) {
+            const ax = err as { response?: { data?: { message?: string } } };
+            const m = ax?.response?.data?.message;
+            if (m) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Could not record attempt',
+                    message: String(m),
+                });
+            }
+        }
+    };
+
+    const startQuiz = async (quiz: any) => {
+        try {
+            if (!quiz?.s3Key && quiz?.id) {
+                const detailRes = await api.get(`/quizzes/${quiz.id}`);
+                const detail = detailRes?.data || {};
+                const questions = normalizeStoredQuestions(detail?.questions || []);
+                if (!questions.length) {
+                    showNotification({
+                        type: 'warning',
+                        title: 'Take Quiz',
+                        message: 'This quiz has no published questions yet.',
+                    });
+                    return;
+                }
+                const generatedQuiz = {
+                    ...quiz,
+                    id: detail?.quiz_id || quiz.id,
+                    title: detail?.title || quiz.title,
+                    questions,
+                };
+                await recordAttemptStart(generatedQuiz.id);
+                setSelectedQuiz(generatedQuiz);
+                setCurrentQuestionIndex(0);
+                setAnswers([]);
+                setTimeRemaining((generatedQuiz.duration || 10) * 60);
+                setQuizSubmitted(false);
+                setShowQuizTaking(true);
+                const timer = setInterval(() => {
+                    setTimeRemaining((prev) => {
+                        if (prev <= 1) {
+                            clearInterval(timer);
+                            handleSubmitQuiz(true);
+                            return 0;
+                        }
+                        return prev - 1;
+                    });
+                }, 1000);
+                setTimerId(timer);
+                return;
+            }
+
+            if (!quiz?.s3Key) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Generate Quiz',
+                    message: 'Document reference (s3Key) is missing.',
+                });
+                return;
+            }
+            setIsGeneratingQuiz(true);
+            setShowQuizTaking(false);
+            setShowResults(false);
+            setQuizSubmitted(false);
+            const res = await api.post(
+                '/quiz/generate',
+                {
+                    s3Key: quiz?.s3Key,
+                    persist: true,
+                    quizTitle: quiz?.title,
+                    numQuestions: numQuestionsForGenerate(quiz),
+                    language: 'English',
+                    createdBy: user?.user_id ?? user?.id ?? user?.userId,
+                },
+                { timeout: 180000 }
+            );
+            if (res && (res as any).success === false) {
+                setIsGeneratingQuiz(false);
+                showNotification({
+                    type: 'warning',
+                    title: 'Generate Quiz',
+                    message: String((res as any).message || 'Quiz generation failed.'),
+                });
+                return;
+            }
+            const quizData = (res as any)?.data || {};
+            const questions = normalizeQuestions(quizData.quiz || []);
+            if (!questions.length) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Generate Quiz',
+                    message: 'No question returned from AI for this document.',
+                });
+                setIsGeneratingQuiz(false);
+                return;
+            }
+            const generatedQuiz = {
+                ...quiz,
+                id: quizData.quizId || quiz.id,
+                questions,
+            };
+
+            await recordAttemptStart(generatedQuiz.id);
+            setSelectedQuiz(generatedQuiz);
+            setCurrentQuestionIndex(0);
+            setAnswers([]);
+            setTimeRemaining((generatedQuiz.duration || 10) * 60);
+            setQuizSubmitted(false);
+            setShowQuizTaking(true);
+            setIsGeneratingQuiz(false);
+
+            const timer = setInterval(() => {
+                setTimeRemaining((prev) => {
+                    if (prev <= 1) {
+                        clearInterval(timer);
+                        handleSubmitQuiz(true);
+                        return 0;
+                    }
+                    return prev - 1;
+                });
+            }, 1000);
+            setTimerId(timer);
+        } catch (err: unknown) {
+            setIsGeneratingQuiz(false);
+            const ax = err as {
+                code?: string;
+                message?: string;
+                response?: { data?: { message?: string } };
+            };
+            const backendMsg = ax?.response?.data?.message;
+            const timedOut =
+                ax?.code === 'ECONNABORTED' || String(ax?.message || '').toLowerCase().includes('timeout');
+            const message = backendMsg
+                ? String(backendMsg)
+                : timedOut
+                  ? 'Request timed out. Indexing and AI can take 1–3 minutes for large files — please try again or wait.'
+                  : 'Unable to generate quiz right now. Check backend logs, API keys (OpenRouter, Gemini), MySQL, and S3.';
+            showNotification({
+                type: 'warning',
+                title: 'Generate Quiz',
+                message,
+            });
+        }
     };
 
     // Cleanup timer on unmount
@@ -186,6 +420,14 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     };
 
     const handleSubmitQuiz = async (autoSubmit = false) => {
+        if (!selectedQuiz || !safeQuizQuestions.length) {
+            showNotification({
+                type: 'warning',
+                title: 'Submit Quiz',
+                message: 'Quiz data is not ready yet.',
+            });
+            return;
+        }
         if (!autoSubmit) {
             const confirmed = await showConfirm({
                 title: 'Submit Quiz',
@@ -206,7 +448,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
 
         // Calculate score
         let correctCount = 0;
-        const questions = selectedQuiz.questions;
+        const questions = safeQuizQuestions;
 
         questions.forEach((q: any) => {
             const userAnswer = answers.find((a) => a.questionId === q.id);
@@ -231,23 +473,14 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         setQuizSubmitted(true);
         setShowQuizTaking(false);
 
-        // Update quiz attempts and move to completed if needed
+        // Attempt was recorded on Take Quiz; submit only updates the score (backend finish).
         if (activeTab === 'available') {
-            setAvailableQuizzes((prev) =>
-                prev.map((q) =>
-                    q.id === selectedQuiz.id
-                        ? { ...q, myAttempts: q.myAttempts + 1 }
-                        : q
-                )
-            );
-
-            // Add to completed quizzes
             setCompletedQuizzes((prev) => [
                 ...prev,
                 {
                     ...selectedQuiz,
                     myScore: score,
-                    attempts: selectedQuiz.myAttempts + 1,
+                    attempts: Number(selectedQuiz.myAttempts ?? 0),
                     completedDate: result.completedDate,
                     status: 'completed',
                     userAnswers: answers.map((a) => a.selectedAnswer),
@@ -256,9 +489,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         } else if (activeTab === 'my-practice') {
             setPracticeQuizzes((prev) =>
                 prev.map((q) =>
-                    q.id === selectedQuiz.id
-                        ? { ...q, attempts: q.attempts + 1, myScore: score }
-                        : q
+                    q.id === selectedQuiz.id ? { ...q, myScore: score } : q
                 )
             );
         }
@@ -272,6 +503,18 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         });
 
         setShowResults(true);
+
+        try {
+            await api.post('/quiz/attempts', {
+                quizId: selectedQuiz.id,
+                userId: user?.user_id ?? user?.id ?? user?.userId,
+                score: correctCount,
+                phase: 'complete',
+            });
+            await loadConnectedData();
+        } catch {
+            // keep UI flow even if attempt save fails
+        }
     };
 
     const renderAvailableQuizzes = () => (
@@ -283,40 +526,28 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             <h3 className="text-gray-900 mb-2">{quiz.title}</h3>
                             <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
 
-                            {/* Kiểm tra instructor */}
                             {'instructor' in quiz && (
                                 <p className="text-gray-500 text-sm">Instructor: {quiz.instructor}</p>
                             )}
                         </div>
 
-                        {/* Kiểm tra myAttempts và maxAttempts trước khi dùng */}
-                        {'myAttempts' in quiz && 'maxAttempts' in quiz ? (
-                            <button
-                                onClick={() => startQuiz(quiz)}
-                                disabled={quiz.myAttempts >= quiz.maxAttempts}
-                                className={`flex items-center gap-2 px-6 py-2 rounded-lg transition-colors ${quiz.myAttempts >= quiz.maxAttempts
-                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                                    }`}
-                            >
-                                <Play size={20} />
-                                {quiz.myAttempts >= quiz.maxAttempts ? 'No Attempts Left' : 'Take Quiz'}
-                            </button>
-                        ) : (
-                            <button
-                                disabled
-                                className="flex items-center gap-2 px-6 py-2 rounded-lg bg-gray-300 text-gray-500 cursor-not-allowed"
-                            >
-                                <Play size={20} />
-                                Not Available
-                            </button>
-                        )}
+                        <button
+                            onClick={() => startQuiz(quiz)}
+                            className="flex items-center gap-2 px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                        >
+                            <Play size={20} />
+                            Take Quiz
+                        </button>
                     </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4 border-t border-gray-200 text-sm">
                         <div>
                             <p className="text-gray-500 mb-1">Questions</p>
-                            <p className="text-gray-900">{quiz.questions.length}</p>
+                            <p className="text-gray-900">
+                                {Array.isArray(quiz.questions) && quiz.questions.length
+                                    ? quiz.questions.length
+                                    : (Number(quiz.estimatedQuestions || 0) || 5)}
+                            </p>
                         </div>
                         <div>
                             <p className="text-gray-500 mb-1">Duration</p>
@@ -324,11 +555,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         </div>
                         <div>
                             <p className="text-gray-500 mb-1">Attempts</p>
-                            {'myAttempts' in quiz && 'maxAttempts' in quiz ? (
-                                <p className="text-gray-900">{quiz.myAttempts} / {quiz.maxAttempts}</p>
-                            ) : (
-                                <p className="text-gray-900">N/A</p>
-                            )}
+                            <p className="text-gray-900">{Number(quiz.myAttempts || 0)}</p>
                         </div>
 
                         <div>
@@ -369,14 +596,12 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             </div>
                             <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
 
-                            {/* Kiểm tra instructor */}
                             {'instructor' in quiz ? (
                                 <p className="text-gray-500 text-sm">Instructor: {quiz.instructor}</p>
                             ) : (
                                 <p className="text-gray-500 text-sm">Instructor: N/A</p>
                             )}
 
-                            {/* Kiểm tra completedDate */}
                             {'completedDate' in quiz ? (
                                 <p className="text-gray-500 text-sm">Completed: {quiz.completedDate}</p>
                             ) : (
@@ -384,21 +609,37 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             )}
                         </div>
                         <button
-                            onClick={() => {
-                                setSelectedQuiz(quiz);
+                            onClick={async () => {
+                                const score = 'myScore' in quiz ? Number(quiz.myScore || 0) : 0;
+                                const fallbackAnswers = 'userAnswers' in quiz ? quiz.userAnswers : [];
+                                let fullQuiz = quiz;
 
-                                // Chỉ truy cập myScore và userAnswers nếu tồn tại
-                                const score = 'myScore' in quiz ? quiz.myScore : 0;
-                                const answers = 'userAnswers' in quiz ? quiz.userAnswers : [];
+                                try {
+                                    if (quiz?.id != null) {
+                                        const detailRes = await api.get(`/quizzes/${quiz.id}`);
+                                        const detail = detailRes?.data || {};
+                                        const qs = normalizeStoredQuestions(detail?.questions || []);
+                                        if (qs.length) {
+                                            fullQuiz = {
+                                                ...quiz,
+                                                title: detail?.title || quiz.title,
+                                                questions: qs,
+                                            };
+                                        }
+                                    }
+                                } catch {
+                                    // fallback to summarized history data
+                                }
 
+                                const quizQuestionsLen = Array.isArray(fullQuiz.questions) ? fullQuiz.questions.length : 0;
+                                setSelectedQuiz(fullQuiz);
                                 setQuizResult({
-                                    score: score,
-                                    correctAnswers: Math.round((score / 100) * quiz.questions.length),
-                                    totalQuestions: quiz.questions.length,
-                                    timeTaken: quiz.duration - 5,
-                                    answers: answers,
+                                    score,
+                                    correctAnswers: Math.round((score / 100) * quizQuestionsLen),
+                                    totalQuestions: quizQuestionsLen,
+                                    timeTaken: Math.max(0, Number(fullQuiz.duration || 10) - 5),
+                                    answers: fallbackAnswers,
                                 });
-
                                 setShowResults(true);
                             }}
                             className="flex items-center gap-2 px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -434,8 +675,8 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     const renderPracticeQuizzes = () => (
         <div>
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
-                <p className="text-blue-800">
-                    <strong>Practice Quizzes:</strong> Create quizzes from your study materials for practice. These are for your personal use only and help you test your knowledge.
+                <p className="text-blue-800 text-sm">
+                    Quizzes shared by your instructor — pick one and tap <strong>Take Quiz</strong> to begin.
                 </p>
             </div>
 
@@ -447,12 +688,10 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                 <h3 className="text-gray-900 mb-2">{quiz.title}</h3>
                                 <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
 
-                                {/* Kiểm tra xem quiz có createdDate không */}
                                 {'createdDate' in quiz && (
                                     <p className="text-gray-500 text-sm">Created: {quiz.createdDate}</p>
                                 )}
 
-                                {/* Kiểm tra xem quiz có myScore không */}
                                 {'myScore' in quiz && quiz.myScore !== undefined && (
                                     <p className="text-gray-600 mt-2">
                                         Latest Score: <span className="text-green-600">{quiz.myScore}%</span>
@@ -464,25 +703,27 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                 className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
                             >
                                 <Play size={20} />
-                                Practice
+                                Take Quiz
                             </button>
                         </div>
 
                         <div className="grid grid-cols-3 gap-4 pt-4 border-t border-gray-200 text-sm">
                             <div>
                                 <p className="text-gray-500 mb-1">Questions</p>
-                                <p className="text-gray-900">{quiz.questions.length}</p>
+                                <p className="text-gray-900">
+                                    {Array.isArray(quiz.questions) && quiz.questions.length
+                                        ? quiz.questions.length
+                                        : (Number(quiz.estimatedQuestions || 0) || 5)}
+                                </p>
                             </div>
                             <div>
                                 <p className="text-gray-500 mb-1">Duration</p>
                                 <p className="text-gray-900">{quiz.duration} minutes</p>
                             </div>
-                            {'myAttempts' in quiz && 'maxAttempts' in quiz ? (
-                                <div>
-                                    <p className="text-gray-500 mb-1">Attempts</p>
-                                    <p className="text-gray-900">{quiz.myAttempts} / {quiz.maxAttempts}</p>
-                                </div>
-                            ) : 'N/A'}
+                            <div>
+                                <p className="text-gray-500 mb-1">Attempts</p>
+                                <p className="text-gray-900">{Number(quiz.attempts || 0)}</p>
+                            </div>
                         </div>
                     </div>
                 ))}
@@ -492,10 +733,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
 
     const renderQuizTaking = () => {
         if (!selectedQuiz || !showQuizTaking) return null;
+        if (!safeQuizQuestions.length) return null;
 
-        const currentQuestion = selectedQuiz.questions[currentQuestionIndex];
+        const safeIndex = Math.min(Math.max(0, currentQuestionIndex), safeQuizQuestions.length - 1);
+        const currentQuestion = safeQuizQuestions[safeIndex];
+        if (!currentQuestion) return null;
         const currentAnswer = answers.find((a) => a.questionId === currentQuestion.id);
-        const progress = ((currentQuestionIndex + 1) / selectedQuiz.questions.length) * 100;
+        const progress = ((safeIndex + 1) / safeQuizQuestions.length) * 100;
 
         const minutes = Math.floor(timeRemaining / 60);
         const seconds = timeRemaining % 60;
@@ -507,7 +751,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         <div className="flex items-start justify-between mb-4">
                             <div>
                                 <h2 className="mb-2">{selectedQuiz.title}</h2>
-                                <p className="text-gray-600">{selectedQuiz.questions.length} Questions • {selectedQuiz.duration} minutes</p>
+                                <p className="text-gray-600">{safeQuizQuestions.length} Questions • {selectedQuiz.duration} minutes</p>
                             </div>
                             <div className="flex items-center gap-4">
                                 <div className={`flex items-center gap-2 ${timeRemaining < 300 ? 'text-red-600' : 'text-orange-600'}`}>
@@ -547,12 +791,12 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         <div className="w-full bg-gray-200 rounded-full h-2">
                             <div className="bg-blue-600 h-2 rounded-full transition-all" style={{ width: `${progress}%` }} />
                         </div>
-                        <p className="text-sm text-gray-600 mt-2">Question {currentQuestionIndex + 1} of {selectedQuiz.questions.length}</p>
+                        <p className="text-sm text-gray-600 mt-2">Question {safeIndex + 1} of {safeQuizQuestions.length}</p>
                     </div>
 
                     <div className="p-6">
                         <div className="mb-6">
-                            <p className="text-gray-900 mb-4"><strong>Question {currentQuestionIndex + 1}:</strong> {currentQuestion.question}</p>
+                            <p className="text-gray-900 mb-4"><strong>Question {safeIndex + 1}:</strong> {currentQuestion.question}</p>
                             <div className="space-y-3">
                                 {currentQuestion.options.map((option: string, idx: number) => (
                                     <label
@@ -579,13 +823,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                     <div className="p-6 border-t border-gray-200 flex items-center justify-between">
                         <button
                             onClick={() => setCurrentQuestionIndex(Math.max(0, currentQuestionIndex - 1))}
-                            disabled={currentQuestionIndex === 0}
+                            disabled={safeIndex === 0}
                             className="px-6 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             Previous
                         </button>
                         <div className="flex items-center gap-3">
-                            {currentQuestionIndex === selectedQuiz.questions.length - 1 ? (
+                            {safeIndex === safeQuizQuestions.length - 1 ? (
                                 <button
                                     onClick={() => handleSubmitQuiz()}
                                     className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
@@ -594,12 +838,36 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                 </button>
                             ) : (
                                 <button
-                                    onClick={() => setCurrentQuestionIndex(Math.min(selectedQuiz.questions.length - 1, currentQuestionIndex + 1))}
+                                    onClick={() => setCurrentQuestionIndex(Math.min(safeQuizQuestions.length - 1, safeIndex + 1))}
                                     className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
                                 >
                                     Next
                                 </button>
                             )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const renderGeneratingModal = () => {
+        if (!isGeneratingQuiz) return null;
+        return (
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                <div className="bg-white rounded-xl max-w-lg w-full p-6 border border-gray-200">
+                    <div className="flex items-center gap-3 mb-3">
+                        <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center text-blue-700">
+                            <Play size={20} />
+                        </div>
+                        <h3 className="text-gray-900 font-semibold text-lg">Generating quiz…</h3>
+                    </div>
+                    <p className="text-gray-600">
+                        Please wait. We are indexing & generating questions based on your selected document.
+                    </p>
+                    <div className="mt-5">
+                        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                            <div className="h-2 bg-blue-600 rounded-full animate-pulse" style={{ width: '45%' }} />
                         </div>
                     </div>
                 </div>
@@ -727,6 +995,33 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     return (
         <div>
             <h2 className="mb-6">Quizzes</h2>
+            {loading && (
+                <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 text-gray-600">
+                    Preparing quiz data...
+                </div>
+            )}
+            {!loading && currentTabQuizzes.length === 0 && (
+                <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 text-gray-600">
+                    No quizzes available right now.
+                </div>
+            )}
+            {!loading &&
+                currentTabQuizzes.length > 0 &&
+                filteredQuizzes().length === 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-amber-900 flex flex-wrap items-center justify-between gap-3">
+                        <span>No quizzes match your search or subject filter.</span>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setSearchQuery('');
+                                setFilterSubject('all');
+                            }}
+                            className="px-3 py-1.5 text-sm bg-white border border-amber-300 rounded-lg hover:bg-amber-100"
+                        >
+                            Clear search & filter
+                        </button>
+                    </div>
+                )}
 
             {/* Sub-navigation */}
             <div className="bg-white rounded-lg border border-gray-200 p-2 mb-6">
@@ -759,36 +1054,55 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             }`}
                     >
                         <BarChart3 size={18} />
-                        My Practice Quizzes
+                        Published Quizzes
                     </button>
                 </div>
             </div>
 
-            {/* Filters */}
+            {/* Search & subject filter */}
             <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
+                <p className="text-sm text-gray-500 mb-3">
+                    Search by title, course code, instructor, or file name. Use multiple words to narrow results.
+                </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="relative">
                         <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
                         <input
-                            type="text"
+                            type="search"
                             placeholder="Search quizzes..."
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
+                            autoComplete="off"
                             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                         />
                     </div>
-                    <select
-                        aria-label="Filter by subject"
-                        value={filterSubject}
-                        onChange={(e) => setFilterSubject(e.target.value)}
-                        className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-                    >
-                        <option value="all">All Subjects</option>
-                        <option value="CS201">CS201</option>
-                        <option value="CS202">CS202</option>
-                        <option value="CS203">CS203</option>
-                        <option value="CS301">CS301</option>
-                    </select>
+                    <div className="flex gap-2 items-center">
+                        <select
+                            aria-label="Filter by subject"
+                            value={filterSubject}
+                            onChange={(e) => setFilterSubject(e.target.value)}
+                            className="flex-1 min-w-0 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        >
+                            <option value="all">All subjects</option>
+                            {subjectOptions.map((s) => (
+                                <option key={s} value={s}>
+                                    {s}
+                                </option>
+                            ))}
+                        </select>
+                        {hasActiveFilters && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setSearchQuery('');
+                                    setFilterSubject('all');
+                                }}
+                                className="shrink-0 px-3 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50"
+                            >
+                                Reset
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
 
@@ -798,6 +1112,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             {activeTab === 'my-practice' && renderPracticeQuizzes()}
 
             {/* Modals */}
+            {renderGeneratingModal()}
             {renderQuizTaking()}
             {renderQuizResults()}
         </div>
