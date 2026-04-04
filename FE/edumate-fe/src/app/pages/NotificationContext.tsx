@@ -137,8 +137,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
                         </div>
                         <button
                             type="button"
-                            aria-label="Đóng thông báo"
-                            title="Đóng"
+                            aria-label="Dismiss notification"
+                            title="Close"
                             onClick={() => hideNotification(notification.id)}
                             className="text-current opacity-60 hover:opacity-100 transition-opacity"
                         >

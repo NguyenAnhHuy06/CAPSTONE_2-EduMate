@@ -88,7 +88,7 @@ export function Profile({ user }: ProfileProps) {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
                             <label htmlFor="fullName" className="block mb-1 font-medium">
-                                Họ và tên
+                                Full name
                             </label>
 
                             <input
