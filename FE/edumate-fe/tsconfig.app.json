@@ -20,6 +20,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
+    "ignoreDeprecations": "6.0", // Suppress warnings about deprecated APIs in React 18
     "paths": {
       "@/*": ["src/*"]
     }
