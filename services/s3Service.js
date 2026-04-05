@@ -1,3 +1,5 @@
+// /services/s3Service.js - Dịch vụ tải lên AWS S3
+
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
 const fs = require("fs");
 const s3 = require("../config/s3");

@@ -1,16 +1,36 @@
+// server.js - Backend cho ứng dụng EduMate
+
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-const { ppid } = require("process");
 const { uploadToS3 } = require("./services/s3Service");
+const helmet = require("helmet"); // Thêm Helmet để tăng cường bảo mật HTTP headers
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
-app.use(cors());
+app.use(helmet()); // Sử dụng Helmet để bảo vệ ứng dụng khỏi một số lỗ hổng bảo mật phổ biến bằng cách thiết lập các HTTP headers phù hợp
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3001"
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error("Not allowed by CORS"));
+    }
+  }
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -36,7 +56,6 @@ const allowedMimeTypes = new Set([
   "application/vnd.ms-word.document.macroenabled.12", // .docm
   "application/vnd.openxmlformats-officedocument.wordprocessingml.template", // .dotx
   "application/vnd.ms-word.template.macroenabled.12", // .dotm
-  "application/octet-stream", // Một số máy/trình duyệt có thể gửi MIME chung kiểu này
 ]);
 
 const storage = multer.diskStorage({
@@ -72,7 +91,7 @@ function fileFilter(req, file, cb) {
   const isMimeAllowed = allowedMimeTypes.has(mimeType);
 
   if (!isExtensionAllowed || !isMimeAllowed) {
-    return cb(new Error("Chỉ chấp nhận file PDF hoặc Word (.doc, .docx, .docm, .dotx, .dotm"));
+    return cb(new Error("Chỉ chấp nhận file PDF hoặc Word (.doc, .docx, .docm, .dotx, .dotm)"));
   } else {
     cb(null, true);
   }
@@ -93,18 +112,29 @@ function isEmpty(value) {
 }
 
 function normalizeTags(tagsText) {
-  return String(tagsText).split(",").map((tag) => tag.trim()).filter(Boolean);
+  if (!tagsText) {
+    return [];
+  }
+
+  return tagsText
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
 }
 
 function deleteFileIfExists(filePath) {
   if (filePath && fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
+    try {
+      fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn("Không thể xóa file: ", e.message);
+    }
   }
 }
 
 app.get("/", (req, res) => {
   res.status(200).json({
-    sucess: true,
+    success: true,
     message: "Edumate backend is running.",
   });
 });
@@ -136,6 +166,27 @@ app.post("/api/documents/upload", upload.single("documentFile"), async (req, res
       });
     }
 
+    if (title.length > 255) {
+      return res.status(400).json({
+        success: false,
+        message: "Tiêu đề không được vượt quá 255 ký tự.",
+      });
+    }
+
+    if (subjectCode.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: "Mã môn học không được vượt quá 50 ký tự.",
+      });
+    }
+
+    if (subjectName.length > 255) {
+      return res.status(400).json({
+        success: false,
+        message: "Tên môn học không được vượt quá 255 ký tự.",
+      });
+    }
+
     // 👉 Upload lên S3
     const s3Url = await uploadToS3(req.file);
 
@@ -162,18 +213,23 @@ app.post("/api/documents/upload", upload.single("documentFile"), async (req, res
       recentUploads.pop();
     }
 
-    return res.status(200).json({
+    return res.status(201).json({
       success: true,
       message: "Upload lên S3 thành công!",
       data: newDocument,
     });
 
   } catch (err) {
+    if (req.file && req.file.path) {
+      deleteFileIfExists(req.file.path);
+    }
+
     console.error(err);
+
     return res.status(500).json({
       success: false,
-      message: err.message,
-    });
+      message: err.message || "Đã xảy ra lỗi trong quá trình upload tài liệu.",
+    })
   }
 });
 

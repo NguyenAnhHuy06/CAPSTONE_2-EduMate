@@ -1,3 +1,5 @@
+// /config/s3.js - Cấu hình AWS S3 cho ứng dụng EduMate
+
 const { S3Client } = require("@aws-sdk/client-s3");
 require("dotenv").config();
 
