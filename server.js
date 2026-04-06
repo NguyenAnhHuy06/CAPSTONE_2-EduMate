@@ -1,45 +1,13 @@
-// server.js - Backend cho ứng dụng EduMate
+// server.js - EduMate backend
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
-const helmet = require("helmet"); // Thêm Helmet để tăng cường bảo mật HTTP headers
+const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { fileTypeFromBuffer } = require("file-type");
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
-
-app.use(helmet()); // Sử dụng Helmet để bảo vệ ứng dụng khỏi một số lỗ hổng bảo mật phổ biến bằng cách thiết lập các HTTP headers phù hợp
-
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 phút
-  max: 100, // tối đa 100 request/IP
-  message: {
-    success: false,
-    message: "Too many requests, vui lòng thử lại sau."
-  }
-}));
-
-const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:3001"
-];
-
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    } else {
-      return callback(new Error("Not allowed by CORS"));
-    }
-  }
-}));
 
 const { generateQuizWithAI } = require("./generateQuizWithAI");
 const { getQuiz } = require("./quizService");
@@ -47,7 +15,6 @@ const s3 = require("./s3Upload");
 const db = require("./db");
 const { ensureIndexedForQuiz } = require("./documentPipeline");
 
-<<<<<<< HEAD
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -56,6 +23,20 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const MSG_UNAVAILABLE = "This feature is temporarily unavailable.";
 const MSG_TRY_AGAIN = "This action could not be completed. Please try again later.";
 const MSG_DATA_UNAVAILABLE = "Data is temporarily unavailable.";
+const S3_LECTURE_QUIZ_PREFIX =
+  (process.env.S3_LECTURE_QUIZ_PREFIX && String(process.env.S3_LECTURE_QUIZ_PREFIX).trim()) ||
+  "lecture quiz/";
+
+app.use(helmet());
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, message: MSG_TRY_AGAIN },
+  })
+);
 
 app.use(
   cors({
@@ -65,8 +46,6 @@ app.use(
     optionsSuccessStatus: 204,
   })
 );
-=======
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
@@ -86,10 +65,7 @@ const allowedMimeTypes = new Set([
   "application/vnd.ms-word.document.macroenabled.12", // .docm
   "application/vnd.openxmlformats-officedocument.wordprocessingml.template", // .dotx
   "application/vnd.ms-word.template.macroenabled.12", // .dotm
-<<<<<<< HEAD
   "application/octet-stream", // Some clients send a generic binary MIME type
-=======
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
 ]);
 
 const storage = multer.memoryStorage();
@@ -177,6 +153,79 @@ function isAllowedQuizExt(filename) {
   return S3_LIST_EXTENSIONS.has(path.extname(filename || "").toLowerCase());
 }
 
+function publishedQuizPrefix() {
+  const p = process.env.S3_PUBLISHED_QUIZ_PREFIX;
+  if (p && String(p).trim()) {
+    const s = String(p).trim();
+    return s.endsWith("/") ? s : `${s}/`;
+  }
+  return "lecture-quiz/";
+}
+
+function buildPublishedQuizKey(quizId) {
+  return `${publishedQuizPrefix()}quiz-${Number(quizId)}.json`;
+}
+
+async function savePublishedQuizToS3(quizRow) {
+  if (!s3.isS3Configured()) return null;
+  const qid = Number(quizRow?.quiz_id ?? quizRow?.quizId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  const qs = Array.isArray(quizRow?.questions) ? quizRow.questions : [];
+  const payload = {
+    quizId: qid,
+    title: String(quizRow?.title || "Published Quiz"),
+    courseCode: String(quizRow?.course_code || quizRow?.courseCode || "DOC"),
+    questionCount: qs.length,
+    attemptsCount: Number(quizRow?.attempts_count || 0),
+    creatorName: String(quizRow?.creator_name || quizRow?.creatorName || "Lecturer"),
+    publishedAt: quizRow?.published_at || quizRow?.publishedAt || new Date().toISOString(),
+    createdAt: quizRow?.created_at || quizRow?.createdAt || new Date().toISOString(),
+    // Keep quiz payload for future consumption if needed by FE.
+    questions: qs,
+  };
+  const key = buildPublishedQuizKey(qid);
+  await s3.putJsonObject({ key, value: payload });
+  return key;
+}
+
+async function listPublishedQuizzesFromS3(limit = 20) {
+  const lim = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  if (!s3.isS3Configured()) return [];
+  const objects = await s3.listDocuments({ prefix: publishedQuizPrefix(), maxKeys: lim * 5 });
+  const prefix = publishedQuizPrefix();
+  const quizJsonObjects = objects
+    .filter((o) => String(o?.key || "").startsWith(prefix) && /\.json$/i.test(String(o?.key || "")))
+    .sort((a, b) => {
+      const ta = new Date(a?.lastModified || 0).getTime();
+      const tb = new Date(b?.lastModified || 0).getTime();
+      return tb - ta;
+    })
+    .slice(0, lim);
+
+  const out = [];
+  for (const obj of quizJsonObjects) {
+    try {
+      const got = await s3.getObjectBuffer(obj.key);
+      const raw = String(got?.buffer || "").trim();
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      out.push({
+        quizId: Number(parsed?.quizId || 0),
+        title: String(parsed?.title || "Published Quiz"),
+        courseCode: String(parsed?.courseCode || "DOC"),
+        questionCount: Number(parsed?.questionCount || 0),
+        attemptsCount: Number(parsed?.attemptsCount || 0),
+        creatorName: String(parsed?.creatorName || "Lecturer"),
+        publishedAt: parsed?.publishedAt || obj?.lastModified || null,
+        createdAt: parsed?.createdAt || obj?.lastModified || null,
+      });
+    } catch (e) {
+      console.warn("[published-quiz] skip invalid object:", obj?.key, e?.message || "");
+    }
+  }
+  return out.filter((q) => Number.isFinite(q.quizId) && q.quizId > 0);
+}
+
 async function listS3DocsForQuiz() {
   const timeoutMs = Number(process.env.S3_LIST_TIMEOUT_MS || 4500);
   const maxKeys = Math.min(
@@ -192,17 +241,9 @@ async function listS3DocsForQuiz() {
     ]);
 
   try {
-<<<<<<< HEAD
     // List entire bucket (empty prefix).
     const rows = await withTimeout(s3.listDocuments({ prefix: "", maxKeys }));
-=======
-    // Luôn lấy toàn bộ bucket cloud theo yêu cầu (prefix rỗng).
-    const rows = await withTimeout(
-      s3.listDocuments({ prefix: "", maxKeys })
-    );
-
     if (!Array.isArray(rows)) return [];
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
     const filtered = rows.filter((o) => isAllowedQuizExt(o.key));
     return filtered;
   } catch (err) {
@@ -223,9 +264,7 @@ async function buildDocumentsForQuizList() {
 
   let metaMap = new Map();
   if (db.isConfigured()) {
-    if (db.isConfigured() && keys.length) {
-      metaMap = await db.getMetaMapForS3Keys(keys);
-    }
+    if (keys.length) metaMap = await db.getMetaMapForS3Keys(keys);
   }
 
   let attemptByKey = new Map();
@@ -589,7 +628,7 @@ app.post("/api/quiz/generate", handleQuizGenerate);
 
 app.get("/api/quizzes/published", async (req, res) => {
   try {
-    if (!db.isConfigured()) {
+    if (!s3.isS3Configured()) {
       return res.status(200).json({
         success: true,
         data: [],
@@ -597,7 +636,7 @@ app.get("/api/quizzes/published", async (req, res) => {
       });
     }
     const limit = req.query.limit;
-    const data = await db.listPublishedQuizzes(limit);
+    const data = await listPublishedQuizzesFromS3(limit);
     return res.status(200).json({ success: true, data });
   } catch (err) {
     console.error("[api/quizzes/published]", err);
@@ -656,6 +695,11 @@ app.post("/api/quizzes/:id/publish", async (req, res) => {
     }
     await db.setQuizPublished(quizId, true);
     const row = await db.getQuizWithQuestions(quizId);
+    try {
+      await savePublishedQuizToS3(row);
+    } catch (e) {
+      console.error("[publish->s3]", e);
+    }
     return res.status(200).json({ success: true, data: row });
   } catch (err) {
     console.error("[api/quizzes/:id/publish]", err);
@@ -815,11 +859,7 @@ app.get("/api/documents/recent", async (req, res) => {
         success: true,
         total: 0,
         data: [],
-<<<<<<< HEAD
         message: MSG_DATA_UNAVAILABLE,
-=======
-        message: "MySQL chưa cấu hình.",
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
       });
     }
 
@@ -832,20 +872,12 @@ app.get("/api/documents/recent", async (req, res) => {
       data,
     });
   } catch (err) {
-<<<<<<< HEAD
     console.error("[api/documents/recent]", err);
     return res.status(200).json({
       success: true,
       total: 0,
       data: [],
       message: "Document list is temporarily unavailable.",
-=======
-    console.error(err);
-
-    return res.status(500).json({
-      success: false,
-      message: err.message || "Lỗi đọc MySQL.",
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
     });
   }
 });
@@ -864,20 +896,12 @@ app.use((err, req, res, next) => {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(400).json({
         success: false,
-<<<<<<< HEAD
         message: "File exceeds 10MB. Please choose a smaller file.",
-=======
-        message: "Kích cỡ file vượt quá 10MB."
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
       });
     }
     return res.status(400).json({
       success: false,
-<<<<<<< HEAD
       message: MSG_TRY_AGAIN,
-=======
-      message: err.message
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
     });
   }
 
@@ -885,11 +909,7 @@ app.use((err, req, res, next) => {
 
   return res.status(status).json({
     success: false,
-<<<<<<< HEAD
     message: MSG_TRY_AGAIN,
-=======
-    message: err.message || "Internal server error"
->>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
   });
 });
 

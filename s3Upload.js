@@ -145,6 +145,24 @@ async function getObjectBuffer(key) {
   };
 }
 
+async function putJsonObject({ key, value }) {
+  if (!key || String(key).includes("..")) {
+    throw new Error("Invalid S3 key.");
+  }
+  const client = getClient();
+  const bucket = getBucket();
+  const body = Buffer.from(JSON.stringify(value ?? null));
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: "application/json",
+    })
+  );
+  return { bucket, key, url: buildObjectPublicUrl(key) };
+}
+
 module.exports = {
   isS3Configured,
   uploadDocumentBuffer,
@@ -154,4 +172,5 @@ module.exports = {
   listDocuments,
   getObjectBuffer,
   documentsPrefix,
+  putJsonObject,
 };
