@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-chat";
 
-/** Trần token cho quiz; mặc định cao hơn 600 để JSON nhiều câu không bị cắt giữa chừng. */
+/** Quiz output token cap; default above 600 so multi-question JSON is not truncated mid-stream. */
 function computeQuizMaxTokens(qCount) {
   const cap = Math.min(
     8192,
@@ -16,7 +16,7 @@ function computeQuizMaxTokens(qCount) {
 
 function ensureEnv(name) {
   const v = process.env[name];
-  if (!v || !String(v).trim()) throw new Error(`Thiếu ${name}.`);
+  if (!v || !String(v).trim()) throw new Error(`Missing ${name}.`);
   return String(v).trim();
 }
 
@@ -39,7 +39,7 @@ async function callOpenRouterWithRetry(payload, maxRetries = 3) {
       });
       if (!resp.ok) {
         const text = await resp.text();
-        const err = new Error(`OpenRouter lỗi HTTP ${resp.status}${text ? `: ${text}` : ""}`);
+        const err = new Error(`OpenRouter HTTP ${resp.status}${text ? `: ${text}` : ""}`);
         err.status = resp.status;
         throw err;
       }
@@ -54,7 +54,7 @@ async function callOpenRouterWithRetry(payload, maxRetries = 3) {
   throw lastErr;
 }
 
-/** OpenRouter / một số model trả content là string hoặc mảng chunk { type, text }. */
+/** OpenRouter / some models return content as a string or chunk array { type, text }. */
 function getAssistantMessageText(choice) {
   const msg = choice?.message;
   if (!msg) return "";
@@ -82,13 +82,13 @@ function tryParseJson(s) {
   }
 }
 
-/** Thay dấu ngoặc kép “thông minh” hay gặp trong output LLM. */
+/** Replace smart quotes often seen in LLM output. */
 function normalizeQuizJsonQuotes(s) {
   return String(s).replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"');
 }
 
 /**
- * Cắt một giá trị JSON (object hoặc array) cân bằng từ vị trí mở đầu tiên { hoặc [.
+ * Slice one balanced JSON value (object or array) from the first { or [.
  */
 function sliceFirstBalancedJson(raw) {
   const t = normalizeQuizJsonQuotes(String(raw ?? "").replace(/^\uFEFF/, ""));
@@ -124,7 +124,7 @@ function sliceFirstBalancedJson(raw) {
 }
 
 /**
- * Model đôi khi trả JSON kèm markdown ```json ... ```, text trước/sau, hoặc array gốc [...].
+ * Models may return JSON with markdown ```json ... ```, surrounding text, or a root [...] array.
  */
 function tryParseQuizJsonObject(content) {
   let raw = String(content ?? "").replace(/^\uFEFF/, "").trim();
@@ -162,7 +162,7 @@ function tryParseQuizJsonObject(content) {
 }
 
 function parseQuizResponse(content) {
-  if (!content) throw new Error("AI không trả nội dung.");
+  if (!content) throw new Error("AI returned no content.");
   if (String(content).trim() === "Not enough information") return [];
 
   const parsed = tryParseQuizJsonObject(content);
@@ -170,7 +170,7 @@ function parseQuizResponse(content) {
     const preview = String(content).replace(/\s+/g, " ").slice(0, 280);
     console.warn("[quiz] JSON parse failed, preview:", preview);
     throw new Error(
-      "Không parse được JSON quiz (có thể output bị cắt — tăng QUIZ_MAX_TOKENS hoặc giảm số câu)."
+      "Could not parse quiz JSON (output may be truncated — increase QUIZ_MAX_TOKENS or reduce question count)."
     );
   }
 

@@ -16,6 +16,11 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
+/** Client-facing copy only — never include stack traces, SQL, or infra names. */
+const MSG_UNAVAILABLE = "This feature is temporarily unavailable.";
+const MSG_TRY_AGAIN = "This action could not be completed. Please try again later.";
+const MSG_DATA_UNAVAILABLE = "Data is temporarily unavailable.";
+
 app.use(
   cors({
     origin: true,
@@ -43,7 +48,7 @@ const allowedMimeTypes = new Set([
   "application/vnd.ms-word.document.macroenabled.12", // .docm
   "application/vnd.openxmlformats-officedocument.wordprocessingml.template", // .dotx
   "application/vnd.ms-word.template.macroenabled.12", // .dotm
-  "application/octet-stream", // Một số máy/trình duyệt có thể gửi MIME chung kiểu này
+  "application/octet-stream", // Some clients send a generic binary MIME type
 ]);
 
 const storage = multer.memoryStorage();
@@ -57,7 +62,9 @@ function fileFilter(req, file, cb) {
   const isMimeAllowed = allowedMimeTypes.has(mimeType);
 
   if (!isExtensionAllowed || !isMimeAllowed) {
-    return cb(new Error("Chỉ chấp nhận file PDF hoặc Word (.doc, .docx, .docm, .dotx, .dotm)"));
+    return cb(
+      new Error("Only PDF or Word files are allowed (.doc, .docx, .docm, .dotx, .dotm)")
+    );
   }
   cb(null, true);
 }
@@ -136,7 +143,7 @@ async function listS3DocsForQuiz() {
     ]);
 
   try {
-    // Luôn lấy toàn bộ bucket cloud theo yêu cầu (prefix rỗng).
+    // List entire bucket (empty prefix).
     const rows = await withTimeout(s3.listDocuments({ prefix: "", maxKeys }));
     const filtered = rows.filter((o) => isAllowedQuizExt(o.key));
     return filtered;
@@ -147,11 +154,11 @@ async function listS3DocsForQuiz() {
 }
 
 /**
- * Tất cả file PDF/Word trên toàn bucket S3, ghép metadata + số chunk từ MySQL.
+ * All PDF/Word objects in the S3 bucket, merged with MySQL metadata and chunk counts.
  */
 async function buildDocumentsForQuizList() {
   if (!s3.isS3Configured()) {
-    throw new Error("S3 chưa cấu hình.");
+    throw new Error("S3 is not configured.");
   }
   const filtered = await listS3DocsForQuiz();
   const keys = filtered.map((o) => o.key);
@@ -213,12 +220,70 @@ app.get("/api/documents/for-quiz", async (req, res) => {
     const data = await buildDocumentsForQuizList();
     return res.status(200).json({ success: true, data });
   } catch (err) {
-    // Không phơi lỗi nội bộ ra FE khi load danh sách.
+    // Do not expose internal errors to the client when loading the list.
     console.error(err);
     return res.status(200).json({
       success: true,
       data: [],
-      message: "Danh sách tài liệu đang tạm thời chưa sẵn sàng.",
+      message: "Document list is temporarily unavailable.",
+    });
+  }
+});
+
+app.get("/api/progress/summary", async (req, res) => {
+  try {
+    const emptyProgressPayload = () => ({
+      overall: {
+        progressPercent: 0,
+        completedMaterials: 0,
+        totalMaterials: 0,
+        averageScorePercent: null,
+        studyHoursLabel: null,
+      },
+      courses: [],
+      streak: { currentDays: 0, longestDays: 0 },
+    });
+
+    if (!db.isConfigured()) {
+      return res.status(200).json({
+        success: true,
+        data: emptyProgressPayload(),
+        message: "Learning progress is temporarily unavailable.",
+      });
+    }
+    const rawUid =
+      req.query.userId ??
+      req.query.user_id ??
+      (process.env.DEFAULT_QUIZ_USER_ID != null && String(process.env.DEFAULT_QUIZ_USER_ID).trim() !== ""
+        ? process.env.DEFAULT_QUIZ_USER_ID
+        : null);
+    const userId =
+      rawUid != null && String(rawUid).trim() !== "" ? Number(String(rawUid).trim()) : null;
+    if (userId == null || Number.isNaN(userId)) {
+      return res.status(200).json({
+        success: true,
+        data: emptyProgressPayload(),
+        message: "Learning progress is temporarily unavailable.",
+      });
+    }
+    const data = await db.getLearningProgressSummary(userId);
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error("[api/progress/summary]", err);
+    return res.status(200).json({
+      success: true,
+      data: {
+        overall: {
+          progressPercent: 0,
+          completedMaterials: 0,
+          totalMaterials: 0,
+          averageScorePercent: null,
+          studyHoursLabel: null,
+        },
+        courses: [],
+        streak: { currentDays: 0, longestDays: 0 },
+      },
+      message: "Learning progress is temporarily unavailable.",
     });
   }
 });
@@ -229,7 +294,7 @@ app.get("/api/quizzes/history", async (req, res) => {
       return res.status(200).json({
         success: true,
         data: [],
-        message: "MySQL chưa cấu hình.",
+        message: MSG_DATA_UNAVAILABLE,
       });
     }
     const limit = req.query.limit;
@@ -237,10 +302,11 @@ app.get("/api/quizzes/history", async (req, res) => {
     const data = await db.listQuizHistory(limit, userId);
     return res.status(200).json({ success: true, data });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      message: err.message || "Không đọc được lịch sử quiz.",
+    console.error("[api/quizzes/history]", err);
+    return res.status(200).json({
+      success: true,
+      data: [],
+      message: "Quiz history is temporarily unavailable.",
     });
   }
 });
@@ -250,7 +316,7 @@ app.post("/api/quiz/attempts", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(503).json({
         success: false,
-        message: "MySQL chưa cấu hình.",
+        message: MSG_UNAVAILABLE,
       });
     }
     const quizId = req.body.quizId ?? req.body.quiz_id;
@@ -264,7 +330,7 @@ app.post("/api/quiz/attempts", async (req, res) => {
 
     if (phase === "start") {
       await db.startQuizAttempt({ quizId, userId });
-      return res.status(201).json({ success: true, message: "Đã ghi lượt bắt đầu làm bài." });
+      return res.status(201).json({ success: true, message: "Attempt start recorded." });
     }
 
     const score = req.body.score ?? req.body.correctCount ?? req.body.correct;
@@ -274,12 +340,12 @@ app.post("/api/quiz/attempts", async (req, res) => {
       score,
       completedAt: req.body.completedAt,
     });
-    return res.status(201).json({ success: true, message: "Đã lưu kết quả lượt làm bài." });
+    return res.status(201).json({ success: true, message: "Attempt result saved." });
   } catch (err) {
-    console.error(err);
+    console.error("[api/quiz/attempts]", err);
     return res.status(400).json({
       success: false,
-      message: err.message || "Không lưu được kết quả.",
+      message: MSG_TRY_AGAIN,
     });
   }
 });
@@ -289,7 +355,7 @@ app.get("/api/s3/documents", async (req, res) => {
     if (!s3.isS3Configured()) {
       return res.status(503).json({
         success: false,
-        message: "S3 chưa cấu hình (.env: AWS_REGION, keys, S3_BUCKET).",
+        message: MSG_UNAVAILABLE,
       });
     }
     const rows = await listS3DocsForQuiz();
@@ -308,12 +374,12 @@ app.get("/api/s3/documents", async (req, res) => {
       });
     return res.status(200).json({ success: true, data });
   } catch (err) {
-    // Không phơi lỗi nội bộ ra FE khi load danh sách.
+    // Do not expose internal errors to the client when loading the list.
     console.error(err);
     return res.status(200).json({
       success: true,
       data: [],
-      message: "Danh sách S3 đang tạm thời chưa sẵn sàng.",
+      message: "S3 list is temporarily unavailable.",
     });
   }
 });
@@ -345,20 +411,19 @@ async function handleQuizGenerate(req, res) {
     if (!s3Key) {
       return res.status(400).json({
         success: false,
-        message: "Thiếu s3Key. RAG pipeline yêu cầu truy xuất từ vector DB trước khi tạo quiz.",
+        message: "Please provide a document reference.",
       });
     }
     if (!s3.isS3Configured()) {
       return res.status(503).json({
         success: false,
-        message: "S3 chưa cấu hình.",
+        message: MSG_UNAVAILABLE,
       });
     }
     if (!db.isConfigured()) {
       return res.status(503).json({
         success: false,
-        message:
-          "MySQL chưa cấu hình — cần database để lưu embedding rồi mới tạo quiz.",
+        message: MSG_UNAVAILABLE,
       });
     }
 
@@ -366,10 +431,10 @@ async function handleQuizGenerate(req, res) {
       const idx = await ensureIndexedForQuiz(s3Key, { reindex });
       req._quizIndexMeta = idx;
     } catch (e) {
-      console.error(e);
+      console.error("[ensureIndexedForQuiz]", e);
       return res.status(400).json({
         success: false,
-        message: e.message || "Lỗi tải S3 / embedding / MySQL.",
+        message: MSG_TRY_AGAIN,
       });
     }
 
@@ -401,11 +466,11 @@ async function handleQuizGenerate(req, res) {
       if (!db.isConfigured()) {
         return res.status(503).json({
           success: false,
-          message: "MySQL chưa cấu hình — không lưu được quiz.",
+          message: MSG_TRY_AGAIN,
         });
       }
       const quizTitle =
-        String(req.body.quizTitle || req.body.title || "").trim() || "Quiz từ AI";
+        String(req.body.quizTitle || req.body.title || "").trim() || "AI-generated quiz";
       const courseId = req.body.courseId ?? req.body.course_id;
       const createdBy = req.body.createdBy ?? req.body.created_by ?? req.body.userId;
       const idxMeta = req._quizIndexMeta || {};
@@ -435,24 +500,24 @@ async function handleQuizGenerate(req, res) {
     if (status === 401 || code === "invalid_api_key" || msg.includes("api key")) {
       return res.status(502).json({
         success: false,
-        message: "API key AI không hợp lệ hoặc hết hạn.",
+        message: MSG_TRY_AGAIN,
       });
     }
     if (msg.includes("insufficient_quota") || msg.includes("quota")) {
       return res.status(402).json({
         success: false,
-        message: "AI provider báo hết quota. Vui lòng kiểm tra billing.",
+        message: MSG_TRY_AGAIN,
       });
     }
     if (status === 429 || code === "rate_limit_exceeded" || msg.includes("rate limit")) {
       return res.status(429).json({
         success: false,
-        message: "AI provider rate limit — vui lòng thử lại sau.",
+        message: MSG_TRY_AGAIN,
       });
     }
     return res.status(500).json({
       success: false,
-      message: err.message || "Không tạo được quiz.",
+      message: MSG_TRY_AGAIN,
     });
   }
 }
@@ -466,18 +531,18 @@ app.get("/api/quizzes/published", async (req, res) => {
       return res.status(200).json({
         success: true,
         data: [],
-        message: "MySQL chưa cấu hình.",
+        message: MSG_DATA_UNAVAILABLE,
       });
     }
     const limit = req.query.limit;
     const data = await db.listPublishedQuizzes(limit);
     return res.status(200).json({ success: true, data });
   } catch (err) {
-    console.error(err);
+    console.error("[api/quizzes/published]", err);
     return res.status(200).json({
       success: true,
       data: [],
-      message: "Danh sách quiz công bố tạm thời chưa sẵn sàng.",
+      message: "Published quiz list is temporarily unavailable.",
     });
   }
 });
@@ -485,7 +550,7 @@ app.get("/api/quizzes/published", async (req, res) => {
 app.patch("/api/quizzes/:id", async (req, res) => {
   try {
     if (!db.isConfigured()) {
-      return res.status(503).json({ success: false, message: "MySQL chưa cấu hình." });
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
     const quizId = req.params.id;
     const userId = req.body.userId ?? req.body.user_id;
@@ -493,7 +558,7 @@ app.patch("/api/quizzes/:id", async (req, res) => {
     if (!ok) {
       return res.status(403).json({
         success: false,
-        message: "Chỉ giảng viên (chủ sở hữu quiz) mới chỉnh sửa được.",
+        message: "You do not have permission to edit this quiz.",
       });
     }
     if (req.body.title != null && String(req.body.title).trim()) {
@@ -505,10 +570,10 @@ app.patch("/api/quizzes/:id", async (req, res) => {
     const row = await db.getQuizWithQuestions(quizId);
     return res.status(200).json({ success: true, data: row });
   } catch (err) {
-    console.error(err);
+    console.error("[api/quizzes PATCH]", err);
     return res.status(400).json({
       success: false,
-      message: err.message || "Không cập nhật được quiz.",
+      message: MSG_TRY_AGAIN,
     });
   }
 });
@@ -516,7 +581,7 @@ app.patch("/api/quizzes/:id", async (req, res) => {
 app.post("/api/quizzes/:id/publish", async (req, res) => {
   try {
     if (!db.isConfigured()) {
-      return res.status(503).json({ success: false, message: "MySQL chưa cấu hình." });
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
     const quizId = req.params.id;
     const userId = req.body.userId ?? req.body.user_id;
@@ -524,17 +589,17 @@ app.post("/api/quizzes/:id/publish", async (req, res) => {
     if (!ok) {
       return res.status(403).json({
         success: false,
-        message: "Chỉ giảng viên (chủ sở hữu quiz) mới công bố được.",
+        message: "You do not have permission to publish this quiz.",
       });
     }
     await db.setQuizPublished(quizId, true);
     const row = await db.getQuizWithQuestions(quizId);
     return res.status(200).json({ success: true, data: row });
   } catch (err) {
-    console.error(err);
+    console.error("[api/quizzes/:id/publish]", err);
     return res.status(400).json({
       success: false,
-      message: err.message || "Không công bố được quiz.",
+      message: MSG_TRY_AGAIN,
     });
   }
 });
@@ -544,12 +609,12 @@ app.get("/api/quizzes/:id", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(503).json({
         success: false,
-        message: "MySQL chưa cấu hình.",
+        message: MSG_UNAVAILABLE,
       });
     }
     const row = await db.getQuizWithQuestions(req.params.id);
     if (!row) {
-      return res.status(404).json({ success: false, message: "Không tìm thấy quiz." });
+      return res.status(404).json({ success: false, message: "Quiz not found." });
     }
     const viewerId =
       req.query.userId ?? req.query.user_id ?? req.query.viewerUserId ?? req.query.viewer_user_id;
@@ -557,15 +622,15 @@ app.get("/api/quizzes/:id", async (req, res) => {
     if (!db.quizRowIsPublished(row) && !canManage) {
       return res.status(404).json({
         success: false,
-        message: "Quiz chưa được công bố hoặc không tồn tại.",
+        message: "Quiz is not published or does not exist.",
       });
     }
     return res.status(200).json({ success: true, data: row });
   } catch (err) {
-    console.error(err);
+    console.error("[api/quizzes/:id]", err);
     return res.status(500).json({
       success: false,
-      message: err.message || "Lỗi đọc quiz.",
+      message: MSG_TRY_AGAIN,
     });
   }
 });
@@ -589,15 +654,14 @@ app.post(
       if (!s3.isS3Configured()) {
         return res.status(503).json({
           success: false,
-          message:
-            "Bắt buộc cấu hình S3 (AWS_*, S3_BUCKET). Hệ thống không lưu file local.",
+          message: MSG_UNAVAILABLE,
         });
       }
 
       if (!req.file || !req.file.buffer) {
         return res.status(400).json({
           success: false,
-          message: "Bạn chưa chọn file tài liệu.",
+          message: "No document file was selected.",
         });
       }
 
@@ -610,7 +674,7 @@ app.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: "Vui lòng nhập đầy đủ các trường bắt buộc.",
+          message: "Please fill in all required fields.",
         });
       }
 
@@ -628,13 +692,9 @@ app.post(
         uploaderId,
       };
 
-      let dbNote = "";
       let documentId = null;
       if (db.isConfigured()) {
         documentId = await db.upsertDocument(row);
-        dbNote = " Đã ghi vào bảng documents (MySQL).";
-      } else {
-        dbNote = " (MySQL chưa cấu hình — bật MYSQL_* để lưu documents + segment khi tạo quiz.)";
       }
 
       const newDocument = {
@@ -660,14 +720,14 @@ app.post(
 
       return res.status(201).json({
         success: true,
-        message: `Đã upload lên S3.${dbNote}`,
+        message: "Upload completed successfully.",
         data: newDocument,
       });
     } catch (err) {
-      console.error(err);
+      console.error("[api/documents/upload]", err);
       return res.status(500).json({
         success: false,
-        message: err.message || "Lỗi khi upload file.",
+        message: MSG_TRY_AGAIN,
       });
     }
   }
@@ -684,7 +744,7 @@ app.get("/api/documents/recent", async (req, res) => {
         success: true,
         total: 0,
         data: [],
-        message: "MySQL chưa cấu hình — chưa có danh sách từ database.",
+        message: MSG_DATA_UNAVAILABLE,
       });
     }
     const rows = await db.listDocumentsRecent(limit);
@@ -695,10 +755,12 @@ app.get("/api/documents/recent", async (req, res) => {
       data,
     });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      message: err.message || "Lỗi đọc MySQL.",
+    console.error("[api/documents/recent]", err);
+    return res.status(200).json({
+      success: true,
+      total: 0,
+      data: [],
+      message: "Document list is temporarily unavailable.",
     });
   }
 });
@@ -706,7 +768,7 @@ app.get("/api/documents/recent", async (req, res) => {
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: "Không tìm thấy API bạn yêu cầu."
+    message: "API endpoint not found.",
   });
 });
 
@@ -715,34 +777,34 @@ app.use((err, req, res, next) => {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(400).json({
         success: false,
-        message: "Kích cỡ file vượt quá 10MB. Vui lòng chọn file nhỏ hơn (< 10MB)."
+        message: "File exceeds 10MB. Please choose a smaller file.",
       });
     }
     return res.status(400).json({
       success: false,
-      message: err.message || "Lỗi upload file."
+      message: MSG_TRY_AGAIN,
     });
   }
   return res.status(400).json({
     success: false,
-    message: err.message || "Lỗi upload file."
+    message: MSG_TRY_AGAIN,
   });
 });
 
 async function start() {
   if (!s3.isS3Configured()) {
-    console.warn("S3 chưa cấu hình — upload và quiz từ S3 sẽ không chạy.");
+    console.warn("S3 is not configured — upload and S3-based quiz will not run.");
   } else {
     console.log(`S3: bucket "${s3.getBucket()}" (${process.env.AWS_REGION}).`);
   }
   if (db.isConfigured()) {
     await db.initDb();
-    console.log("MySQL: dùng schema documents + document_segments (+ quizzes nếu lưu quiz).");
+    console.log("MySQL: using documents + document_segments (+ quizzes when persisted).");
   } else {
-    console.warn("MySQL chưa cấu hình — quiz từ s3Key + embedding sẽ không chạy.");
+    console.warn("MySQL is not configured — s3Key + embedding quiz flow will not run.");
   }
   app.listen(PORT, () => {
-    console.log(`Server đang chạy tại http://localhost:${PORT}`);
+    console.log(`Server listening at http://localhost:${PORT}`);
   });
 }
 

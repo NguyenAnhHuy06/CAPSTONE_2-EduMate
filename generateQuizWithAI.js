@@ -1,7 +1,7 @@
 const { generateQuiz } = require("./quizService");
 
 /**
- * Wrapper giữ tương thích tên hàm cũ.
+ * Wrapper keeping the legacy function name.
  * @returns {Promise<{ questions: Array, targetCount: number }>}
  */
 async function generateQuizWithAI(params) {

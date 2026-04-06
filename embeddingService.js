@@ -20,7 +20,7 @@ const limit = pLimit(EMBED_CONCURRENCY);
 function ensureEnv(name) {
   const v = process.env[name];
   if (!v || !String(v).trim()) {
-    throw new Error(`Thiếu ${name}.`);
+    throw new Error(`Missing ${name}.`);
   }
   return String(v).trim();
 }
@@ -104,7 +104,7 @@ async function requestEmbeddingOnce(model, text, key) {
   });
   if (!resp.ok) {
     const detail = await resp.text();
-    const err = new Error(`Gemini embedding lỗi HTTP ${resp.status}${detail ? `: ${detail}` : ""}`);
+    const err = new Error(`Gemini embedding HTTP ${resp.status}${detail ? `: ${detail}` : ""}`);
     err.status = resp.status;
     err.detail = detail;
     throw err;
@@ -112,7 +112,7 @@ async function requestEmbeddingOnce(model, text, key) {
   const data = await resp.json();
   const values = data?.embedding?.values;
   if (!Array.isArray(values) || values.length === 0) {
-    throw new Error("Gemini embedding không trả vector hợp lệ.");
+    throw new Error("Gemini embedding returned no valid vector.");
   }
   return values;
 }
@@ -153,7 +153,7 @@ async function safeEmbedding(text) {
       }
     }
   }
-  throw lastErr || new Error("Không có model Gemini embedding khả dụng.");
+  throw lastErr || new Error("No Gemini embedding model available.");
 }
 
 /**

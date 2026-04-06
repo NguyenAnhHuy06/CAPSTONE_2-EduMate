@@ -4,7 +4,7 @@ const s3 = require("../config/s3");
 
 const uploadToS3 = async (file) => {
   if (!file || !file.path) {
-    throw new Error("File không tồn tại");
+    throw new Error("File does not exist");
   }
 
   const fileStream = fs.createReadStream(file.path);

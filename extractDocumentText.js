@@ -61,7 +61,7 @@ async function extractFromDoc(buffer) {
 
 /**
  * @param {Buffer} buffer
- * @param {string} extension ví dụ ".pdf"
+ * @param {string} extension e.g. ".pdf"
  * @param {string} mimetype
  */
 async function extractDocumentText(buffer, extension, mimetype) {
@@ -85,7 +85,7 @@ async function extractDocumentText(buffer, extension, mimetype) {
     return extractFromDoc(buffer);
   }
 
-  throw new Error("Định dạng file không hỗ trợ trích văn bản (PDF/Word).");
+  throw new Error("Unsupported file format for text extraction (PDF/Word).");
 }
 
 module.exports = { extractDocumentText, MAX_CHARS };

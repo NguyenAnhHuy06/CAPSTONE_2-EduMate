@@ -11,20 +11,20 @@ const {
 
 const MAX_CHUNKS = Number(process.env.EMBED_MAX_CHUNKS || 80);
 
-// Lock tránh trường hợp FE gọi generate nhiều lần → cùng lúc index cùng 1 s3Key.
+// Lock: prevent concurrent indexing of the same s3Key when generate is called repeatedly.
 const indexingLocks = new Map();
 
 /**
- * Kiểm tra DB: đã có đủ segment + embedding hợp lệ cho document_id hay chưa.
- * Dùng trước khi tải S3 / gọi Gemini lại.
+ * Check whether document_id already has valid segments + embeddings.
+ * Used before re-downloading S3 or calling Gemini again.
  */
 async function ensureDocumentEmbedded(documentId) {
   if (!db.isConfigured()) {
-    throw new Error("Cần MySQL để lưu embedding.");
+    throw new Error("MySQL is required to store embeddings.");
   }
   const doc = await db.getDocumentById(documentId);
   if (!doc) {
-    throw new Error("Không tìm thấy document.");
+    throw new Error("Document not found.");
   }
   const segments = await db.listSegmentsByDocumentId(documentId);
   if (!segments.length) {
@@ -55,16 +55,16 @@ async function ensureDocumentEmbedded(documentId) {
 }
 
 /**
- * Tải S3 → trích text → chunk → embedding (có giới hạn song song) → ghi MySQL.
+ * S3 download → extract text → chunk → embed (bounded concurrency) → write MySQL.
  * @param {string} s3Key
  * @param {{ fileSize?: number, mimeType?: string }} hint
  */
 async function indexDocumentFromS3(s3Key, hint = {}) {
   if (!s3.isS3Configured()) {
-    throw new Error("S3 chưa cấu hình.");
+    throw new Error("S3 is not configured.");
   }
   if (!db.isConfigured()) {
-    throw new Error("MySQL chưa cấu hình.");
+    throw new Error("MySQL is not configured.");
   }
 
   const { buffer, contentType } = await s3.getObjectBuffer(s3Key);
@@ -72,12 +72,12 @@ async function indexDocumentFromS3(s3Key, hint = {}) {
   const plain = await extractDocumentText(buffer, ext, contentType || hint.mimeType || "");
 
   if (!plain.trim()) {
-    throw new Error("Không trích được văn bản từ file S3.");
+    throw new Error("Could not extract text from the S3 file.");
   }
 
   const chunkTexts = splitIntoWordChunks(plain, { maxChunks: MAX_CHUNKS });
   if (!chunkTexts.length) {
-    throw new Error("Nội dung quá ngắn để chunk.");
+    throw new Error("Content is too short to chunk.");
   }
 
   const embeddings = await embedAllChunks(chunkTexts);
@@ -93,7 +93,7 @@ async function indexDocumentFromS3(s3Key, hint = {}) {
 
   for (let i = 0; i < chunkTexts.length; i++) {
     const emb = embeddings[i];
-    if (!emb) throw new Error(`Thiếu embedding cho chunk ${i}.`);
+    if (!emb) throw new Error(`Missing embedding for chunk ${i}.`);
     await db.insertChunk(documentId, i, chunkTexts[i], emb);
   }
 
@@ -105,11 +105,11 @@ async function indexDocumentFromS3(s3Key, hint = {}) {
 }
 
 /**
- * Nếu đã có chunk + embedding đầy đủ và không reindex → bỏ qua (không gọi Gemini, không tải S3).
+ * If chunks + embeddings are complete and reindex is false → skip (no Gemini, no S3 download).
  */
 async function ensureIndexedForQuiz(s3Key, { reindex = false } = {}) {
   if (!db.isConfigured()) {
-    throw new Error("Cần MySQL để lưu embedding.");
+    throw new Error("MySQL is required to store embeddings.");
   }
   if (!reindex && indexingLocks.has(s3Key)) {
     return indexingLocks.get(s3Key);

@@ -34,7 +34,7 @@ function getClient() {
 }
 
 /**
- * URL công khai cho object (bucket public hoặc CDN). Không ký presigned.
+ * Public URL for an object (public bucket or CDN). No presigned URL.
  */
 function buildObjectPublicUrl(key) {
   if (!key) return null;
@@ -126,7 +126,7 @@ async function streamToBuffer(body) {
 
 async function getObjectBuffer(key) {
   if (!key || String(key).includes("..")) {
-    throw new Error("S3 key không hợp lệ.");
+    throw new Error("Invalid S3 key.");
   }
   const client = getClient();
   const bucket = getBucket();

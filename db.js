@@ -2,16 +2,16 @@ const path = require("path");
 const mysql = require("mysql2/promise");
 
 /**
- * Schema edumate: documents, document_segments, quizzes, quiz_questions, ...
+ * Edumate schema: documents, document_segments, quizzes, quiz_questions, ...
  *
- * Quy ước: documents.file_url = S3 object key (vd. documents/xxx.pdf) để khớp ListObjects.
- * Cột VARCHAR(255) — key quá dài có thể lỗi; URL đầy đủ nên lưu chỗ khác hoặc đổi kiểu cột.
+ * Convention: documents.file_url stores the S3 object key (e.g. documents/xxx.pdf) for ListObjects.
+ * VARCHAR(255) keys may truncate; store full URLs elsewhere or widen the column.
  */
 
 function parseMysqlUrl(url) {
   const u = new URL(url);
   const database = u.pathname.replace(/^\//, "").split("?")[0];
-  if (!database) throw new Error("DATABASE_URL thiếu tên database.");
+  if (!database) throw new Error("DATABASE_URL must include the database name.");
   return {
     host: u.hostname || "localhost",
     port: Number(u.port || 3306),
@@ -47,7 +47,7 @@ function isConfigured() {
 
 function getPool() {
   if (!isConfigured()) {
-    throw new Error("MySQL chưa cấu hình (DATABASE_URL hoặc MYSQL_*).");
+    throw new Error("MySQL is not configured (DATABASE_URL or MYSQL_*).");
   }
   if (!pool) {
     const cfg = createPoolConfig();
@@ -94,7 +94,7 @@ async function initDb() {
   );
   if (Number(row.c) < 2) {
     console.warn(
-      "MySQL: chưa thấy đủ bảng documents / document_segments — chạy script CREATE TABLE edumate."
+      "MySQL: documents / document_segments tables missing — run the edumate CREATE TABLE script."
     );
   }
 }
@@ -113,7 +113,7 @@ function parseOptionalInt(v) {
 
 /**
  * @param {object} row
- * @param {string} row.s3Key - ghi vào documents.file_url
+ * @param {string} row.s3Key - stored in documents.file_url
  * @param {string} row.title
  * @param {number|string|null} [row.courseId]
  * @param {number|string|null} [row.uploaderId]
@@ -121,7 +121,7 @@ function parseOptionalInt(v) {
 async function upsertDocument(row) {
   const p = getPool();
   const key = String(row.s3Key || "").trim();
-  if (!key) throw new Error("Thiếu s3Key (lưu vào documents.file_url).");
+  if (!key) throw new Error("Missing s3Key (maps to documents.file_url).");
 
   const [existing] = await p.execute(
     "SELECT document_id FROM documents WHERE file_url = ? LIMIT 1",
@@ -185,7 +185,7 @@ async function insertSegment(documentId, contentText, embedding) {
   );
 }
 
-/** chunkIndex chỉ để tương thích pipeline; thứ tự segment = segment_id tăng dần. */
+/** chunkIndex is for pipeline compatibility; segment order follows segment_id. */
 async function insertChunk(documentId, _chunkIndex, contentText, embedding) {
   await insertSegment(documentId, contentText, embedding);
 }
@@ -201,8 +201,8 @@ async function getDocumentIdByS3Key(s3Key) {
 }
 
 /**
- * Đếm attempts theo S3 key: gộp (1) quiz gắn documents.document_id + file_url
- * và (2) quiz có source_file_url — UNION tránh đếm trùng cùng một attempt.
+ * Count attempts by S3 key: union (1) quizzes linked via documents.document_id + file_url
+ * and (2) quizzes with source_file_url — avoids double-counting the same attempt.
  */
 async function countAttemptsBySourceFileUrls(s3Keys) {
   const uniq = [...new Set((s3Keys || []).map((k) => String(k || "").trim()).filter(Boolean))];
@@ -377,8 +377,8 @@ async function getMetaMapForS3Keys(keys) {
 }
 
 /**
- * quiz_attempts.score: ưu tiên hiểu là **số câu đúng** (so với question_count).
- * Nếu score ∈ [0,100] và > question_count (hoặc question_count=0), coi score là **%** sẵn.
+ * quiz_attempts.score: treat as **correct count** vs question_count when possible.
+ * If score is in [0,100] and greater than question_count (or question_count=0), treat as **percent**.
  */
 function scoreToPercent(score, questionCount) {
   if (score == null || score === "") return null;
@@ -508,7 +508,7 @@ async function canUserManageQuiz(quizId, userId) {
 
 async function replaceQuizQuestions(quizId, questions) {
   const id = Number(quizId);
-  if (!Number.isFinite(id)) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(id)) throw new Error("Invalid quizId.");
   const list = Array.isArray(questions) ? questions : [];
   const p = getPool();
   await p.execute("DELETE FROM quiz_questions WHERE quiz_id = ?", [id]);
@@ -527,7 +527,7 @@ async function updateQuizTitle(quizId, title) {
 async function setQuizPublished(quizId, published = true) {
   const p = getPool();
   const id = Number(quizId);
-  if (!Number.isFinite(id)) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(id)) throw new Error("Invalid quizId.");
   try {
     if (published) {
       await p.execute(
@@ -539,7 +539,7 @@ async function setQuizPublished(quizId, published = true) {
     }
   } catch (e) {
     if (e.code === "ER_BAD_FIELD_ERROR") {
-      throw new Error("Cột is_published chưa có — khởi động lại backend để migrate DB.");
+      throw new Error("Column is_published is missing — restart the backend to migrate the DB.");
     }
     throw e;
   }
@@ -554,19 +554,19 @@ function quizRowIsPublished(row) {
 
 async function assertQuizExists(quizId, p = getPool()) {
   const [rows] = await p.execute("SELECT 1 FROM quizzes WHERE quiz_id = ? LIMIT 1", [quizId]);
-  if (!rows.length) throw new Error("Không tìm thấy quiz.");
+  if (!rows.length) throw new Error("Quiz not found.");
 }
 
 /**
- * Một lượt "Take Quiz": ghi ngay khi user bắt đầu (completed_at NULL, score = 0).
- * Cần cột completed_at cho phép NULL trong MySQL.
- * Xóa mọi lượt đang mở (cùng quiz + user) trước khi INSERT — tránh nhấn Take Quiz nhiều lần
- * làm phình attemptsCount và finish chỉ đóng được một dòng.
+ * One "Take Quiz" attempt: insert on start (completed_at NULL, score = 0).
+ * MySQL column completed_at must allow NULL.
+ * Delete any open attempts (same quiz + user) before INSERT — avoids inflating attemptsCount
+ * when Take Quiz is clicked repeatedly and only one row gets finished.
  */
 async function startQuizAttempt({ quizId, userId }) {
   const p = getPool();
   const qid = Number(quizId);
-  if (!Number.isFinite(qid)) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(qid)) throw new Error("Invalid quizId.");
   const uid = parseOptionalInt(userId);
   await assertQuizExists(qid, p);
   await p.execute(
@@ -580,15 +580,15 @@ async function startQuizAttempt({ quizId, userId }) {
 }
 
 /**
- * Cập nhật lượt đang mở (completed_at IS NULL) khi nộp bài.
- * Nếu không có lượt mở (API cũ / edge case) → INSERT như trước.
+ * Update the open attempt (completed_at IS NULL) on submit.
+ * If none exists (legacy API / edge case) → INSERT as before.
  */
 async function finishQuizAttempt({ quizId, userId, score, completedAt = null }) {
   const p = getPool();
   const qid = Number(quizId);
-  if (!Number.isFinite(qid)) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(qid)) throw new Error("Invalid quizId.");
   const sc = Number(score);
-  if (!Number.isFinite(sc) || sc < 0) throw new Error("score không hợp lệ.");
+  if (!Number.isFinite(sc) || sc < 0) throw new Error("Invalid score.");
   const when = completedAt ? new Date(completedAt) : new Date();
   const uid = parseOptionalInt(userId);
   await assertQuizExists(qid, p);
@@ -713,7 +713,7 @@ async function saveQuizWithQuestions({ title, courseId, createdBy, questions, so
       if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
     }
   }
-  if (!hdr) throw lastErr || new Error("Không INSERT được quizzes.");
+  if (!hdr) throw lastErr || new Error("Could not insert into quizzes.");
   const quizId = hdr.insertId;
   for (const q of questions) {
     await insertQuizQuestion(quizId, q);
@@ -733,6 +733,314 @@ async function getQuizWithQuestions(quizId) {
     [id]
   );
   return { ...quizzes[0], questions };
+}
+
+function rowsToMap(rows, keyField, valueField) {
+  const m = new Map();
+  for (const r of rows || []) {
+    const k = Number(r[keyField]);
+    if (Number.isFinite(k)) m.set(k, Number(r[valueField] || 0));
+  }
+  return m;
+}
+
+/**
+ * Learning progress per course: documents + completed quiz_attempts.
+ * A document counts as "done" when the user has at least one completed attempt for a quiz
+ * linked via quiz.document_id or quiz.source_file_url = documents.file_url.
+ */
+async function getLearningProgressSummary(userId) {
+  const p = getPool();
+  const uid = parseOptionalInt(userId);
+
+  const [courseIdRows] = await p.execute(
+    `SELECT DISTINCT x.cid AS course_id FROM (
+       SELECT course_id AS cid FROM documents WHERE course_id IS NOT NULL
+       UNION
+       SELECT course_id AS cid FROM quizzes WHERE course_id IS NOT NULL
+     ) x
+     WHERE x.cid IS NOT NULL
+     ORDER BY x.cid ASC`
+  );
+  const courseIds = courseIdRows
+    .map((r) => Number(r.course_id))
+    .filter((n) => Number.isFinite(n));
+  if (!courseIds.length) {
+    return {
+      overall: {
+        progressPercent: 0,
+        completedMaterials: 0,
+        totalMaterials: 0,
+        averageScorePercent: null,
+        studyHoursLabel: null,
+      },
+      courses: [],
+      streak: { currentDays: 0, longestDays: 0 },
+    };
+  }
+
+  let courseMeta = new Map();
+  try {
+    const placeholders = courseIds.map(() => "?").join(",");
+    const [metaRows] = await p.execute(
+      `SELECT course_id, course_code FROM courses WHERE course_id IN (${placeholders})`,
+      courseIds
+    );
+    for (const r of metaRows) {
+      courseMeta.set(Number(r.course_id), {
+        courseId: Number(r.course_id),
+        code: String(r.course_code || "").trim() || `C${r.course_id}`,
+        name: String(r.course_code || "").trim() || `Course ${r.course_id}`,
+      });
+    }
+  } catch (e) {
+    console.warn("getLearningProgressSummary courses:", e.message);
+  }
+  for (const cid of courseIds) {
+    if (!courseMeta.has(cid)) {
+      courseMeta.set(cid, { courseId: cid, code: `C${cid}`, name: `Course ${cid}` });
+    }
+  }
+
+  const [docCountRows] = await p.execute(
+    `SELECT course_id, COUNT(*) AS n FROM documents WHERE course_id IS NOT NULL GROUP BY course_id`
+  );
+  const docTotalByCourse = rowsToMap(docCountRows, "course_id", "n");
+
+  let doneDocRows;
+  try {
+    [doneDocRows] = await p.execute(
+      `SELECT d.course_id, COUNT(DISTINCT d.document_id) AS n
+       FROM documents d
+       INNER JOIN quizzes q ON (
+         q.document_id = d.document_id
+         OR (
+           q.source_file_url IS NOT NULL
+           AND TRIM(q.source_file_url) <> ''
+           AND q.source_file_url = d.file_url
+         )
+       )
+       INNER JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id
+       WHERE d.course_id IS NOT NULL
+         AND qa.completed_at IS NOT NULL
+         AND (qa.user_id <=> ?)
+       GROUP BY d.course_id`,
+      [uid]
+    );
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") {
+      [doneDocRows] = await p.execute(
+        `SELECT d.course_id, COUNT(DISTINCT d.document_id) AS n
+         FROM documents d
+         INNER JOIN quizzes q ON q.document_id = d.document_id
+         INNER JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id
+         WHERE d.course_id IS NOT NULL
+           AND qa.completed_at IS NOT NULL
+           AND (qa.user_id <=> ?)
+         GROUP BY d.course_id`,
+        [uid]
+      );
+    } else {
+      throw e;
+    }
+  }
+  const docDoneByCourse = rowsToMap(doneDocRows, "course_id", "n");
+
+  let pubQuizRows;
+  try {
+    [pubQuizRows] = await p.execute(
+      `SELECT course_id, COUNT(*) AS n FROM quizzes
+       WHERE course_id IS NOT NULL AND is_published = 1
+       GROUP BY course_id`
+    );
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") {
+      [pubQuizRows] = await p.execute(
+        `SELECT course_id, COUNT(*) AS n FROM quizzes WHERE course_id IS NOT NULL GROUP BY course_id`
+      );
+    } else {
+      throw e;
+    }
+  }
+  const pubQuizTotalByCourse = rowsToMap(pubQuizRows, "course_id", "n");
+
+  const [doneQuizRows] = await p.execute(
+    `SELECT q.course_id, COUNT(DISTINCT qa.quiz_id) AS n
+     FROM quiz_attempts qa
+     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+     WHERE q.course_id IS NOT NULL
+       AND qa.completed_at IS NOT NULL
+       AND (qa.user_id <=> ?)
+     GROUP BY q.course_id`,
+    [uid]
+  );
+  const quizDoneByCourse = rowsToMap(doneQuizRows, "course_id", "n");
+
+  const [attemptRows] = await p.execute(
+    `SELECT q.course_id, qa.score,
+      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count
+     FROM quiz_attempts qa
+     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+     WHERE qa.completed_at IS NOT NULL AND (qa.user_id <=> ?)`,
+    [uid]
+  );
+
+  const scorePercentsByCourse = new Map();
+  const lastAtByCourse = new Map();
+  for (const row of attemptRows) {
+    const cid = Number(row.course_id);
+    if (!Number.isFinite(cid)) continue;
+    const pct = scoreToPercent(row.score, row.question_count);
+    if (pct != null) {
+      if (!scorePercentsByCourse.has(cid)) scorePercentsByCourse.set(cid, []);
+      scorePercentsByCourse.get(cid).push(pct);
+    }
+  }
+
+  const [lastRows] = await p.execute(
+    `SELECT q.course_id, MAX(qa.completed_at) AS last_at
+     FROM quiz_attempts qa
+     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+     WHERE qa.completed_at IS NOT NULL AND (qa.user_id <=> ?)
+     GROUP BY q.course_id`,
+    [uid]
+  );
+  for (const r of lastRows) {
+    const cid = Number(r.course_id);
+    if (Number.isFinite(cid)) lastAtByCourse.set(cid, r.last_at);
+  }
+
+  const allPercents = [];
+  for (const arr of scorePercentsByCourse.values()) allPercents.push(...arr);
+
+  let sumCompleted = 0;
+  let sumTotal = 0;
+  const courses = [];
+
+  for (const cid of courseIds) {
+    const meta = courseMeta.get(cid);
+    const docTotal = docTotalByCourse.get(cid) || 0;
+    const docDone = docDoneByCourse.get(cid) || 0;
+    let totalMaterials;
+    let completedMaterials;
+    let progressPercent;
+    if (docTotal > 0) {
+      totalMaterials = docTotal;
+      completedMaterials = Math.min(docDone, docTotal);
+      progressPercent = Math.round((100 * completedMaterials) / totalMaterials);
+    } else {
+      totalMaterials = pubQuizTotalByCourse.get(cid) || 0;
+      if (totalMaterials > 0) {
+        completedMaterials = Math.min(quizDoneByCourse.get(cid) || 0, totalMaterials);
+        progressPercent = Math.round((100 * completedMaterials) / totalMaterials);
+      } else {
+        completedMaterials = 0;
+        progressPercent = 0;
+      }
+    }
+
+    const pcts = scorePercentsByCourse.get(cid) || [];
+    const quizScore =
+      pcts.length > 0 ? Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length) : null;
+
+    const lastAt = lastAtByCourse.get(cid) || null;
+
+    sumCompleted += completedMaterials;
+    sumTotal += totalMaterials;
+
+    courses.push({
+      courseId: cid,
+      name: meta.name,
+      code: meta.code,
+      progressPercent,
+      totalMaterials,
+      completedMaterials,
+      quizScorePercent: quizScore,
+      lastActivityAt: lastAt ? new Date(lastAt).toISOString() : null,
+    });
+  }
+
+  const overallProgress =
+    sumTotal > 0 ? Math.round((100 * sumCompleted) / sumTotal) : 0;
+  const averageScorePercent =
+    allPercents.length > 0
+      ? Math.round(allPercents.reduce((a, b) => a + b, 0) / allPercents.length)
+      : null;
+
+  const [dateRows] = await p.execute(
+    `SELECT DISTINCT DATE(completed_at) AS d
+     FROM quiz_attempts
+     WHERE completed_at IS NOT NULL AND (user_id <=> ?)
+     ORDER BY d DESC`,
+    [uid]
+  );
+  const isoDates = dateRows.map((r) => {
+    const x = r.d;
+    if (x instanceof Date) return x.toISOString().slice(0, 10);
+    const s = String(x);
+    return s.length >= 10 ? s.slice(0, 10) : s;
+  });
+
+  function computeLongestStreak(sortedAsc) {
+    if (!sortedAsc.length) return 0;
+    let best = 1;
+    let run = 1;
+    for (let i = 1; i < sortedAsc.length; i += 1) {
+      const prev = new Date(sortedAsc[i - 1] + "T12:00:00Z");
+      const cur = new Date(sortedAsc[i] + "T12:00:00Z");
+      const diff = (cur - prev) / 86400000;
+      if (diff === 1) {
+        run += 1;
+        best = Math.max(best, run);
+      } else if (diff > 1) {
+        run = 1;
+      }
+    }
+    return best;
+  }
+
+  function localYmd(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  /** Current streak uses local calendar days — avoids UTC skew from toISOString(). */
+  function computeCurrentStreakLocal(datesSet) {
+    const today = new Date();
+    let d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const key = (dt) => localYmd(dt);
+    if (!datesSet.has(key(d))) {
+      d.setDate(d.getDate() - 1);
+    }
+    if (!datesSet.has(key(d))) return 0;
+    let n = 0;
+    while (datesSet.has(key(d))) {
+      n += 1;
+      d.setDate(d.getDate() - 1);
+    }
+    return n;
+  }
+
+  const dateSet = new Set(isoDates);
+  const sortedAsc = [...isoDates].sort();
+  const streak = {
+    currentDays: computeCurrentStreakLocal(dateSet),
+    longestDays: computeLongestStreak(sortedAsc),
+  };
+
+  return {
+    overall: {
+      progressPercent: overallProgress,
+      completedMaterials: sumCompleted,
+      totalMaterials: sumTotal,
+      averageScorePercent,
+      studyHoursLabel: null,
+    },
+    courses,
+    streak,
+  };
 }
 
 module.exports = {
@@ -770,4 +1078,5 @@ module.exports = {
   setQuizPublished,
   quizRowIsPublished,
   normalizeQuestionInput,
+  getLearningProgressSummary,
 };
