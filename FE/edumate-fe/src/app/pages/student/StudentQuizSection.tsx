@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useNotification } from '../NotificationContext';
 import api from '@/services/api';
+import { safeNotificationMessage } from '@/utils/safeErrorMessage';
 
 interface StudentQuizSectionProps {
     user: any;
@@ -26,7 +27,7 @@ interface QuizAnswer {
 
 const LETTERS = ['A', 'B', 'C', 'D'];
 
-/** Chuỗi dùng để tìm kiếm (title, mã môn, giảng viên, file, ngày…). */
+/** Search string (title, course code, instructor, file, date, …). */
 function buildQuizSearchHaystack(quiz: Record<string, unknown>): string {
     const parts = [
         quiz?.title,
@@ -67,7 +68,7 @@ function normalizeQuestions(quizItems: any[] = []) {
     });
 }
 
-/** Khớp backend: 1–25 câu; ưu tiên estimatedQuestions từ /documents/for-quiz. */
+/** Matches backend: 1–25 questions; prefers estimatedQuestions from /documents/for-quiz. */
 function numQuestionsForGenerate(quiz: { estimatedQuestions?: unknown }): number {
     const raw = Number(quiz?.estimatedQuestions);
     if (Number.isFinite(raw) && raw > 0) {
@@ -252,15 +253,11 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             });
             await loadConnectedData({ quiet: true });
         } catch (err: unknown) {
-            const ax = err as { response?: { data?: { message?: string } } };
-            const m = ax?.response?.data?.message;
-            if (m) {
-                showNotification({
-                    type: 'warning',
-                    title: 'Could not record attempt',
-                    message: String(m),
-                });
-            }
+            showNotification({
+                type: 'warning',
+                title: 'Could not record attempt',
+                message: safeNotificationMessage(err, 'attemptRecord'),
+            });
         }
     };
 
@@ -334,7 +331,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 showNotification({
                     type: 'warning',
                     title: 'Generate Quiz',
-                    message: String((res as any).message || 'Quiz generation failed.'),
+                    message: safeNotificationMessage(null, 'quizGenerate'),
                 });
                 return;
             }
@@ -377,23 +374,10 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             setTimerId(timer);
         } catch (err: unknown) {
             setIsGeneratingQuiz(false);
-            const ax = err as {
-                code?: string;
-                message?: string;
-                response?: { data?: { message?: string } };
-            };
-            const backendMsg = ax?.response?.data?.message;
-            const timedOut =
-                ax?.code === 'ECONNABORTED' || String(ax?.message || '').toLowerCase().includes('timeout');
-            const message = backendMsg
-                ? String(backendMsg)
-                : timedOut
-                  ? 'Request timed out. Indexing and AI can take 1–3 minutes for large files — please try again or wait.'
-                  : 'Unable to generate quiz right now. Check backend logs, API keys (OpenRouter, Gemini), MySQL, and S3.';
             showNotification({
                 type: 'warning',
                 title: 'Generate Quiz',
-                message,
+                message: safeNotificationMessage(err, 'quizGenerate'),
             });
         }
     };
