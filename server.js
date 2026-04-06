@@ -1,17 +1,53 @@
+// server.js - Backend cho ứng dụng EduMate
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
+const helmet = require("helmet"); // Thêm Helmet để tăng cường bảo mật HTTP headers
+const rateLimit = require("express-rate-limit");
+const { fileTypeFromBuffer } = require("file-type");
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+app.use(helmet()); // Sử dụng Helmet để bảo vệ ứng dụng khỏi một số lỗ hổng bảo mật phổ biến bằng cách thiết lập các HTTP headers phù hợp
+
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 phút
+  max: 100, // tối đa 100 request/IP
+  message: {
+    success: false,
+    message: "Too many requests, vui lòng thử lại sau."
+  }
+}));
+
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3001"
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    } else {
+      return callback(new Error("Not allowed by CORS"));
+    }
+  }
+}));
 
 const { generateQuizWithAI } = require("./generateQuizWithAI");
 const { getQuiz } = require("./quizService");
-const { extractDocumentText } = require("./extractDocumentText");
 const s3 = require("./s3Upload");
 const db = require("./db");
 const { ensureIndexedForQuiz } = require("./documentPipeline");
 
+<<<<<<< HEAD
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -29,6 +65,8 @@ app.use(
     optionsSuccessStatus: 204,
   })
 );
+=======
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
@@ -48,7 +86,10 @@ const allowedMimeTypes = new Set([
   "application/vnd.ms-word.document.macroenabled.12", // .docm
   "application/vnd.openxmlformats-officedocument.wordprocessingml.template", // .dotx
   "application/vnd.ms-word.template.macroenabled.12", // .dotm
+<<<<<<< HEAD
   "application/octet-stream", // Some clients send a generic binary MIME type
+=======
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
 ]);
 
 const storage = multer.memoryStorage();
@@ -60,6 +101,7 @@ function fileFilter(req, file, cb) {
   const isExtensionAllowed = allowedExtensions.has(extension);
 
   const isMimeAllowed = allowedMimeTypes.has(mimeType);
+
 
   if (!isExtensionAllowed || !isMimeAllowed) {
     return cb(
@@ -79,19 +121,26 @@ function isEmpty(value) {
   return !value || !String(value).trim();
 }
 
+function normalizeTags(tagsText) {
+  if (!tagsText) {
+    return [];
+  }
+
+  return tagsText
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
 function optionalBodyNumber(value) {
   if (value == null || !String(value).trim()) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
 
-function normalizeTags(tagsText) {
-  return String(tagsText).split(",").map((tag) => tag.trim()).filter(Boolean);
-}
-
 app.get("/", (req, res) => {
   res.status(200).json({
-    sucess: true,
+    success: true,
     message: "Edumate backend is running.",
   });
 });
@@ -143,8 +192,17 @@ async function listS3DocsForQuiz() {
     ]);
 
   try {
+<<<<<<< HEAD
     // List entire bucket (empty prefix).
     const rows = await withTimeout(s3.listDocuments({ prefix: "", maxKeys }));
+=======
+    // Luôn lấy toàn bộ bucket cloud theo yêu cầu (prefix rỗng).
+    const rows = await withTimeout(
+      s3.listDocuments({ prefix: "", maxKeys })
+    );
+
+    if (!Array.isArray(rows)) return [];
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
     const filtered = rows.filter((o) => isAllowedQuizExt(o.key));
     return filtered;
   } catch (err) {
@@ -165,7 +223,9 @@ async function buildDocumentsForQuizList() {
 
   let metaMap = new Map();
   if (db.isConfigured()) {
-    metaMap = await db.getMetaMapForS3Keys(keys);
+    if (db.isConfigured() && keys.length) {
+      metaMap = await db.getMetaMapForS3Keys(keys);
+    }
   }
 
   let attemptByKey = new Map();
@@ -320,12 +380,14 @@ app.post("/api/quiz/attempts", async (req, res) => {
       });
     }
     const quizId = req.body.quizId ?? req.body.quiz_id;
+
+    const defaultUserIdRaw = process.env.DEFAULT_QUIZ_USER_ID;
+    const defaultUserId = defaultUserIdRaw ? Number(defaultUserIdRaw) : null;
+
     const userId =
       req.body.userId ??
       req.body.user_id ??
-      (process.env.DEFAULT_QUIZ_USER_ID
-        ? Number(process.env.DEFAULT_QUIZ_USER_ID)
-        : null);
+      (Number.isFinite(defaultUserId) ? defaultUserId : null);
     const phase = String(req.body.phase ?? req.body.stage ?? "").toLowerCase();
 
     if (phase === "start") {
@@ -664,6 +726,14 @@ app.post(
           message: "No document file was selected.",
         });
       }
+      const detectedType = await fileTypeFromBuffer(req.file.buffer);
+
+      if (!detectedType || !allowedMimeTypes.has(detectedType.mime)) {
+        return res.status(400).json({
+          success: false,
+          message: "File không hợp lệ (fake định dạng)."
+        });
+      }
 
       if (
         isEmpty(title) ||
@@ -682,7 +752,7 @@ app.post(
       const up = await s3.uploadDocumentBuffer({
         buffer: req.file.buffer,
         key,
-        contentType: req.file.mimetype,
+        contentType: detectedType.mime
       });
 
       const row = {
@@ -739,28 +809,43 @@ app.get("/api/documents/recent", async (req, res) => {
       Math.max(parseInt(req.query.limit, 10) || 10, 1),
       50
     );
+
     if (!db.isConfigured()) {
       return res.status(200).json({
         success: true,
         total: 0,
         data: [],
+<<<<<<< HEAD
         message: MSG_DATA_UNAVAILABLE,
+=======
+        message: "MySQL chưa cấu hình.",
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
       });
     }
+
     const rows = await db.listDocumentsRecent(limit);
     const data = rows.map(mapMysqlDocToRecent);
+
     return res.status(200).json({
       success: true,
       total: data.length,
       data,
     });
   } catch (err) {
+<<<<<<< HEAD
     console.error("[api/documents/recent]", err);
     return res.status(200).json({
       success: true,
       total: 0,
       data: [],
       message: "Document list is temporarily unavailable.",
+=======
+    console.error(err);
+
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Lỗi đọc MySQL.",
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
     });
   }
 });
@@ -773,21 +858,38 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  console.error(err);
+
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(400).json({
         success: false,
+<<<<<<< HEAD
         message: "File exceeds 10MB. Please choose a smaller file.",
+=======
+        message: "Kích cỡ file vượt quá 10MB."
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
       });
     }
     return res.status(400).json({
       success: false,
+<<<<<<< HEAD
       message: MSG_TRY_AGAIN,
+=======
+      message: err.message
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
     });
   }
-  return res.status(400).json({
+
+  const status = err.status || 500;
+
+  return res.status(status).json({
     success: false,
+<<<<<<< HEAD
     message: MSG_TRY_AGAIN,
+=======
+    message: err.message || "Internal server error"
+>>>>>>> 8ff768fc779e2c6b1cef5b1519613adb651f6327
   });
 });
 
