@@ -1,3 +1,5 @@
+// File: src/app/pages/UploadDocument.tsx
+
 import { useState } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
 
@@ -31,30 +33,87 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setUploading(true);
+const handleSubmit = async (e: React.FormEvent) => {
+  e.preventDefault();
 
-    // Mock upload process
-    setTimeout(() => {
-      setUploading(false);
-      setUploadSuccess(true);
+  if (!file) {
+    alert("Vui lòng chọn file");
+    return;
+  }
 
-      // Reset form after 2 seconds and redirect
-      setTimeout(() => {
-        setUploadSuccess(false);
-        setFormData({
-          type: 'general',
-          courseCode: '',
-          courseName: '',
-          topicTitle: '',
-          description: '',
+  if (file.size > 10 * 1024 * 1024) {
+    alert("File không được vượt quá 10MB");
+    return;
+  }
+
+  setUploading(true);
+
+  try {
+    const form = new FormData();
+
+    // ⚠️ QUAN TRỌNG: key phải khớp với BE
+    form.append("documentFile", file);
+
+    form.append("title", formData.topicTitle);
+    form.append("category", formData.type);
+    form.append("subjectCode", formData.courseCode);
+    form.append("subjectName", formData.courseName);
+    form.append("tags", formData.courseCode); 
+    form.append("description", formData.description);
+
+    const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
+    let res;
+
+    try {
+      res = await fetch(`${API_URL}/api/documents/upload`, {
+          method: "POST",
+          body: form,
         });
-        setFile(null);
-        onUploadComplete();
-      }, 2000);
-    }, 1500);
-  };
+    } catch (err) {
+      throw new Error("Không kết nối được server (CORS / server down)");
+    }
+
+    let data;
+
+    try {
+      data = await res.json();
+    } catch (err) {
+      throw new Error("Server không trả về JSON hợp lệ");
+    }
+
+    if (!res.ok) {
+      throw new Error(data.message || "Upload thất bại");
+    }
+
+    setUploadSuccess(true);
+
+    setTimeout(() => {
+      setUploadSuccess(false);
+      setFormData({
+        type: 'general',
+        courseCode: '',
+        courseName: '',
+        topicTitle: '',
+        description: '',
+      });
+
+      setFile(null);
+      const fileInput = document.getElementById("file-upload") as HTMLInputElement;
+
+      if (fileInput) {
+        fileInput.value = "";
+      }
+
+      onUploadComplete();
+    }, 2000);
+
+  } catch (err: any) {
+    alert(err.message || "Đã có lỗi xảy ra trong quá trình upload. Vui lòng thử lại.");
+  } finally {
+    setUploading(false);
+  }
+};
 
   if (uploadSuccess) {
     return (
@@ -86,7 +145,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
               onChange={handleFileChange}
               className="hidden"
               id="file-upload"
-              accept=".pdf,.doc,.docx,.ppt,.pptx"
+              accept=".pdf,.doc,.docx,.docm,.dotx,.dotm"
               required
             />
             <label htmlFor="file-upload" className="cursor-pointer">
@@ -99,7 +158,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
               ) : (
                 <div>
                   <p className="text-gray-700 mb-1">Click to upload or drag and drop</p>
-                  <p className="text-gray-500">PDF, DOC, DOCX, PPT, PPTX (max 50MB)</p>
+                  <p className="text-gray-500">PDF, DOC, DOCX, DOCM, DOTX, DOTM (max 10MB)</p>
                 </div>
               )}
             </label>
@@ -192,7 +251,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
         {/* Submit Button */}
         <button
           type="submit"
-          disabled={uploading}
+          disabled={uploading || !file}
           className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
           {uploading ? (
