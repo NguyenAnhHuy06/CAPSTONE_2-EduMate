@@ -8,6 +8,10 @@ const path = require("path");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { fileTypeFromBuffer } = require("file-type");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 
 const { generateQuizWithAI } = require("./generateQuizWithAI");
 const { getQuiz } = require("./quizService");
@@ -16,7 +20,7 @@ const db = require("./db");
 const { ensureIndexedForQuiz } = require("./documentPipeline");
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 3001);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 /** Client-facing copy only — never include stack traces, SQL, or infra names. */
@@ -119,6 +123,227 @@ app.get("/", (req, res) => {
     success: true,
     message: "Edumate backend is running.",
   });
+});
+
+function authJwtSecret() {
+  const s = process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim();
+  return s || "dev-only-secret-change-me";
+}
+
+const otpStore = new Map();
+const execFileAsync = promisify(execFile);
+
+function normalizeEmail(emailLike) {
+  return String(emailLike || "").trim().toLowerCase();
+}
+
+function isAllowedStudentEmail(email) {
+  return /@dtu\.edu\.vn$/i.test(String(email || "").trim());
+}
+
+function otpExpiryMs() {
+  const mins = Number(process.env.OTP_EXPIRES_MINUTES || 5);
+  if (!Number.isFinite(mins) || mins <= 0) return 5 * 60 * 1000;
+  return mins * 60 * 1000;
+}
+
+function generateOtpCode() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function sendOtpEmail({ toEmail, code, purpose }) {
+  const scriptPath =
+    (process.env.OTP_PYTHON_SCRIPT && String(process.env.OTP_PYTHON_SCRIPT).trim()) ||
+    path.join(__dirname, "otp_email_service.py");
+  const ttl = Math.max(60, Math.floor(otpExpiryMs() / 1000));
+  const purposeValue = String(purpose || "login").trim().toLowerCase();
+  const bins = [
+    (process.env.OTP_PYTHON_BIN && String(process.env.OTP_PYTHON_BIN).trim()) || "python",
+    "py",
+  ].filter(Boolean);
+
+  let lastErr = null;
+  for (const bin of bins) {
+    try {
+      const args =
+        bin === "py"
+          ? [scriptPath, "--email", toEmail, "--code", code, "--ttl", String(ttl), "--purpose", purposeValue]
+          : [scriptPath, "--email", toEmail, "--code", code, "--ttl", String(ttl), "--purpose", purposeValue];
+      const { stdout } = await execFileAsync(bin, args, {
+        cwd: __dirname,
+        timeout: 30000,
+      });
+      const out = String(stdout || "").trim();
+      if (out) {
+        const parsed = JSON.parse(out);
+        if (parsed.status !== "success") {
+          throw new Error(parsed.error || "OTP send failed.");
+        }
+      }
+      return true;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("OTP delivery failed.");
+}
+
+function mapUserForClient(row) {
+  if (!row) return null;
+  const userId = Number(row.user_id ?? row.id);
+  return {
+    user_id: userId,
+    id: userId,
+    name: String(row.display_name || row.full_name || row.name || "").trim() || "User",
+    full_name: String(row.full_name || row.display_name || row.name || "").trim() || "User",
+    email: String(row.email || "").trim(),
+    role: String(row.role || "STUDENT").trim().toUpperCase(),
+  };
+}
+
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const fullName = String(req.body.full_name ?? req.body.fullName ?? req.body.name ?? "").trim();
+    const email = String(req.body.email ?? "").trim().toLowerCase();
+    const password = String(req.body.password ?? "").trim();
+    const role = String(req.body.role ?? "STUDENT").trim().toUpperCase();
+    const userCode = req.body.user_code ?? req.body.userCode ?? null;
+
+    if (!fullName || !email || password.length < 8) {
+      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    }
+    if (!isAllowedStudentEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Registration email must end with @dtu.edu.vn.",
+      });
+    }
+
+    const existing = await db.findUserByEmail(email);
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: "Email has already been used.",
+      });
+    }
+
+    const encryptedPassword = await bcrypt.hash(password, 10);
+    await db.createUser({ fullName, email, password: encryptedPassword, role, userCode });
+    const code = generateOtpCode();
+    const expiresAt = Date.now() + otpExpiryMs();
+    otpStore.set(email, { code, expiresAt, purpose: "register" });
+    await sendOtpEmail({ toEmail: email, code, purpose: "register" });
+
+    return res.status(201).json({
+      success: true,
+      data: { otpRequired: true, purpose: "register" },
+      message: "Registration completed. OTP has been sent to your email.",
+    });
+  } catch (err) {
+    console.error("[api/auth/register]", err);
+    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+});
+
+app.post("/api/auth/send-otp", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    const purpose = String(req.body.purpose || "login").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    }
+    if (!isAllowedStudentEmail(email)) {
+      return res.status(400).json({
+        success: false,
+        message: "OTP email must end with @dtu.edu.vn.",
+      });
+    }
+    const code = generateOtpCode();
+    const expiresAt = Date.now() + otpExpiryMs();
+    otpStore.set(email, { code, expiresAt, purpose });
+    await sendOtpEmail({ toEmail: email, code, purpose });
+    return res.status(200).json({
+      success: true,
+      message: "OTP has been sent.",
+      data: { expiresInSeconds: Math.floor((expiresAt - Date.now()) / 1000) },
+    });
+  } catch (err) {
+    console.error("[api/auth/send-otp]", err);
+    return res.status(400).json({
+      success: false,
+      message: "Could not send OTP email. Please verify SMTP configuration.",
+    });
+  }
+});
+
+app.post("/api/auth/verify-otp", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email);
+    const code = String(req.body.otp ?? req.body.code ?? "").trim();
+    const purposeRaw = String(req.body.purpose || "").trim().toLowerCase();
+    if (!email || !code) {
+      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    }
+    const saved = otpStore.get(email);
+    const purposeOk = !purposeRaw || saved?.purpose === purposeRaw;
+    if (!saved || !purposeOk || Date.now() > saved.expiresAt || saved.code !== code) {
+      return res.status(400).json({ success: false, message: "Invalid or expired OTP." });
+    }
+    otpStore.delete(email);
+    return res.status(200).json({
+      success: true,
+      message: "Verification completed.",
+      data: { verified: true, purpose: saved.purpose || "unknown" },
+    });
+  } catch (err) {
+    console.error("[api/auth/verify-otp]", err);
+    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const email = String(req.body.email ?? "").trim().toLowerCase();
+    const password = String(req.body.password ?? "").trim();
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    }
+    const userRow = await db.findUserByEmail(email);
+    if (!userRow) {
+      return res.status(401).json({ success: false, message: MSG_TRY_AGAIN });
+    }
+    const stored = String(userRow.password || "");
+    let ok = false;
+    if (stored) {
+      if (stored.startsWith("$2a$") || stored.startsWith("$2b$") || stored.startsWith("$2y$")) {
+        ok = await bcrypt.compare(password, stored).catch(() => false);
+      } else {
+        // Legacy plaintext: allow once, then upgrade to bcrypt.
+        ok = stored === password;
+        if (ok) {
+          const upgraded = await bcrypt.hash(password, 10);
+          await db.updateUserPassword(userRow.user_id, upgraded);
+        }
+      }
+    }
+    if (!ok) {
+      return res.status(401).json({ success: false, message: "Incorrect password." });
+    }
+    const user = mapUserForClient(userRow);
+    const token = jwt.sign({ sub: user.user_id, role: user.role }, authJwtSecret(), {
+      expiresIn: "7d",
+    });
+    return res.status(200).json({ success: true, token, user });
+  } catch (err) {
+    console.error("[api/auth/login]", err);
+    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
 });
 
 function pickDocumentTextFromBody(body) {
@@ -224,6 +449,36 @@ async function listPublishedQuizzesFromS3(limit = 20) {
     }
   }
   return out.filter((q) => Number.isFinite(q.quizId) && q.quizId > 0);
+}
+
+async function getPublishedQuizDetailFromS3(quizId) {
+  const qid = Number(quizId);
+  if (!Number.isFinite(qid) || qid <= 0 || !s3.isS3Configured()) return null;
+  const key = buildPublishedQuizKey(qid);
+  try {
+    const got = await s3.getObjectBuffer(key);
+    const raw = String(got?.buffer || "").trim();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+    return {
+      quiz_id: qid,
+      title: String(parsed?.title || "Published Quiz"),
+      is_published: 1,
+      course_code: String(parsed?.courseCode || "DOC"),
+      creator_name: String(parsed?.creatorName || "Lecturer"),
+      created_at: parsed?.createdAt || parsed?.publishedAt || null,
+      published_at: parsed?.publishedAt || parsed?.createdAt || null,
+      questions: questions.map((q, idx) => ({
+        question_id: Number(q?.question_id || q?.id || idx + 1),
+        question_text: String(q?.question_text || q?.question || ""),
+        options: Array.isArray(q?.options) ? q.options : [],
+        correct_answer: q?.correct_answer ?? q?.answer ?? "",
+      })),
+    };
+  } catch (_) {
+    return null;
+  }
 }
 
 async function listS3DocsForQuiz() {
@@ -356,9 +611,8 @@ app.get("/api/progress/summary", async (req, res) => {
       (process.env.DEFAULT_QUIZ_USER_ID != null && String(process.env.DEFAULT_QUIZ_USER_ID).trim() !== ""
         ? process.env.DEFAULT_QUIZ_USER_ID
         : null);
-    const userId =
-      rawUid != null && String(rawUid).trim() !== "" ? Number(String(rawUid).trim()) : null;
-    if (userId == null || Number.isNaN(userId)) {
+    const userId = rawUid != null ? String(rawUid).trim() : "";
+    if (!userId) {
       return res.status(200).json({
         success: true,
         data: emptyProgressPayload(),
@@ -410,6 +664,35 @@ app.get("/api/quizzes/history", async (req, res) => {
   }
 });
 
+app.get("/api/quiz/completed", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+    }
+    const limit = req.query.limit;
+    const userId = req.query.userId ?? req.query.user_id;
+    const data = await db.listCompletedAttempts(limit, userId);
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error("[api/quiz/completed]", err);
+    return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
+app.get("/api/quiz/result/:attemptId", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: null, message: MSG_DATA_UNAVAILABLE });
+    }
+    const userId = req.query.userId ?? req.query.user_id;
+    const data = await db.getAttemptResultDetail(req.params.attemptId, userId);
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error("[api/quiz/result/:attemptId]", err);
+    return res.status(200).json({ success: true, data: null, message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
 app.post("/api/quiz/attempts", async (req, res) => {
   try {
     if (!db.isConfigured()) {
@@ -435,12 +718,26 @@ app.post("/api/quiz/attempts", async (req, res) => {
     }
 
     const score = req.body.score ?? req.body.correctCount ?? req.body.correct;
-    await db.finishQuizAttempt({
-      quizId,
-      userId,
-      score,
-      completedAt: req.body.completedAt,
-    });
+    const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
+    const timeTakenSeconds = req.body.timeTaken ?? req.body.time_taken_seconds ?? null;
+    if (answers.length) {
+      await db.finishQuizAttemptWithAnswers({
+        quizId,
+        userId,
+        score,
+        answers,
+        timeTakenSeconds,
+        completedAt: req.body.completedAt,
+      });
+    } else {
+      await db.finishQuizAttempt({
+        quizId,
+        userId,
+        score,
+        timeTakenSeconds,
+        completedAt: req.body.completedAt,
+      });
+    }
     return res.status(201).json({ success: true, message: "Attempt result saved." });
   } catch (err) {
     console.error("[api/quiz/attempts]", err);
@@ -712,19 +1009,22 @@ app.post("/api/quizzes/:id/publish", async (req, res) => {
 
 app.get("/api/quizzes/:id", async (req, res) => {
   try {
-    if (!db.isConfigured()) {
-      return res.status(503).json({
-        success: false,
-        message: MSG_UNAVAILABLE,
-      });
+    let row = null;
+    if (db.isConfigured()) {
+      row = await db.getQuizWithQuestions(req.params.id);
     }
-    const row = await db.getQuizWithQuestions(req.params.id);
+    // Fallback to S3-published quiz for student consumption.
+    if (!row) {
+      row = await getPublishedQuizDetailFromS3(req.params.id);
+    }
     if (!row) {
       return res.status(404).json({ success: false, message: "Quiz not found." });
     }
     const viewerId =
       req.query.userId ?? req.query.user_id ?? req.query.viewerUserId ?? req.query.viewer_user_id;
-    const canManage = await db.canUserManageQuiz(req.params.id, viewerId);
+    const canManage = db.isConfigured()
+      ? await db.canUserManageQuiz(req.params.id, viewerId)
+      : false;
     if (!db.quizRowIsPublished(row) && !canManage) {
       return res.status(404).json({
         success: false,
@@ -925,8 +1225,18 @@ async function start() {
   } else {
     console.warn("MySQL is not configured — s3Key + embedding quiz flow will not run.");
   }
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server listening at http://localhost:${PORT}`);
+  });
+  server.on("error", (err) => {
+    if (err && err.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} is already in use. Another backend instance is running.`);
+      console.error("Stop the existing process or change PORT in .env before starting a new one.");
+      process.exit(0);
+      return;
+    }
+    console.error(err);
+    process.exit(1);
   });
 }
 

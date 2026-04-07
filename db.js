@@ -111,6 +111,18 @@ function parseOptionalInt(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function parseOptionalUserId(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  // Keep integer ids numeric, preserve non-numeric ids as strings.
+  if (/^-?\d+$/.test(s)) {
+    const n = Number(s);
+    if (Number.isFinite(n)) return n;
+  }
+  return s;
+}
+
 /**
  * @param {object} row
  * @param {string} row.s3Key - stored in documents.file_url
@@ -390,6 +402,17 @@ function scoreToPercent(score, questionCount) {
   return null;
 }
 
+function normalizeAttemptScorePercent(score, totalQuestions, correctCount) {
+  const pctFromScore = scoreToPercent(score, totalQuestions);
+  if (pctFromScore != null) return pctFromScore;
+  const c = Number(correctCount);
+  const t = Number(totalQuestions);
+  if (Number.isFinite(c) && Number.isFinite(t) && t > 0 && c >= 0) {
+    return Math.round((100 * c) / t);
+  }
+  return 0;
+}
+
 async function listQuizHistory(limit = 20, userId = null) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
@@ -482,6 +505,48 @@ async function getUserRole(userId) {
   if (uid == null) return null;
   const [rows] = await getPool().execute("SELECT role FROM users WHERE user_id = ? LIMIT 1", [uid]);
   return rows.length ? rows[0].role : null;
+}
+
+async function findUserByEmail(email) {
+  const em = String(email || "").trim().toLowerCase();
+  if (!em) return null;
+  const p = getPool();
+  const [rows] = await p.execute(
+    `SELECT user_id, email, role,
+      COALESCE(NULLIF(full_name,''), NULLIF(name,''), '') AS display_name,
+      password
+     FROM users
+     WHERE LOWER(email) = ?
+     LIMIT 1`,
+    [em]
+  );
+  return rows.length ? rows[0] : null;
+}
+
+async function createUser({ fullName, name, email, password, role, userCode }) {
+  const em = String(email || "").trim().toLowerCase();
+  if (!em) throw new Error("Invalid email.");
+  const r = String(role || "STUDENT").trim().toUpperCase() || "STUDENT";
+  const nm = String(name || fullName || "").trim() || null;
+  const fn = String(fullName || name || "").trim() || null;
+  const code = userCode != null && String(userCode).trim() ? String(userCode).trim().slice(0, 64) : null;
+  const p = getPool();
+  const [hdr] = await p.execute(
+    `INSERT INTO users (email, password, role, full_name, name, user_code)
+     VALUES (?,?,?,?,?,?)`,
+    [em, String(password || ""), r, fn, nm, code]
+  );
+  return Number(hdr.insertId);
+}
+
+async function updateUserPassword(userId, hashedPassword) {
+  const uid = parseOptionalInt(userId);
+  if (uid == null) return false;
+  await getPool().execute(`UPDATE users SET password = ? WHERE user_id = ?`, [
+    String(hashedPassword || ""),
+    uid,
+  ]);
+  return true;
 }
 
 function isLecturerRole(role) {
@@ -583,7 +648,7 @@ async function startQuizAttempt({ quizId, userId }) {
  * Update the open attempt (completed_at IS NULL) on submit.
  * If none exists (legacy API / edge case) → INSERT as before.
  */
-async function finishQuizAttempt({ quizId, userId, score, completedAt = null }) {
+async function finishQuizAttempt({ quizId, userId, score, completedAt = null, timeTakenSeconds = null }) {
   const p = getPool();
   const qid = Number(quizId);
   if (!Number.isFinite(qid)) throw new Error("Invalid quizId.");
@@ -599,17 +664,241 @@ async function finishQuizAttempt({ quizId, userId, score, completedAt = null }) 
      ORDER BY attempt_id DESC LIMIT 1`,
     [qid, uid]
   );
+  const safeTimeTaken = Number.isFinite(Number(timeTakenSeconds))
+    ? Math.max(0, Math.floor(Number(timeTakenSeconds)))
+    : null;
   if (openRows.length) {
     await p.execute(
-      `UPDATE quiz_attempts SET score = ?, completed_at = ? WHERE attempt_id = ?`,
-      [Math.round(sc), when, openRows[0].attempt_id]
+      `UPDATE quiz_attempts SET score = ?, completed_at = ?, time_taken_seconds = COALESCE(?, time_taken_seconds) WHERE attempt_id = ?`,
+      [Math.round(sc), when, safeTimeTaken, openRows[0].attempt_id]
     );
     return;
   }
   await p.execute(
-    `INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,?,?)`,
-    [qid, uid, Math.round(sc), when]
+    `INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at, time_taken_seconds) VALUES (?,?,?,?,?)`,
+    [qid, uid, Math.round(sc), when, safeTimeTaken]
   );
+}
+
+function optionLetterFromAnswer(answer) {
+  const n = Number(answer);
+  if (Number.isFinite(n) && n >= 0 && n <= 3) return ["A", "B", "C", "D"][n];
+  const s = String(answer || "").trim().toUpperCase();
+  return ["A", "B", "C", "D"].includes(s) ? s : null;
+}
+
+function optionIndexFromLetter(letter) {
+  return ["A", "B", "C", "D"].indexOf(String(letter || "").trim().toUpperCase());
+}
+
+async function finishQuizAttemptWithAnswers({
+  quizId,
+  userId,
+  score,
+  completedAt = null,
+  answers = [],
+  timeTakenSeconds = null,
+}) {
+  const p = getPool();
+  const qid = Number(quizId);
+  if (!Number.isFinite(qid)) throw new Error("Invalid quizId.");
+  const sc = Number(score);
+  if (!Number.isFinite(sc) || sc < 0) throw new Error("Invalid score.");
+  const when = completedAt ? new Date(completedAt) : new Date();
+  const uid = parseOptionalInt(userId);
+  await assertQuizExists(qid, p);
+
+  const [openRows] = await p.execute(
+    `SELECT attempt_id FROM quiz_attempts
+     WHERE quiz_id = ? AND (user_id <=> ?) AND completed_at IS NULL
+     ORDER BY attempt_id DESC LIMIT 1`,
+    [qid, uid]
+  );
+  let attemptId;
+  if (openRows.length) {
+    attemptId = Number(openRows[0].attempt_id);
+    await p.execute(
+      `UPDATE quiz_attempts SET score = ?, completed_at = ?, time_taken_seconds = COALESCE(?, time_taken_seconds) WHERE attempt_id = ?`,
+      [Math.round(sc), when, Number.isFinite(Number(timeTakenSeconds)) ? Math.max(0, Math.floor(Number(timeTakenSeconds))) : null, attemptId]
+    );
+  } else {
+    const [hdr] = await p.execute(
+      `INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at, time_taken_seconds) VALUES (?,?,?,?,?)`,
+      [qid, uid, Math.round(sc), when, Number.isFinite(Number(timeTakenSeconds)) ? Math.max(0, Math.floor(Number(timeTakenSeconds))) : null]
+    );
+    attemptId = Number(hdr.insertId);
+  }
+
+  const answersPayload = Array.isArray(answers) ? answers : [];
+  const answersJson = JSON.stringify(answersPayload);
+  try {
+    await p.execute(`UPDATE quiz_attempts SET answers_json = ? WHERE attempt_id = ?`, [
+      answersJson,
+      attemptId,
+    ]);
+  } catch {
+    // answers_json may be absent in older schemas
+  }
+
+  await p.execute(`DELETE FROM quiz_answers WHERE attempt_id = ?`, [attemptId]);
+  for (const a of answersPayload) {
+    const questionId = Number(a?.questionId ?? a?.question_id);
+    if (!Number.isFinite(questionId)) continue;
+    const userLetter = optionLetterFromAnswer(a?.selectedAnswer ?? a?.user_answer);
+    let isCorrect = 0;
+    if (userLetter) {
+      const [rows] = await p.execute(
+        `SELECT correct_answer FROM quiz_questions WHERE question_id = ? AND quiz_id = ? LIMIT 1`,
+        [questionId, qid]
+      );
+      const correct = String(rows?.[0]?.correct_answer || "").toUpperCase();
+      isCorrect = correct && correct === userLetter ? 1 : 0;
+    }
+    await p.execute(
+      `INSERT INTO quiz_answers (attempt_id, question_id, user_answer, is_correct) VALUES (?,?,?,?)`,
+      [attemptId, questionId, userLetter, isCorrect]
+    );
+  }
+  return attemptId;
+}
+
+async function listCompletedAttempts(limit = 200, userId = null) {
+  const uid = parseOptionalInt(userId);
+  if (uid == null) return [];
+  const lim = Math.min(Math.max(Number(limit) || 200, 1), 500);
+  const [rows] = await getPool().execute(
+    `SELECT qa.attempt_id, qa.quiz_id, q.title, qa.score, qa.correct_count, qa.total_questions,
+            qa.time_taken_seconds, qa.created_at, qa.completed_at,
+            (SELECT COUNT(*) FROM quiz_answers qas WHERE qas.attempt_id = qa.attempt_id) AS answers_count,
+            (SELECT COUNT(*) FROM quiz_answers qas WHERE qas.attempt_id = qa.attempt_id AND qas.is_correct = 1) AS answers_correct_count,
+            (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = qa.quiz_id) AS quiz_questions_count
+     FROM quiz_attempts qa
+     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+     WHERE qa.user_id = ? AND qa.completed_at IS NOT NULL
+     ORDER BY qa.completed_at DESC, qa.attempt_id DESC
+     LIMIT ${lim}`,
+    [uid]
+  );
+  return rows.map((r) => {
+    const answersCount = Number(r.answers_count || 0);
+    const answersCorrect = Number(r.answers_correct_count || 0);
+    const totalQuestions =
+      (answersCount > 0 ? answersCount : 0) ||
+      Number(r.total_questions || 0) ||
+      Number(r.quiz_questions_count || 0) ||
+      0;
+    const correctCount =
+      (answersCount > 0 ? answersCorrect : 0) ||
+      Number(r.correct_count || 0) ||
+      0;
+    return {
+    id: Number(r.attempt_id),
+    quiz_id: Number(r.quiz_id),
+    title: r.title,
+    score: normalizeAttemptScorePercent(r.score, totalQuestions, correctCount),
+    correct_count: correctCount,
+    total_questions: totalQuestions,
+    time_taken_seconds: Number.isFinite(Number(r.time_taken_seconds))
+      ? Math.max(0, Math.floor(Number(r.time_taken_seconds)))
+      : r.created_at && r.completed_at
+        ? Math.max(0, Math.floor((new Date(r.completed_at).getTime() - new Date(r.created_at).getTime()) / 1000))
+        : 0,
+    created_at: r.completed_at || r.created_at || null,
+  };
+  });
+}
+
+async function getAttemptResultDetail(attemptId, userId = null) {
+  const aid = Number(attemptId);
+  const uid = parseOptionalInt(userId);
+  if (!Number.isFinite(aid) || uid == null) return null;
+  const p = getPool();
+  const [attemptRows] = await p.execute(
+    `SELECT attempt_id, quiz_id, score, correct_count, total_questions, answers_json, created_at, completed_at, time_taken_seconds
+     FROM quiz_attempts
+     WHERE attempt_id = ? AND user_id = ? AND completed_at IS NOT NULL
+     LIMIT 1`,
+    [aid, uid]
+  );
+  if (!attemptRows.length) return null;
+  const att = attemptRows[0];
+  const [[quizCountRow]] = await p.execute(
+    `SELECT COUNT(*) AS n FROM quiz_questions WHERE quiz_id = ?`,
+    [att.quiz_id]
+  );
+  const quizQuestionsCount = Number(quizCountRow?.n || 0);
+
+  const [rows] = await p.execute(
+    `SELECT qq.question_id, qq.question_text, qq.option_a, qq.option_b, qq.option_c, qq.option_d,
+            qq.correct_answer, qa.user_answer, qa.is_correct
+     FROM quiz_answers qa
+     INNER JOIN quiz_questions qq ON qq.question_id = qa.question_id
+     WHERE qa.attempt_id = ?
+     ORDER BY qq.question_id ASC`,
+    [aid]
+  );
+
+  let answers = rows.map((r) => ({
+    questionId: Number(r.question_id),
+    question_text: String(r.question_text || ""),
+    user_answer: String(r.user_answer || ""),
+    correct_answer: String(r.correct_answer || ""),
+    is_correct: Number(r.is_correct || 0) === 1,
+    options: [r.option_a, r.option_b, r.option_c, r.option_d].map((x) => String(x || "")),
+    selectedAnswer: optionIndexFromLetter(r.user_answer),
+    correctAnswer: optionIndexFromLetter(r.correct_answer),
+  }));
+
+  if (!answers.length && att.answers_json) {
+    let parsed = [];
+    try {
+      parsed = JSON.parse(String(att.answers_json || "[]"));
+    } catch {
+      parsed = [];
+    }
+    const [qRows] = await p.execute(
+      `SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer
+       FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC`,
+      [att.quiz_id]
+    );
+    const byId = new Map(qRows.map((q) => [Number(q.question_id), q]));
+    answers = (Array.isArray(parsed) ? parsed : []).map((a, idx) => {
+      const qid = Number(a?.questionId ?? a?.question_id);
+      const q = Number.isFinite(qid) ? byId.get(qid) : qRows[idx];
+      const userLetter = optionLetterFromAnswer(a?.selectedAnswer ?? a?.user_answer);
+      const correctLetter = String(q?.correct_answer || "");
+      return {
+        questionId: Number(q?.question_id || qid || idx + 1),
+        question_text: String(q?.question_text || `Question ${idx + 1}`),
+        user_answer: String(userLetter || ""),
+        correct_answer: correctLetter,
+        is_correct: !!userLetter && userLetter === String(correctLetter).toUpperCase(),
+        options: [q?.option_a, q?.option_b, q?.option_c, q?.option_d].map((x) => String(x || "")),
+        selectedAnswer: optionIndexFromLetter(userLetter),
+        correctAnswer: optionIndexFromLetter(correctLetter),
+      };
+    });
+  }
+
+  const derivedTotalQuestions =
+    Number(att.total_questions || 0) ||
+    quizQuestionsCount ||
+    (Array.isArray(answers) && answers.length ? answers.length : 0);
+  const derivedCorrectCount =
+    Number(att.correct_count || 0) ||
+    (Array.isArray(answers) ? answers.filter((a) => !!a.is_correct).length : 0);
+
+  return {
+    score: normalizeAttemptScorePercent(att.score, derivedTotalQuestions, derivedCorrectCount),
+    correct_count: derivedCorrectCount,
+    total_questions: derivedTotalQuestions,
+    time_taken_seconds: Number.isFinite(Number(att.time_taken_seconds))
+      ? Math.max(0, Math.floor(Number(att.time_taken_seconds)))
+      : att.created_at && att.completed_at
+        ? Math.max(0, Math.floor((new Date(att.completed_at).getTime() - new Date(att.created_at).getTime()) / 1000))
+        : null,
+    answers,
+  };
 }
 
 async function recordQuizAttempt(opts) {
@@ -751,7 +1040,41 @@ function rowsToMap(rows, keyField, valueField) {
  */
 async function getLearningProgressSummary(userId) {
   const p = getPool();
-  const uid = parseOptionalInt(userId);
+  let uid = parseOptionalUserId(userId);
+  if (typeof uid === "string") {
+    const [uRows] = await p.execute(
+      `SELECT user_id FROM users
+       WHERE user_code = ? OR LOWER(email) = LOWER(?) OR CAST(user_id AS CHAR) = ?
+       LIMIT 1`,
+      [uid, uid, uid]
+    );
+    if (Array.isArray(uRows) && uRows.length > 0) {
+      const resolved = Number(uRows[0].user_id);
+      if (Number.isFinite(resolved)) uid = resolved;
+    }
+  }
+
+  const [[studyTimeRow]] = await p.execute(
+    `SELECT
+       SUM(
+         CASE
+           WHEN time_taken_seconds IS NOT NULL AND time_taken_seconds >= 0 THEN time_taken_seconds
+           WHEN completed_at IS NOT NULL AND created_at IS NOT NULL THEN GREATEST(TIMESTAMPDIFF(SECOND, created_at, completed_at), 0)
+           ELSE 0
+         END
+       ) AS total_seconds
+     FROM quiz_attempts
+     WHERE (user_id <=> ?)`,
+    [uid]
+  );
+  const totalStudySeconds = Math.max(0, Number(studyTimeRow?.total_seconds || 0));
+  const studyHoursLabel = (() => {
+    if (totalStudySeconds <= 0) return null;
+    const hours = Math.floor(totalStudySeconds / 3600);
+    const mins = Math.floor((totalStudySeconds % 3600) / 60);
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
+  })();
 
   const [courseIdRows] = await p.execute(
     `SELECT DISTINCT x.cid AS course_id FROM (
@@ -766,16 +1089,67 @@ async function getLearningProgressSummary(userId) {
     .map((r) => Number(r.course_id))
     .filter((n) => Number.isFinite(n));
   if (!courseIds.length) {
+    const [streakRows] = await p.execute(
+      `SELECT DISTINCT DATE_FORMAT(COALESCE(completed_at, created_at), '%Y-%m-%d') AS d
+       FROM quiz_attempts
+       WHERE COALESCE(completed_at, created_at) IS NOT NULL
+         AND (user_id <=> ?)
+       ORDER BY d DESC`,
+      [uid]
+    );
+    const isoDates = streakRows.map((r) => String(r.d || "").slice(0, 10)).filter(Boolean);
+    const dateSet = new Set(isoDates);
+    const sortedAsc = [...isoDates].sort();
+    const localYmd = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    };
+    const computeCurrentStreakLocal = (dates) => {
+      const today = new Date();
+      let d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const key = (dt) => localYmd(dt);
+      if (!dates.has(key(d))) d.setDate(d.getDate() - 1);
+      if (!dates.has(key(d))) return 0;
+      let n = 0;
+      while (dates.has(key(d))) {
+        n += 1;
+        d.setDate(d.getDate() - 1);
+      }
+      return n;
+    };
+    const computeLongestStreak = (datesAsc) => {
+      if (!datesAsc.length) return 0;
+      let best = 1;
+      let run = 1;
+      for (let i = 1; i < datesAsc.length; i += 1) {
+        const prev = new Date(`${datesAsc[i - 1]}T12:00:00Z`);
+        const cur = new Date(`${datesAsc[i]}T12:00:00Z`);
+        const diff = (cur - prev) / 86400000;
+        if (diff === 1) {
+          run += 1;
+          best = Math.max(best, run);
+        } else if (diff > 1) {
+          run = 1;
+        }
+      }
+      return best;
+    };
+    const streak = {
+      currentDays: computeCurrentStreakLocal(dateSet),
+      longestDays: computeLongestStreak(sortedAsc),
+    };
     return {
       overall: {
         progressPercent: 0,
         completedMaterials: 0,
         totalMaterials: 0,
         averageScorePercent: null,
-        studyHoursLabel: null,
+        studyHoursLabel,
       },
       courses: [],
-      streak: { currentDays: 0, longestDays: 0 },
+      streak,
     };
   }
 
@@ -968,15 +1342,23 @@ async function getLearningProgressSummary(userId) {
       : null;
 
   const [dateRows] = await p.execute(
-    `SELECT DISTINCT DATE(completed_at) AS d
+    `SELECT DISTINCT DATE_FORMAT(COALESCE(completed_at, created_at), '%Y-%m-%d') AS d
      FROM quiz_attempts
-     WHERE completed_at IS NOT NULL AND (user_id <=> ?)
+     WHERE COALESCE(completed_at, created_at) IS NOT NULL
+       AND (user_id <=> ?)
      ORDER BY d DESC`,
     [uid]
   );
+  function ymdLocalFromDate(dt) {
+    const y = dt.getFullYear();
+    const m = String(dt.getMonth() + 1).padStart(2, "0");
+    const day = String(dt.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
   const isoDates = dateRows.map((r) => {
     const x = r.d;
-    if (x instanceof Date) return x.toISOString().slice(0, 10);
+    if (x instanceof Date) return ymdLocalFromDate(x);
     const s = String(x);
     return s.length >= 10 ? s.slice(0, 10) : s;
   });
@@ -1036,7 +1418,7 @@ async function getLearningProgressSummary(userId) {
       completedMaterials: sumCompleted,
       totalMaterials: sumTotal,
       averageScorePercent,
-      studyHoursLabel: null,
+      studyHoursLabel,
     },
     courses,
     streak,
@@ -1069,9 +1451,15 @@ module.exports = {
   listPublishedQuizzes,
   startQuizAttempt,
   finishQuizAttempt,
+  finishQuizAttemptWithAnswers,
+  listCompletedAttempts,
+  getAttemptResultDetail,
   recordQuizAttempt,
   scoreToPercent,
   getUserRole,
+  findUserByEmail,
+  createUser,
+  updateUserPassword,
   canUserManageQuiz,
   replaceQuizQuestions,
   updateQuizTitle,
