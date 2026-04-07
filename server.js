@@ -3,10 +3,20 @@ const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const nodemailer = require("nodemailer");
 
 const app = express();
 const PORT = 3001;
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const JWT_SECRET = process.env.JWT_SECRET || "edumate-dev-secret";
+const SMTP_HOST = process.env.SMTP_HOST || "";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() === "true";
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || "";
 
 app.use(cors());
 app.use(express.json());
@@ -91,6 +101,18 @@ const upload = multer({
 const recentUploads = [];
 const quizzes = [];
 const quizAttempts = [];
+const users = [];
+const pendingRegs = new Map();
+const LETTERS = ["A", "B", "C", "D"];
+const mailer =
+  SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM
+    ? nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_SECURE,
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
+      })
+    : null;
 
 function isEmpty(value) {
   return !value || !String(value).trim();
@@ -109,10 +131,160 @@ function deleteFileIfExists(filePath) {
   }
 }
 
+function toNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function optionTextFromQuestion(questionRow, keyOrIdx) {
+  if (!questionRow) return "";
+  const optionsObj = questionRow.options || {};
+  const arr = [
+    optionsObj.A || "",
+    optionsObj.B || "",
+    optionsObj.C || "",
+    optionsObj.D || "",
+  ];
+  if (typeof keyOrIdx === "number") {
+    return arr[keyOrIdx] || "";
+  }
+  const key = String(keyOrIdx || "").toUpperCase();
+  const idx = LETTERS.indexOf(key);
+  if (idx >= 0) return arr[idx] || "";
+  return "";
+}
+
+async function sendOtpEmail(toEmail, otp) {
+  if (!mailer) return false;
+  await mailer.sendMail({
+    from: SMTP_FROM,
+    to: toEmail,
+    subject: "EduMate OTP Verification",
+    text: `Your OTP code is: ${otp}. This code expires in 5 minutes.`,
+    html: `<p>Your OTP code is: <b>${otp}</b></p><p>This code expires in 5 minutes.</p>`,
+  });
+  return true;
+}
+
 app.get("/", (req, res) => {
   res.status(200).json({
     success: true,
     message: "Edumate backend is running.",
+  });
+});
+
+app.post("/api/auth/register", async (req, res) => {
+  const { full_name, email, password, role, user_code } = req.body || {};
+  const em = String(email || "").trim().toLowerCase();
+  const pw = String(password || "");
+  const name = String(full_name || "").trim();
+  const code = String(user_code || "").trim();
+  const roleNorm = String(role || "STUDENT").toUpperCase();
+  if (!name || !em || !pw || !code) {
+    return res.status(400).json({ success: false, message: "Missing required fields." });
+  }
+  if (pw.length < 6) {
+    return res.status(400).json({ success: false, message: "Password must be at least 6 characters." });
+  }
+  const existed = users.find((u) => u.email === em);
+  if (existed) {
+    return res.status(409).json({ success: false, message: "Email already registered." });
+  }
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const password_hash = await bcrypt.hash(pw, 10);
+  pendingRegs.set(em, {
+    full_name: name,
+    email: em,
+    password_hash,
+    role: roleNorm === "LECTURER" ? "LECTURER" : "STUDENT",
+    user_code: code,
+    otp,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  });
+  let emailSent = false;
+  try {
+    emailSent = await sendOtpEmail(em, otp);
+  } catch (mailErr) {
+    console.error("[OTP][MAIL_ERROR]", mailErr?.message || mailErr);
+  }
+  // Dev fallback visibility.
+  console.log(`[OTP][${em}] ${otp}`);
+  return res.status(200).json({
+    success: true,
+    message: emailSent
+      ? "OTP sent to your email."
+      : "OTP created. Email is not configured, check server log for OTP in dev.",
+    data: { expiresInSec: 300 },
+  });
+});
+
+app.post("/api/auth/verify-otp", (req, res) => {
+  const { email, otp_code } = req.body || {};
+  const em = String(email || "").trim().toLowerCase();
+  const otp = String(otp_code || "").trim();
+  const pending = pendingRegs.get(em);
+  if (!pending) {
+    return res.status(400).json({ success: false, message: "No pending registration." });
+  }
+  if (Date.now() > Number(pending.expiresAt || 0)) {
+    pendingRegs.delete(em);
+    return res.status(400).json({ success: false, message: "OTP expired." });
+  }
+  if (otp !== String(pending.otp)) {
+    return res.status(400).json({ success: false, message: "Invalid OTP." });
+  }
+  const newUser = {
+    user_id: Date.now(),
+    full_name: pending.full_name,
+    email: pending.email,
+    password_hash: pending.password_hash,
+    role: pending.role,
+    user_code: pending.user_code,
+    createdAt: new Date().toISOString(),
+  };
+  users.push(newUser);
+  pendingRegs.delete(em);
+  return res.status(201).json({
+    success: true,
+    message: "Registration completed.",
+    data: {
+      user: {
+        user_id: newUser.user_id,
+        full_name: newUser.full_name,
+        email: newUser.email,
+        role: newUser.role,
+        user_code: newUser.user_code,
+      },
+    },
+  });
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body || {};
+  const em = String(email || "").trim().toLowerCase();
+  const pw = String(password || "");
+  const u = users.find((x) => x.email === em);
+  if (!u) return res.status(401).json({ success: false, message: "Invalid credentials." });
+  const ok = await bcrypt.compare(pw, String(u.password_hash || ""));
+  if (!ok) return res.status(401).json({ success: false, message: "Invalid credentials." });
+  const token = jwt.sign(
+    { user_id: u.user_id, email: u.email, role: u.role },
+    JWT_SECRET,
+    { expiresIn: "1d" }
+  );
+  return res.status(200).json({
+    success: true,
+    message: "Login successful.",
+    data: {
+      token,
+      user: {
+        user_id: u.user_id,
+        full_name: u.full_name,
+        email: u.email,
+        role: u.role,
+        user_code: u.user_code,
+      },
+    },
   });
 });
 
@@ -266,6 +438,9 @@ app.post("/api/quiz/generate", (req, res) => {
       lastAttemptAt: null,
       scorePercent: null,
       questionsCount: quiz.length,
+      questions: quiz,
+      attemptsCount: 0,
+      courseCode: fromDoc?.subjectCode || "DOC",
     });
   }
 
@@ -281,16 +456,66 @@ app.post("/api/quiz/generate", (req, res) => {
  * Shape matches FE usage in Generate-Quizz.html.
  */
 app.get("/api/quizzes/history", (req, res) => {
+  const uid = req.query?.userId != null ? String(req.query.userId) : null;
+  const attemptsByQuiz = new Map();
+  for (const a of quizAttempts) {
+    if (uid && String(a.userId ?? "") !== uid) continue;
+    const list = attemptsByQuiz.get(a.quizId) || [];
+    list.push(a);
+    attemptsByQuiz.set(a.quizId, list);
+  }
+
   return res.status(200).json({
     success: true,
     total: quizzes.length,
     data: quizzes.map((q) => ({
       id: q.id,
+      quizId: q.id,
       title: q.title,
       createdAt: q.createdAt,
       lastAttemptAt: q.lastAttemptAt,
       scorePercent: q.scorePercent,
+      questionCount: q.questionsCount,
+      attemptsCount: (attemptsByQuiz.get(q.id) || []).length,
+      lastAttemptId: ((attemptsByQuiz.get(q.id) || [])[0] || {}).id || null,
+      courseCode: q.courseCode || "DOC",
     })),
+  });
+});
+
+app.get("/api/quizzes/published", (req, res) => {
+  return res.status(200).json({
+    success: true,
+    total: quizzes.length,
+    data: quizzes.map((q) => ({
+      id: q.id,
+      quizId: q.id,
+      title: q.title,
+      questionCount: q.questionsCount,
+      courseCode: q.courseCode || "DOC",
+      creatorName: "Lecturer",
+      createdAt: q.createdAt,
+      publishedAt: q.createdAt,
+    })),
+  });
+});
+
+app.get("/api/quizzes/:id", (req, res) => {
+  const qid = toNum(req.params.id, NaN);
+  if (!Number.isFinite(qid)) {
+    return res.status(400).json({ success: false, message: "Invalid quiz id." });
+  }
+  const quizRow = quizzes.find((q) => q.id === qid);
+  if (!quizRow) {
+    return res.status(404).json({ success: false, message: "Quiz not found." });
+  }
+  return res.status(200).json({
+    success: true,
+    data: {
+      quiz_id: quizRow.id,
+      title: quizRow.title,
+      questions: Array.isArray(quizRow.questions) ? quizRow.questions : [],
+    },
   });
 });
 
@@ -299,11 +524,10 @@ app.get("/api/quizzes/history", (req, res) => {
  * FE sends { quizId, userId, score }.
  */
 app.post("/api/quiz/attempts", (req, res) => {
-  const { quizId, userId, score } = req.body || {};
+  const { quizId, userId, score, phase, answers, timeTaken } = req.body || {};
   const qid = Number(quizId);
-  const s = Number(score);
 
-  if (!Number.isFinite(qid) || !Number.isFinite(s)) {
+  if (!Number.isFinite(qid)) {
     return res.status(400).json({
       success: false,
       message: "Invalid request.",
@@ -319,24 +543,141 @@ app.post("/api/quiz/attempts", (req, res) => {
   }
 
   const now = new Date().toISOString();
-  const questionsCount = Number(quizRow.questionsCount) || 0;
-  const scorePercent =
-    questionsCount > 0 ? Math.round((s / questionsCount) * 100) : null;
+  if (String(phase || "").toLowerCase() === "start") {
+    quizAttempts.unshift({
+      id: Date.now(),
+      quizId: qid,
+      userId: userId ?? null,
+      score: null,
+      scorePercent: null,
+      totalQuestions: Number(quizRow.questionsCount) || 0,
+      correctCount: null,
+      createdAt: now,
+      completedAt: null,
+      status: "started",
+      answers: [],
+      time_taken_seconds: 0,
+    });
+    quizRow.attemptsCount = toNum(quizRow.attemptsCount) + 1;
+    return res.status(201).json({
+      success: true,
+      message: "OK",
+      data: { attemptId: quizAttempts[0].id },
+    });
+  }
 
+  const s = Number(score);
+  if (!Number.isFinite(s)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid score.",
+    });
+  }
+
+  const questions = Array.isArray(quizRow.questions) ? quizRow.questions : [];
+  const questionsCount = Number(quizRow.questionsCount) || questions.length || 0;
+  const scorePercent = questionsCount > 0 ? Math.round((s / questionsCount) * 100) : 0;
+
+  const normalizedAnswers = Array.isArray(answers)
+    ? answers.map((a, idx) => {
+        const qidRaw = a?.questionId ?? a?.question_id ?? `q-${idx + 1}`;
+        const qidStr = String(qidRaw);
+        const questionRow =
+          questions.find((q, qIdx) => String(q?.id || `q-${qIdx + 1}`) === qidStr) ||
+          questions[idx] ||
+          null;
+
+        const selectedRaw = a?.selectedAnswer ?? a?.selected_answer ?? a?.userAnswer;
+        let selectedLetter = null;
+        if (typeof selectedRaw === "number" && selectedRaw >= 0 && selectedRaw < LETTERS.length) {
+          selectedLetter = LETTERS[selectedRaw];
+        } else if (typeof selectedRaw === "string") {
+          const up = selectedRaw.toUpperCase();
+          if (LETTERS.includes(up)) selectedLetter = up;
+        }
+
+        const correctRaw = a?.correctAnswer ?? a?.correct_answer ?? questionRow?.correct_answer;
+        let correctLetter = null;
+        if (typeof correctRaw === "number" && correctRaw >= 0 && correctRaw < LETTERS.length) {
+          correctLetter = LETTERS[correctRaw];
+        } else if (typeof correctRaw === "string") {
+          const up = correctRaw.toUpperCase();
+          if (LETTERS.includes(up)) correctLetter = up;
+        }
+
+        return {
+          questionId: qidStr,
+          question_text: String(questionRow?.question || `Question ${idx + 1}`),
+          selectedAnswer: selectedLetter,
+          selected_answer: optionTextFromQuestion(questionRow, selectedLetter),
+          correctAnswer: correctLetter,
+          correct_answer: optionTextFromQuestion(questionRow, correctLetter),
+          options: questionRow?.options
+            ? [questionRow.options.A, questionRow.options.B, questionRow.options.C, questionRow.options.D].filter(Boolean)
+            : [],
+          is_correct:
+            selectedLetter && correctLetter ? selectedLetter === correctLetter : false,
+        };
+      })
+    : [];
+
+  const attemptId = Date.now();
   quizAttempts.unshift({
-    id: Date.now(),
+    id: attemptId,
     quizId: qid,
     userId: userId ?? null,
     score: s,
+    scorePercent,
+    totalQuestions: questionsCount,
+    correctCount: s,
     createdAt: now,
+    completedAt: now,
+    status: "completed",
+    answers: normalizedAnswers,
+    time_taken_seconds: toNum(timeTaken, 0),
   });
 
   quizRow.lastAttemptAt = now;
   quizRow.scorePercent = scorePercent;
+  quizRow.attemptsCount = toNum(quizRow.attemptsCount) + 1;
 
   return res.status(201).json({
     success: true,
     message: "OK",
+    data: { attemptId },
+  });
+});
+
+app.get("/api/quiz/result/:attemptId", (req, res) => {
+  const attemptId = toNum(req.params.attemptId, NaN);
+  if (!Number.isFinite(attemptId)) {
+    return res.status(400).json({ success: false, message: "Invalid attempt id." });
+  }
+
+  const uid = req.query?.userId != null ? String(req.query.userId) : null;
+  const attempt = quizAttempts.find((a) => {
+    if (a.id !== attemptId) return false;
+    if (uid && String(a.userId ?? "") !== uid) return false;
+    return true;
+  });
+  if (!attempt) {
+    return res.status(404).json({ success: false, message: "Attempt not found." });
+  }
+
+  const quizRow = quizzes.find((q) => q.id === attempt.quizId);
+  return res.status(200).json({
+    success: true,
+    data: {
+      attemptId: attempt.id,
+      quizId: attempt.quizId,
+      title: quizRow?.title || "Quiz",
+      score: attempt.scorePercent ?? 0,
+      correct_count: attempt.correctCount ?? 0,
+      total_questions: attempt.totalQuestions ?? 0,
+      time_taken_seconds: attempt.time_taken_seconds ?? 0,
+      answers: Array.isArray(attempt.answers) ? attempt.answers : [],
+      completed_at: attempt.completedAt || attempt.createdAt,
+    },
   });
 });
 

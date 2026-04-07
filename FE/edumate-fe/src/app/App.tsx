@@ -30,6 +30,8 @@ export default function App() {
     setUserRole(null);
     setUserData(null);
     setShowRegister(false);
+    localStorage.removeItem('edumate_token');
+    localStorage.removeItem('edumate_user');
   };
 
   return (

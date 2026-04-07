@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { BookOpen } from 'lucide-react';
+import api from '../../services/api';
 
 interface LoginProps {
   onLogin: (role: 'instructor' | 'student', userData: any) => void;
@@ -9,23 +10,36 @@ interface LoginProps {
 export function Login({ onLogin, onGoToRegister }: LoginProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
-    // Mock login - automatically determine role based on email
-    // In a real app, this would be determined by the backend based on account data
-    const isInstructor = email.includes('instructor') || email.includes('lecturer') || email.includes('prof') || email.includes('dr');
-    const role: 'instructor' | 'student' = isInstructor ? 'instructor' : 'student';
-
-    const userData = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: role === 'instructor' ? 'Dr. Sarah Johnson' : 'Alex Smith',
-      email: email || `${role}@edumate.com`,
-      role,
-    };
-
-    onLogin(role, userData);
+    setSubmitting(true);
+    try {
+      const res: any = await api.post('/auth/login', { email, password });
+      const token = res?.token || res?.data?.token || null;
+      const user = res?.user || res?.data?.user || null;
+      if (!res?.success || !token || !user) {
+        setError('Unable to sign in. Please try again.');
+        return;
+      }
+      const role: 'instructor' | 'student' =
+        String(user?.role || '').toUpperCase() === 'LECTURER' ? 'instructor' : 'student';
+      localStorage.setItem('edumate_token', token);
+      localStorage.setItem('edumate_user', JSON.stringify(user));
+      setError('');
+      onLogin(role, user);
+    } catch (err: any) {
+      const apiMessage = String(err?.response?.data?.message || '').trim().toLowerCase();
+      if (apiMessage === 'incorrect password.') {
+        setError('Incorrect password.');
+      } else {
+        setError('Unable to sign in. Please check your credentials.');
+      }
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -78,10 +92,12 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
 
             <button
               type="submit"
+              disabled={submitting}
               className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Sign In
+              {submitting ? 'Signing in...' : 'Sign In'}
             </button>
+            {error && <p className="text-red-500 text-sm mt-3">{error}</p>}
           </form>
 
           <div className="mt-6 text-center">
@@ -96,9 +112,6 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
             </p>
           </div>
 
-          <div className="mt-4 text-center text-gray-500">
-            <p className="text-sm">Demo: Use any email to login. Emails with "instructor", "lecturer", "prof", or "dr" will login as Instructor.</p>
-          </div>
         </div>
       </div>
     </div>

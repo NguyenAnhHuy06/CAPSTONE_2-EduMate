@@ -39,12 +39,13 @@ const EMPTY_SUMMARY: ProgressSummary = {
   streak: { currentDays: 0, longestDays: 0 },
 };
 
-function normalizeProgressData(raw: unknown): ProgressSummary {
-  if (!raw || typeof raw !== 'object') return { ...EMPTY_SUMMARY };
+function normalizeProgressData(raw: unknown): Omit<ProgressSummary, 'courses'> {
+  if (!raw || typeof raw !== 'object') {
+    return { overall: { ...EMPTY_SUMMARY.overall }, streak: { ...EMPTY_SUMMARY.streak } };
+  }
   const d = raw as Record<string, unknown>;
   const overall = d.overall && typeof d.overall === 'object' ? (d.overall as Record<string, unknown>) : {};
   const streak = d.streak && typeof d.streak === 'object' ? (d.streak as Record<string, unknown>) : {};
-  const courses = Array.isArray(d.courses) ? d.courses : [];
   return {
     overall: {
       progressPercent: Math.min(100, Math.max(0, Number(overall.progressPercent) || 0)),
@@ -60,12 +61,66 @@ function normalizeProgressData(raw: unknown): ProgressSummary {
           ? String(overall.studyHoursLabel)
           : null,
     },
-    courses: courses.filter((c) => c && typeof c === 'object') as ProgressSummary['courses'],
     streak: {
       currentDays: Math.max(0, Number(streak.currentDays) || 0),
       longestDays: Math.max(0, Number(streak.longestDays) || 0),
     },
   };
+}
+
+function buildCoursesFromQuizHistory(rows: any[]): ProgressSummary['courses'] {
+  const groups = new Map<
+    string,
+    {
+      code: string;
+      total: number;
+      completed: number;
+      scoreSum: number;
+      scoreCount: number;
+      lastAt: string | null;
+    }
+  >();
+
+  rows.forEach((h: any) => {
+    const code = String(h?.courseCode || h?.subjectCode || 'DOC').trim() || 'DOC';
+    const key = code.toUpperCase();
+    const g = groups.get(key) || {
+      code,
+      total: 0,
+      completed: 0,
+      scoreSum: 0,
+      scoreCount: 0,
+      lastAt: null,
+    };
+    g.total += 1;
+
+    const score = Number(h?.scorePercent);
+    if (Number.isFinite(score)) {
+      g.completed += 1;
+      g.scoreSum += score;
+      g.scoreCount += 1;
+    }
+
+    const ts = String(h?.lastAttemptAt || h?.createdAt || '');
+    if (ts && (!g.lastAt || new Date(ts).getTime() > new Date(g.lastAt).getTime())) {
+      g.lastAt = ts;
+    }
+    groups.set(key, g);
+  });
+
+  return Array.from(groups.values()).map((g, idx) => {
+    const avg = g.scoreCount > 0 ? Math.round(g.scoreSum / g.scoreCount) : null;
+    return {
+      courseId: idx + 1,
+      name: g.code === 'DOC' ? 'General quizzes' : `${g.code} quizzes`,
+      code: g.code,
+      progressPercent: avg ?? 0,
+      totalMaterials: g.total,
+      completedMaterials: g.completed,
+      quizScorePercent: avg,
+      lastActivityAt: g.lastAt,
+    };
+  });
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -102,12 +157,39 @@ export function ProgressTracker({ user }: ProgressTrackerProps) {
     (async () => {
       setLoading(true);
       try {
-        const res: unknown = await api.get('/progress/summary', { params: { userId: uid } });
+        const [progressRes, historyRes] = await Promise.all([
+          api.get('/progress/summary', { params: { userId: uid } }),
+          api.get('/quizzes/history', { params: { userId: uid, limit: 300 } }),
+        ]);
         if (cancelled) return;
 
-        const body = res && typeof res === 'object' ? (res as Record<string, unknown>) : null;
+        const body = progressRes && typeof progressRes === 'object' ? (progressRes as Record<string, unknown>) : null;
         const payload = body?.data;
-        setSummary(normalizeProgressData(payload));
+        const base = normalizeProgressData(payload);
+
+        const rows = Array.isArray((historyRes as any)?.data) ? (historyRes as any).data : [];
+        const courses = buildCoursesFromQuizHistory(rows);
+        const hasHistoryCourses = courses.length > 0;
+        const totalCompleted = courses.reduce((acc, c) => acc + c.completedMaterials, 0);
+        const totalItems = courses.reduce((acc, c) => acc + c.totalMaterials, 0);
+        const avg =
+          totalCompleted > 0
+            ? Math.round(courses.reduce((acc, c) => acc + (c.quizScorePercent || 0) * c.completedMaterials, 0) / totalCompleted)
+            : base.overall.averageScorePercent;
+        const derivedProgressPercent =
+          totalItems > 0 ? Math.round((100 * totalCompleted) / totalItems) : base.overall.progressPercent;
+
+        setSummary({
+          overall: {
+            ...base.overall,
+            progressPercent: hasHistoryCourses ? derivedProgressPercent : base.overall.progressPercent,
+            completedMaterials: hasHistoryCourses ? totalCompleted : base.overall.completedMaterials,
+            totalMaterials: hasHistoryCourses ? totalItems : base.overall.totalMaterials,
+            averageScorePercent: avg,
+          },
+          courses: hasHistoryCourses ? courses : base.courses ?? [],
+          streak: base.streak,
+        });
       } catch {
         if (!cancelled) setSummary({ ...EMPTY_SUMMARY });
       } finally {

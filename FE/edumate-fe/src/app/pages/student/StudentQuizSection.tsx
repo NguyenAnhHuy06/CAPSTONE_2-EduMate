@@ -96,6 +96,38 @@ function normalizeStoredQuestions(rows: any[] = []) {
     });
 }
 
+/**
+ * Normalize answers from backend into { questionId, selectedAnswer } format.
+ * Backend may return various shapes — handle all known variants.
+ */
+function normalizeReviewAnswers(raw: any[]): QuizAnswer[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((a: any) => {
+        // questionId: try all known field names
+        const questionId = String(
+            a?.questionId ?? a?.question_id ?? a?.questionID ?? ''
+        );
+        // selectedAnswer: may be index (number) or letter (A/B/C/D)
+        let selectedAnswer: number;
+        const raw_sel = a?.selectedAnswer ?? a?.selected_answer ?? a?.selected_option ?? a?.userAnswer ?? a?.user_answer;
+        if (typeof raw_sel === 'number') {
+            selectedAnswer = raw_sel;
+        } else if (typeof raw_sel === 'string' && LETTERS.includes(raw_sel.toUpperCase())) {
+            selectedAnswer = LETTERS.indexOf(raw_sel.toUpperCase());
+        } else {
+            selectedAnswer = -1; // unanswered
+        }
+        return { questionId, selectedAnswer };
+    }).filter((a) => a.questionId !== '');
+}
+
+function formatTimeTakenLabel(totalSecondsRaw: number): string {
+    const totalSeconds = Math.max(0, Math.floor(Number(totalSecondsRaw) || 0));
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins}m ${secs}s`;
+}
+
 export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     const { showNotification, showConfirm } = useNotification();
     const [activeTab, setActiveTab] = useState<QuizTab>('available');
@@ -107,14 +139,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
     const [answers, setAnswers] = useState<QuizAnswer[]>([]);
     const [timeRemaining, setTimeRemaining] = useState(0);
-    const [quizSubmitted, setQuizSubmitted] = useState(false);
+    const [quizStartedAtMs, setQuizStartedAtMs] = useState<number | null>(null);
     const [quizResult, setQuizResult] = useState<any>(null);
     const [timerId, setTimerId] = useState<NodeJS.Timeout | null>(null);
     const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
 
     const [availableQuizzes, setAvailableQuizzes] = useState<any[]>([]);
     const [completedQuizzes, setCompletedQuizzes] = useState<any[]>([]);
-
     const [practiceQuizzes, setPracticeQuizzes] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
 
@@ -122,9 +153,15 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         if (!opts?.quiet) setLoading(true);
         try {
             const uid = user?.user_id ?? user?.id ?? user?.userId;
-            const [docsRes, historyRes, publishedRes] = await Promise.all([
+            const [docsRes, historyRes, completedRes, publishedRes] = await Promise.all([
                 api.get('/documents/for-quiz'),
                 api.get('/quizzes/history', {
+                    params: {
+                        limit: 200,
+                        ...(uid != null && uid !== '' ? { userId: uid } : {}),
+                    },
+                }),
+                api.get('/quiz/completed', {
                     params: {
                         limit: 200,
                         ...(uid != null && uid !== '' ? { userId: uid } : {}),
@@ -133,7 +170,14 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 api.get('/quizzes/published'),
             ]);
 
-            const rows = Array.isArray(historyRes?.data) ? historyRes.data : [];
+            const rowsRaw = Array.isArray(historyRes?.data) ? historyRes.data : [];
+            const uidStr = uid != null ? String(uid) : '';
+            const rows = rowsRaw.filter((h: any) => {
+                if (!uidStr) return true;
+                const owner = h?.userId ?? h?.user_id ?? h?.ownerId ?? h?.studentId ?? h?.createdBy;
+                if (owner == null || owner === '') return true; // keep legacy rows with no owner info
+                return String(owner) === uidStr;
+            });
             const attemptsByTitle = new Map<string, number>();
             rows.forEach((h: any) => {
                 const k = String(h?.title || '').trim().toLowerCase();
@@ -161,18 +205,28 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 status: 'available',
             }));
             setAvailableQuizzes(mappedAvailable);
-            const mappedCompleted = rows.map((h: any) => ({
-                id: h?.quizId || h?.id,
+
+            const completedRows = Array.isArray(completedRes?.data) ? completedRes.data : [];
+            const mappedCompleted = completedRows.map((h: any) => ({
+                id: h?.quiz_id || h?.quizId || h?.id,
+                quizId: h?.quiz_id || h?.quizId || h?.id,
                 title: h?.title || 'Quiz',
-                subject: h?.courseCode || 'DOC',
+                subject: h?.courseCode || h?.subjectCode || 'DOC',
                 instructor: 'AI Generated',
-                questions: Array.from({ length: Number(h?.questionCount || 5) }).map((_, i) => ({ id: `h-q-${i}`, question: '', options: [], correctAnswer: 0 })),
+                questions: Array.from({ length: Number(h?.total_questions || h?.questionCount || 5) }).map((_, i) => ({
+                    id: `h-q-${i}`,
+                    question: '',
+                    options: [],
+                    correctAnswer: 0,
+                })),
                 duration: 10,
-                myScore: Number(h?.scorePercent ?? 0),
-                attempts: Number(h?.attemptsCount ?? 0),
-                completedDate: h?.lastAttemptAt || h?.createdAt || '',
+                durationSeconds: Math.max(0, Number(h?.time_taken_seconds || 0)),
+                myScore: Number(h?.score ?? h?.scorePercent ?? 0),
+                attempts: 1,
+                completedDate: h?.created_at || h?.lastAttemptAt || h?.createdAt || '',
                 status: 'completed',
                 userAnswers: [],
+                attemptId: h?.id ?? h?.attemptId ?? h?.lastAttemptId ?? null,
             }));
             setCompletedQuizzes(mappedCompleted);
 
@@ -191,7 +245,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             }));
             setPracticeQuizzes(mappedPublished);
         } catch {
-            // Do not surface connection errors in the UI; fall back to empty lists.
             setAvailableQuizzes([]);
             setCompletedQuizzes([]);
             setPracticeQuizzes([]);
@@ -241,7 +294,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
 
     const safeQuizQuestions = Array.isArray(selectedQuiz?.questions) ? selectedQuiz.questions : [];
 
-    /** Each successful Take Quiz records one attempt (phase start) for accurate counts. */
     const recordAttemptStart = async (quizId: string | number | undefined) => {
         const id = Number(quizId);
         if (!Number.isFinite(id) || id <= 0) return;
@@ -286,7 +338,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 setCurrentQuestionIndex(0);
                 setAnswers([]);
                 setTimeRemaining((generatedQuiz.duration || 10) * 60);
-                setQuizSubmitted(false);
+                setQuizStartedAtMs(Date.now());
                 setShowQuizTaking(true);
                 const timer = setInterval(() => {
                     setTimeRemaining((prev) => {
@@ -313,7 +365,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             setIsGeneratingQuiz(true);
             setShowQuizTaking(false);
             setShowResults(false);
-            setQuizSubmitted(false);
             const res = await api.post(
                 '/quiz/generate',
                 {
@@ -346,10 +397,25 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 setIsGeneratingQuiz(false);
                 return;
             }
+            const persistedQuizId = quizData.quizId || quiz.id;
+            let finalQuestions = questions;
+            try {
+                if (persistedQuizId != null) {
+                    const detailRes = await api.get(`/quizzes/${persistedQuizId}`, {
+                        params: { userId: user?.user_id ?? user?.id ?? user?.userId },
+                    });
+                    const detail = detailRes?.data || {};
+                    const stored = normalizeStoredQuestions(detail?.questions || []);
+                    if (stored.length) finalQuestions = stored;
+                }
+            } catch {
+                // keep AI questions if DB detail is not available
+            }
+
             const generatedQuiz = {
                 ...quiz,
-                id: quizData.quizId || quiz.id,
-                questions,
+                id: persistedQuizId,
+                questions: finalQuestions,
             };
 
             await recordAttemptStart(generatedQuiz.id);
@@ -357,7 +423,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             setCurrentQuestionIndex(0);
             setAnswers([]);
             setTimeRemaining((generatedQuiz.duration || 10) * 60);
-            setQuizSubmitted(false);
+            setQuizStartedAtMs(Date.now());
             setShowQuizTaking(true);
             setIsGeneratingQuiz(false);
 
@@ -420,20 +486,17 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 cancelText: 'Continue Quiz',
                 type: 'warning',
             });
-
             if (!confirmed) return;
         }
 
-        // Clear the timer
         if (timerId) {
             clearInterval(timerId);
             setTimerId(null);
         }
 
-        // Calculate score
+        // Use current answers state (correct for active quiz taking)
         let correctCount = 0;
         const questions = safeQuizQuestions;
-
         questions.forEach((q: any) => {
             const userAnswer = answers.find((a) => a.questionId === q.id);
             if (userAnswer && userAnswer.selectedAnswer === q.correctAnswer) {
@@ -443,21 +506,25 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
 
         const score = Math.round((correctCount / questions.length) * 100);
 
+        const durationMinutes = Number(selectedQuiz.duration) || 10;
+        const plannedSeconds = Math.max(0, Math.floor(durationMinutes * 60));
+        const elapsedByTimer = Math.max(0, plannedSeconds - Math.max(0, Number(timeRemaining) || 0));
+        const elapsedByClock = quizStartedAtMs ? Math.max(0, Math.floor((Date.now() - quizStartedAtMs) / 1000)) : 0;
+        const resolvedTimeTaken = elapsedByClock > 0 ? elapsedByClock : elapsedByTimer;
+
         const result = {
             quizId: selectedQuiz.id,
             score,
             correctAnswers: correctCount,
             totalQuestions: questions.length,
-            timeTaken: selectedQuiz.duration * 60 - timeRemaining,
+            timeTaken: resolvedTimeTaken,
             answers: answers,
             completedDate: new Date().toISOString().split('T')[0],
         };
 
         setQuizResult(result);
-        setQuizSubmitted(true);
         setShowQuizTaking(false);
 
-        // Attempt was recorded on Take Quiz; submit only updates the score (backend finish).
         if (activeTab === 'available') {
             setCompletedQuizzes((prev) => [
                 ...prev,
@@ -478,7 +545,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             );
         }
 
-        // Show success notification
         showNotification({
             type: 'success',
             title: 'Quiz Submitted!',
@@ -487,12 +553,16 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         });
 
         setShowResults(true);
+        setQuizStartedAtMs(null);
 
         try {
+            const scorePercent = score;
             await api.post('/quiz/attempts', {
                 quizId: selectedQuiz.id,
                 userId: user?.user_id ?? user?.id ?? user?.userId,
-                score: correctCount,
+                score: scorePercent,
+                answers,
+                timeTaken: result.timeTaken,
                 phase: 'complete',
             });
             await loadConnectedData();
@@ -509,12 +579,10 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         <div className="flex-1">
                             <h3 className="text-gray-900 mb-2">{quiz.title}</h3>
                             <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
-
                             {'instructor' in quiz && (
                                 <p className="text-gray-500 text-sm">Instructor: {quiz.instructor}</p>
                             )}
                         </div>
-
                         <button
                             onClick={() => startQuiz(quiz)}
                             className="flex items-center gap-2 px-6 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
@@ -523,7 +591,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             Take Quiz
                         </button>
                     </div>
-
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4 border-t border-gray-200 text-sm">
                         <div>
                             <p className="text-gray-500 mb-1">Questions</p>
@@ -534,14 +601,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             </p>
                         </div>
                         <div>
-                            <p className="text-gray-500 mb-1">Duration</p>
-                            <p className="text-gray-900">{quiz.duration} minutes</p>
+                            <p className="text-gray-500 mb-1">Time Taken</p>
+                            <p className="text-gray-900">{formatTimeTakenLabel(Number((quiz as any)?.durationSeconds || 0))}</p>
                         </div>
                         <div>
                             <p className="text-gray-500 mb-1">Attempts</p>
                             <p className="text-gray-900">{Number(quiz.myAttempts || 0)}</p>
                         </div>
-
                         <div>
                             <p className="text-gray-500 mb-1">Due Date</p>
                             {'dueDate' in quiz ? (
@@ -564,7 +630,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         <div className="flex-1">
                             <div className="flex items-center gap-3 mb-2">
                                 <h3 className="text-gray-900">{quiz.title}</h3>
-
                                 {'myScore' in quiz && quiz.myScore !== undefined && (
                                     <span
                                         className={`px-3 py-1 rounded-full text-sm ${quiz.myScore >= 80
@@ -579,13 +644,11 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                 )}
                             </div>
                             <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
-
                             {'instructor' in quiz ? (
                                 <p className="text-gray-500 text-sm">Instructor: {quiz.instructor}</p>
                             ) : (
                                 <p className="text-gray-500 text-sm">Instructor: N/A</p>
                             )}
-
                             {'completedDate' in quiz ? (
                                 <p className="text-gray-500 text-sm">Completed: {quiz.completedDate}</p>
                             ) : (
@@ -595,12 +658,47 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         <button
                             onClick={async () => {
                                 const score = 'myScore' in quiz ? Number(quiz.myScore || 0) : 0;
-                                const fallbackAnswers = 'userAnswers' in quiz ? quiz.userAnswers : [];
                                 let fullQuiz = quiz;
+                                const uid = user?.user_id ?? user?.id ?? user?.userId;
+                                const attemptId = (quiz as any)?.attemptId;
+                                const quizId = (quiz as any)?.quizId ?? quiz?.id;
+                                let reviewPayload: any = null;
+                                let hasReviewQuestions = false;
 
                                 try {
-                                    if (quiz?.id != null) {
-                                        const detailRes = await api.get(`/quizzes/${quiz.id}`);
+                                    // Try to get attempt review (has per-question answers)
+                                    if (attemptId != null && uid != null && uid !== '') {
+                                        const reviewRes = await api.get(`/quiz/result/${attemptId}`, {
+                                            params: { userId: uid },
+                                        });
+                                        reviewPayload = reviewRes?.data || null;
+                                        const reviewQuestions = (Array.isArray(reviewPayload?.answers) ? reviewPayload.answers : [])
+                                            .map((a: any, i: number) => ({
+                                                id: a?.questionId || `attempt-q-${i + 1}`,
+                                                question: a?.question_text || `Question ${i + 1}`,
+                                                options: Array.isArray(a?.options) && a.options.length
+                                                    ? a.options
+                                                    : ['Option A', 'Option B', 'Option C', 'Option D'],
+                                                correctAnswer: Number.isFinite(Number(a?.correctAnswer))
+                                                    ? Number(a.correctAnswer)
+                                                    : 0,
+                                            }));
+                                        if (reviewQuestions.length) {
+                                            hasReviewQuestions = true;
+                                            fullQuiz = {
+                                                ...quiz,
+                                                id: quizId,
+                                                title: quiz.title,
+                                                questions: reviewQuestions,
+                                            };
+                                        }
+                                    }
+
+                                    // Fallback: fetch quiz detail to get questions
+                                    if (!hasReviewQuestions && quizId != null) {
+                                        const detailRes = await api.get(`/quizzes/${quizId}`, {
+                                            params: { userId: uid },
+                                        });
                                         const detail = detailRes?.data || {};
                                         const qs = normalizeStoredQuestions(detail?.questions || []);
                                         if (qs.length) {
@@ -615,14 +713,33 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                     // fallback to summarized history data
                                 }
 
+                                // Normalize answers from backend into QuizAnswer[]
+                                const normalizedAnswers = normalizeReviewAnswers(
+                                    Array.isArray(reviewPayload?.answers) ? reviewPayload.answers : []
+                                );
+
                                 const quizQuestionsLen = Array.isArray(fullQuiz.questions) ? fullQuiz.questions.length : 0;
+                                const scorePct = Number(reviewPayload?.score);
+                                const correctFromApi = Number(reviewPayload?.correct_count);
+                                const totalFromApi = Number(reviewPayload?.total_questions);
+                                const timeTakenFromApi = Number(reviewPayload?.time_taken_seconds);
+                                const hasApiScore = Number.isFinite(scorePct);
+                                const hasApiCorrect = Number.isFinite(correctFromApi);
+                                const hasApiTotal = Number.isFinite(totalFromApi);
+                                const hasApiTimeTaken = Number.isFinite(timeTakenFromApi);
+
                                 setSelectedQuiz(fullQuiz);
+                                setAnswers(normalizedAnswers);
                                 setQuizResult({
-                                    score,
-                                    correctAnswers: Math.round((score / 100) * quizQuestionsLen),
-                                    totalQuestions: quizQuestionsLen,
-                                    timeTaken: Math.max(0, Number(fullQuiz.duration || 10) - 5),
-                                    answers: fallbackAnswers,
+                                    score: hasApiScore ? scorePct : score,
+                                    correctAnswers: hasApiCorrect
+                                        ? correctFromApi
+                                        : Math.round((score / 100) * quizQuestionsLen),
+                                    totalQuestions: hasApiTotal ? totalFromApi : quizQuestionsLen,
+                                    timeTaken: hasApiTimeTaken
+                                        ? timeTakenFromApi
+                                        : 0,
+                                    answers: normalizedAnswers,
                                 });
                                 setShowResults(true);
                             }}
@@ -632,7 +749,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             View Results
                         </button>
                     </div>
-
                     <div className="grid grid-cols-3 gap-4 pt-4 border-t border-gray-200 text-sm">
                         <div>
                             <p className="text-gray-500 mb-1">Questions</p>
@@ -663,7 +779,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                     Quizzes shared by your instructor — pick one and tap <strong>Take Quiz</strong> to begin.
                 </p>
             </div>
-
             <div className="space-y-4">
                 {filteredQuizzes().map((quiz) => (
                     <div key={quiz.id} className="bg-white rounded-lg border border-gray-200 p-6">
@@ -671,11 +786,9 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             <div className="flex-1">
                                 <h3 className="text-gray-900 mb-2">{quiz.title}</h3>
                                 <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
-
                                 {'createdDate' in quiz && (
                                     <p className="text-gray-500 text-sm">Created: {quiz.createdDate}</p>
                                 )}
-
                                 {'myScore' in quiz && quiz.myScore !== undefined && (
                                     <p className="text-gray-600 mt-2">
                                         Latest Score: <span className="text-green-600">{quiz.myScore}%</span>
@@ -690,7 +803,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                 Take Quiz
                             </button>
                         </div>
-
                         <div className="grid grid-cols-3 gap-4 pt-4 border-t border-gray-200 text-sm">
                             <div>
                                 <p className="text-gray-500 mb-1">Questions</p>
@@ -724,7 +836,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         if (!currentQuestion) return null;
         const currentAnswer = answers.find((a) => a.questionId === currentQuestion.id);
         const progress = ((safeIndex + 1) / safeQuizQuestions.length) * 100;
-
         const minutes = Math.floor(timeRemaining / 60);
         const seconds = timeRemaining % 60;
 
@@ -752,7 +863,6 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                             cancelText: 'Stay',
                                             type: 'warning',
                                         });
-
                                         if (confirmed) {
                                             if (timerId) {
                                                 clearInterval(timerId);
@@ -862,6 +972,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     const renderQuizResults = () => {
         if (!showResults || !selectedQuiz || !quizResult) return null;
 
+        // Use answers from quizResult (set at submit or view-results time),
+        // fall back to answers state (active quiz session).
+        const displayAnswers: QuizAnswer[] =
+            Array.isArray(quizResult.answers) && quizResult.answers.length > 0
+                ? quizResult.answers
+                : answers;
+
         return (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                 <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
@@ -877,6 +994,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                     setShowResults(false);
                                     setSelectedQuiz(null);
                                     setQuizResult(null);
+                                    setAnswers([]);
                                 }}
                                 className="text-gray-500 hover:text-gray-700"
                             >
@@ -914,7 +1032,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                     <Clock size={32} className="mx-auto" />
                                 </div>
                                 <p className="text-gray-600 text-sm mb-1">Time Taken</p>
-                                <p className="text-2xl text-purple-600">{Math.floor(quizResult.timeTaken / 60)}m</p>
+                                <p className="text-2xl text-purple-600">{formatTimeTakenLabel(quizResult.timeTaken)}</p>
                             </div>
                         </div>
 
@@ -923,30 +1041,46 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                             <h3 className="mb-4">Answer Review</h3>
                             <div className="space-y-4">
                                 {selectedQuiz.questions.map((q: any, idx: number) => {
-                                    const userAnswer = answers.find((a) => a.questionId === q.id);
-                                    const isCorrect = userAnswer && userAnswer.selectedAnswer === q.correctAnswer;
+                                    const userAnswer = displayAnswers.find(
+                                        (a) => String(a.questionId) === String(q.id)
+                                    ) || displayAnswers[idx];
+                                    const answered = userAnswer && userAnswer.selectedAnswer >= 0;
+                                    const isCorrect = answered && userAnswer!.selectedAnswer === q.correctAnswer;
 
                                     return (
-                                        <div key={q.id} className={`rounded-lg border-2 p-4 ${isCorrect ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'
-                                            }`}>
+                                        <div
+                                            key={q.id}
+                                            className={`rounded-lg border-2 p-4 ${isCorrect
+                                                ? 'border-green-200 bg-green-50'
+                                                : 'border-red-200 bg-red-50'
+                                                }`}
+                                        >
                                             <div className="flex items-start gap-3 mb-3">
-                                                <span className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white ${isCorrect ? 'bg-green-500' : 'bg-red-500'
-                                                    }`}>
+                                                <span
+                                                    className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white ${isCorrect ? 'bg-green-500' : 'bg-red-500'
+                                                        }`}
+                                                >
                                                     {isCorrect ? '✓' : '✗'}
                                                 </span>
                                                 <div className="flex-1">
-                                                    <p className="text-gray-900 mb-3"><strong>Question {idx + 1}:</strong> {q.question}</p>
+                                                    <p className="text-gray-900 mb-3">
+                                                        <strong>Question {idx + 1}:</strong> {q.question}
+                                                    </p>
                                                     <div className="space-y-2">
                                                         <div>
                                                             <p className="text-sm text-gray-600">Your Answer:</p>
                                                             <p className={isCorrect ? 'text-green-700' : 'text-red-700'}>
-                                                                {userAnswer ? q.options[userAnswer.selectedAnswer] : 'Not answered'}
+                                                                {answered
+                                                                    ? q.options[userAnswer!.selectedAnswer] ?? 'Unknown option'
+                                                                    : 'Not answered'}
                                                             </p>
                                                         </div>
                                                         {!isCorrect && (
                                                             <div>
                                                                 <p className="text-sm text-gray-600">Correct Answer:</p>
-                                                                <p className="text-green-700">{q.options[q.correctAnswer]}</p>
+                                                                <p className="text-green-700">
+                                                                    {q.options[q.correctAnswer] ?? 'Unknown option'}
+                                                                </p>
                                                             </div>
                                                         )}
                                                     </div>
@@ -965,6 +1099,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                 setShowResults(false);
                                 setSelectedQuiz(null);
                                 setQuizResult(null);
+                                setAnswers([]);
                             }}
                             className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
                         >
