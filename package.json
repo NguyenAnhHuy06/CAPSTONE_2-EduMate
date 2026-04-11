@@ -5,10 +5,13 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "start:api": "node src/index.js",
+    "dev:api": "node --watch src/index.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
+    "@aws-sdk/s3-request-presigner": "^3.1019.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -23,6 +26,8 @@
     "nodemailer": "^8.0.4",
     "p-limit": "^3.1.0",
     "pdf-parse": "^1.1.1",
+    "sequelize": "^6.37.8",
+    "validator": "^13.15.26",
     "word-extractor": "^1.0.4"
   }
 }
