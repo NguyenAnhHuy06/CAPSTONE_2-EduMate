@@ -3,7 +3,7 @@ import { BookOpen } from 'lucide-react';
 import api from '../../services/api';
 
 interface LoginProps {
-  onLogin: (role: 'instructor' | 'student', userData: any) => void;
+  onLogin: (role: 'instructor' | 'student' | 'admin', userData: any) => void;
   onGoToRegister: () => void;
 }
 
@@ -24,7 +24,8 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
         setError('Unable to sign in. Please try again.');
         return;
       }
-      const role: 'instructor' | 'student' =
+      const role: 'instructor' | 'student' | 'admin' =
+        String(user?.role || '').toUpperCase() === 'ADMIN' ? 'admin' :
         String(user?.role || '').toUpperCase() === 'LECTURER' ? 'instructor' : 'student';
       localStorage.setItem('edumate_token', token);
       localStorage.setItem('edumate_user', JSON.stringify(user));
