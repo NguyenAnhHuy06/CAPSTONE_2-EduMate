@@ -1,4 +1,4 @@
-// server.js - EduMate backend
+// index.js - EduMate backend entry
 require("dotenv").config();
 
 const express = require("express");

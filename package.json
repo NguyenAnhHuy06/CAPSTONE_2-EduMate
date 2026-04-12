@@ -2,12 +2,12 @@
   "name": "edumate-be",
   "version": "1.0.0",
   "private": true,
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "start:api": "node src/index.js",
-    "dev:api": "node --watch src/index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "start:sequelize": "node src/sequelizeServer.js",
+    "dev:sequelize": "node --watch src/sequelizeServer.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
