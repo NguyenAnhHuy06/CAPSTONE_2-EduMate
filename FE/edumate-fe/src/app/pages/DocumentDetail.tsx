@@ -71,7 +71,6 @@ function triggerBrowserDownload(blob: Blob, fileName: string) {
 export function DocumentDetail({
   document,
   userRole,
-  user,
   onBack,
   onCreateQuizWithAi,
   onOpenQuiz,
@@ -213,9 +212,10 @@ export function DocumentDetail({
       setPreviewLoading(true)
       setPreviewError(null)
       try {
-        const res = await fetch(`/api/documents/preview?key=${encodeURIComponent(document.s3Key)}`)
-        const data = await res.json()
-        if (data.success && data.url) {
+        const data: any = await api.get('/documents/preview', {
+          params: { key: document.s3Key },
+        })
+        if (data?.success && data?.url) {
           setPreviewUrl(data.url)
         } else {
           setPreviewError('Could not load preview.')
@@ -235,9 +235,10 @@ export function DocumentDetail({
       setWordLoading(true)
       setWordError(null)
       try {
-        const res = await fetch(`/api/documents/preview?key=${encodeURIComponent(document.s3Key)}`)
-        const data = await res.json()
-        if (data.success && data.url) {
+        const data: any = await api.get('/documents/preview', {
+          params: { key: document.s3Key },
+        })
+        if (data?.success && data?.url) {
           const viewerUrl = `https://docs.google.com/viewer?url=${encodeURIComponent(data.url)}&embedded=true`
           setWordViewerUrl(viewerUrl)
         } else {
@@ -456,7 +457,6 @@ export function DocumentDetail({
       <QuizCreator
         document={document}
         userRole={userRole}
-        user={user}
         onBack={() => setShowQuizCreator(false)}
       />
     )

@@ -1,4 +1,5 @@
 .
++--- .env.example
 +--- .gitignore
 +--- eslint.config.js
 +--- index.html

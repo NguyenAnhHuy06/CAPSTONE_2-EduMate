@@ -33,7 +33,11 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
   const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
 
-  const documentId = document?.documentId || document?.id;
+  const documentId =
+  document?.documentId != null && Number.isFinite(Number(document.documentId))
+    ? Number(document.documentId)
+    : null;
+    
   const s3Key = document?.s3Key;
 
   const generateFlashcards = async () => {
@@ -153,7 +157,6 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
 
     try {
       const payload = {
-        user_id: 14,
         document_id: documentId,
         flashcards: validFlashcards.map((card) => ({
           front_text: card.front,

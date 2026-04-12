@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Login } from '../app/pages/Login';
 import { Register } from '../app/pages/Register';
 import { InstructorDashboard } from '../app/pages/lecturer/InstructorDashboard';
@@ -7,18 +7,34 @@ import { AdminDashboard } from '../app/pages/AdminDashboard';
 import { NotificationProvider } from '../app/pages/NotificationContext';
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(true);
+  useEffect(() => {
+    const token = localStorage.getItem('edumate_token');
+    const rawUser = localStorage.getItem('edumate_user');
+
+    if (!token || !rawUser) return;
+
+    try {
+      const user = JSON.parse(rawUser);
+      const role: 'instructor' | 'student' | 'admin' =
+        String(user?.role || '').toUpperCase() === 'ADMIN'
+          ? 'admin'
+          : String(user?.role || '').toUpperCase() === 'LECTURER'
+            ? 'instructor'
+            : 'student';
+
+      setUserRole(role);
+      setUserData(user);
+      setIsLoggedIn(true);
+    } catch {
+      localStorage.removeItem('edumate_token');
+      localStorage.removeItem('edumate_user');
+    }
+  }, []);
+  
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
-  const [userRole, setUserRole] = useState<'instructor' | 'student' | 'admin' | null>('student');
-  const [userData, setUserData] = useState<any>({
-    id: 14,
-    user_id: 14,
-    name: 'Demo Student',
-    full_name: 'Demo Student',
-    email: 'demo@dtu.edu.vn',
-    role: 'STUDENT',
-    user_code: 'SV0001',
-  });
+  const [userRole, setUserRole] = useState<'instructor' | 'student' | 'admin' | null>(null);
+  const [userData, setUserData] = useState<any>(null);
 
   const handleLogin = (role: 'instructor' | 'student' | 'admin', data: any) => {
     setUserRole(role);

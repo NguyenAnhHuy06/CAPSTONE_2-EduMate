@@ -20,7 +20,10 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const documentId = document?.documentId || document?.id;
+  const documentId =
+  document?.documentId != null && Number.isFinite(Number(document.documentId))
+    ? Number(document.documentId)
+    : null;
 
   useEffect(() => {
     const loadFlashcards = async () => {
@@ -126,7 +129,7 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
         <div className="bg-white rounded-lg border border-gray-200 p-6">
           <h2 className="mb-2">Study Flashcards</h2>
           <p className="text-gray-600">
-            No flashcards found for: <span className="text-blue-600">{document?.title}</span>
+              No lecturer flashcards are available for: <span className="text-blue-600">{document?.title}</span>
           </p>
         </div>
       </div>
