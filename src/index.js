@@ -2,7 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
-dotenv.config();
+// dotenv.config();
+const path = require("path");
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+
+console.log("DB_USER:", process.env.DB_USER);
 
 const { sequelize, ensureDatabase } = require('./config/db');
 const teamDb = require('./config/teamDb');
@@ -65,7 +69,8 @@ const startServer = async () => {
         await ensureDatabase();
 
         // 2. Sequelize sync (creates/migrates all model tables)
-        await sequelize.sync({ alter: true });
+        await sequelize.sync();
+        console.log('Database connected (Squelize).');
         console.log('Database connected and synced (Sequelize).');
 
         // 3. Seed roles table

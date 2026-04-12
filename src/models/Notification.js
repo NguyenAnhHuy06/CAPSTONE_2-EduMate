@@ -1,7 +1,6 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 
-// Design ref: Database Design — "notifications" table
 const Notification = sequelize.define('Notification', {
     notification_id: {
         type: DataTypes.INTEGER,
@@ -9,7 +8,7 @@ const Notification = sequelize.define('Notification', {
         primaryKey: true
     },
     user_id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: false
     },
     type: {

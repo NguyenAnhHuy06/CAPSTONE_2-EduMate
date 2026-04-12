@@ -20,7 +20,7 @@ const Document = sequelize.define('Document', {
         allowNull: true
     },
     uploader_id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: true
     },
     version: {
@@ -33,9 +33,7 @@ const Document = sequelize.define('Document', {
     }
 }, {
     tableName: 'documents',
-    timestamps: true,
-    createdAt: 'created_at',
-    updatedAt: 'updated_at'
+    timestamps: false
 });
 
 module.exports = Document;

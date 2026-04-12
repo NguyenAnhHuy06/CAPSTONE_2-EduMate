@@ -1,7 +1,6 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 
-// Design ref: Database Design — "chat_sessions" table
 const ChatSession = sequelize.define('ChatSession', {
     session_id: {
         type: DataTypes.INTEGER,
@@ -9,7 +8,7 @@ const ChatSession = sequelize.define('ChatSession', {
         primaryKey: true
     },
     user_id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: false
     },
     created_at: {

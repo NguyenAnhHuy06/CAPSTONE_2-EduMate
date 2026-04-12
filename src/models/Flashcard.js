@@ -9,7 +9,7 @@ const Flashcard = sequelize.define('Flashcard', {
         primaryKey: true
     },
     user_id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER, // Standardized for MySQL FK compatibility
         allowNull: false
     },
     document_id: {

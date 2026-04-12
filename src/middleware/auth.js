@@ -1,10 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-/**
- * Auth middleware — verifies JWT token and attaches req.user
- * Design ref: TC05 — "The system must use JWT for session management"
- */
 const authMiddleware = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
@@ -19,9 +15,8 @@ const authMiddleware = async (req, res, next) => {
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-        // Attach user info to request
         const user = await User.findByPk(decoded.id, {
-            attributes: ['id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
+            attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
         });
 
         if (!user) {
@@ -33,7 +28,7 @@ const authMiddleware = async (req, res, next) => {
         }
 
         req.user = {
-            id: user.id,
+            id: user.user_id,
             email: user.email,
             full_name: user.full_name,
             role: user.role,

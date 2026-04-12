@@ -2,9 +2,9 @@ const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 
 const User = sequelize.define('User', {
-    id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
-        defaultValue: DataTypes.UUIDV4,
+    user_id: {
+        type: DataTypes.INTEGER,
+        autoIncrement: true,
         primaryKey: true
     },
     email: {
@@ -67,7 +67,7 @@ const User = sequelize.define('User', {
     }
 }, {
     tableName: 'users',
-    timestamps: true
+    timestamps: false
 });
 
 module.exports = User;

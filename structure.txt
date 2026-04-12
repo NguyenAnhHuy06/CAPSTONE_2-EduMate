@@ -1,0 +1,88 @@
+.
++--- .env
++--- .env.example
++--- .git
++--- .gitignore
++--- config
+|   +--- s3.js
++--- db.js
++--- documentPipeline.js
++--- embeddingService.js
++--- extractDocumentText.js
++--- FE
+|   +--- edumate-fe
+|   |   +--- dist
+|   |   |   +--- assets
+|   |   |   |   +--- index-BxwoWTAv.js
+|   |   |   |   +--- index-Bymwf8VX.css
+|   |   |   +--- favicon.svg
+|   |   |   +--- icons.svg
+|   |   |   +--- index.html
++--- generateQuizWithAI.js
++--- inspectStreakDates.js
++--- otp_email_service.py
++--- package-lock.json
++--- package.json
++--- quizService.js
++--- README.md
++--- s3Upload.js
++--- server.js
++--- services
+|   +--- s3Service.js
++--- src
+|   +--- config
+|   |   +--- db.js
+|   |   +--- teamDb.js
+|   +--- controllers
+|   |   +--- authController.js
+|   |   +--- chatController.js
+|   |   +--- documentController.js
+|   |   +--- quizController.js
+|   +--- index.js
+|   +--- middleware
+|   |   +--- activityLog.js
+|   |   +--- auth.js
+|   |   +--- rbac.js
+|   +--- models
+|   |   +--- ActivityLog.js
+|   |   +--- associations.js
+|   |   +--- ChatMessage.js
+|   |   +--- ChatSession.js
+|   |   +--- Citation.js
+|   |   +--- Course.js
+|   |   +--- Document.js
+|   |   +--- DocumentSegment.js
+|   |   +--- Flashcard.js
+|   |   +--- Notification.js
+|   |   +--- Quiz.js
+|   |   +--- QuizAttempt.js
+|   |   +--- QuizQuestion.js
+|   |   +--- Role.js
+|   |   +--- User.js
+|   +--- routes
+|   |   +--- adminRoutes.js
+|   |   +--- authRoutes.js
+|   |   +--- chatRoutes.js
+|   |   +--- documentRoutes.js
+|   |   +--- flashcardRoutes.js
+|   |   +--- notificationRoutes.js
+|   |   +--- quizRoutes.js
+|   +--- services
+|   |   +--- documentPipeline.js
+|   |   +--- emailService.js
+|   |   +--- embeddingService.js
+|   |   +--- extractDocumentText.js
+|   |   +--- quizService.js
+|   |   +--- s3Upload.js
+|   |   +--- vectorSearch.js
+|   +--- utils
+|   |   +--- generateOtp.js
++--- structure.txt
++--- uploads
+|   +--- 1774455773651-960340190-summary-software-architecture.pdf
+|   +--- 1774622373376-955302769-summary-software-architecture.pdf
+|   +--- 1774674300741-982573548 - summary-software-architecture.pdf
+|   +--- 1774674480580-446870211 - summary-software-architecture.pdf
+|   +--- 1774674691064-921258796 - summary-software-architecture.pdf
+|   +--- 1774675255734-8175686 - summary-software-architecture.pdf
++--- vectorSearch.js

@@ -212,13 +212,25 @@ async function countAttemptsBySourceFileUrls(s3Keys) {
   }
 }
 
-async function listDocumentsRecent(limit) {
-  const [rows] = await getPool().execute(
-    `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at, d.status,
+async function listDocumentsRecent(limit = 10) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 50);
+
+  const sql = `
+    SELECT
+      d.document_id,
+      d.title,
+      d.file_url,
+      d.course_id,
+      d.uploader_id,
+      d.created_at,
+      d.status,
       (SELECT COUNT(*) FROM document_segments s WHERE s.document_id = d.document_id) AS chunk_count
-     FROM documents d ORDER BY d.created_at DESC LIMIT ?`,
-    [limit]
-  );
+    FROM documents d
+    ORDER BY d.created_at DESC
+    LIMIT ${safeLimit}
+  `;
+
+  const [rows] = await getPool().query(sql);
   return rows;
 }
 
