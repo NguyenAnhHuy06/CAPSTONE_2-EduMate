@@ -19,6 +19,7 @@
 |   |   |   +--- icons.svg
 |   |   |   +--- index.html
 +--- generateQuizWithAI.js
++--- index.js
 +--- inspectStreakDates.js
 +--- otp_email_service.py
 +--- package-lock.json
@@ -26,7 +27,10 @@
 +--- quizService.js
 +--- README.md
 +--- s3Upload.js
-+--- server.js
++--- scripts
+|   +--- add_document_comments.sql
+|   +--- createLecturer.js
+|   +--- resetPassword.js
 +--- services
 |   +--- s3Service.js
 +--- src
@@ -38,7 +42,6 @@
 |   |   +--- chatController.js
 |   |   +--- documentController.js
 |   |   +--- quizController.js
-|   +--- index.js
 |   +--- middleware
 |   |   +--- activityLog.js
 |   |   +--- auth.js
@@ -67,6 +70,7 @@
 |   |   +--- flashcardRoutes.js
 |   |   +--- notificationRoutes.js
 |   |   +--- quizRoutes.js
+|   +--- sequelizeServer.js
 |   +--- services
 |   |   +--- documentPipeline.js
 |   |   +--- emailService.js

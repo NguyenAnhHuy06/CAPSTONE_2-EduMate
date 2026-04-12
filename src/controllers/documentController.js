@@ -149,23 +149,42 @@ const getDocumentsForQuiz = async (req, res) => {
       try { metaMap = await db.getMetaMapForS3Keys(filtered.map(o => o.key)); } catch (_) { /* ignore */ }
     }
 
-    const data = filtered.map(o => {
-      const m = metaMap.get(o.key);
-      if (m && m.status !== 'verified') return null; // Skip unverified docs
-      
-      const ext = path.extname(o.key).replace(/^\./, "").toUpperCase() || "FILE";
-      const chunks = m != null ? Number(m.chunk_count || 0) : 0;
-      const estimatedQuestions = Math.min(30, Math.max(5, chunks > 0 ? 5 + Math.floor(chunks / 4) : 5));
-      return {
-        storage: "s3", s3Key: o.key, fileName: path.basename(o.key),
-        title: m?.title || path.basename(o.key),
-        subjectCode: m?.course_code || ext, courseCode: m?.course_code || ext,
-        courseId: m?.course_id ?? null, documentId: m?.document_id ?? null,
-        size: o.size, lastModified: o.lastModified || m?.created_at,
-        fileUrl: s3.buildObjectPublicUrl(o.key), inDatabase: !!m,
-        chunkCount: chunks, estimatedQuestions,
-      };
-    }).filter(Boolean); // Filter out nulls (unverified)
+    const data = filtered
+      .map(o => {
+        const m = metaMap.get(o.key);
+
+        // Only allow verified documents that exist in DB
+        if (!m) return null;
+
+        const documentId = m?.document_id != null ? Number(m.document_id) : null;
+        const chunks = Number(m?.chunk_count || 0);
+
+        if (!documentId || chunks <= 0) return null;
+
+        // Only allow documents that were indexed successfully
+        if (!documentId || chunks <= 0) return null;
+
+        const ext = path.extname(o.key).replace(/^\./, "").toUpperCase() || "FILE";
+        const estimatedQuestions = Math.min(30, Math.max(5, 5 + Math.floor(chunks / 4)));
+
+        return {
+          storage: "s3",
+          s3Key: o.key,
+          fileName: path.basename(o.key),
+          title: m?.title || path.basename(o.key),
+          subjectCode: m?.course_code || ext,
+          courseCode: m?.course_code || ext,
+          courseId: m?.course_id ?? null,
+          documentId,
+          size: o.size,
+          lastModified: o.lastModified || m?.created_at,
+          fileUrl: s3.buildObjectPublicUrl(o.key),
+          inDatabase: true,
+          chunkCount: chunks,
+          estimatedQuestions,
+        };
+      })
+      .filter(Boolean);
 
     data.sort((a, b) => new Date(b.lastModified || 0).getTime() - new Date(a.lastModified || 0).getTime());
     return res.status(200).json({ success: true, data });

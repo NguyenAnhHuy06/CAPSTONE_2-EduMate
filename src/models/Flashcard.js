@@ -9,7 +9,7 @@ const Flashcard = sequelize.define('Flashcard', {
         primaryKey: true
     },
     user_id: {
-        type: DataTypes.INTEGER, // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: false
     },
     document_id: {
@@ -24,10 +24,14 @@ const Flashcard = sequelize.define('Flashcard', {
         type: DataTypes.TEXT,
         allowNull: false
     },
+    creator_role: {
+        type: DataTypes.STRING(20),
+        allowNull: true
+    },
     created_at: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW
-    }
+    },
 }, {
     tableName: 'flashcards',
     timestamps: false

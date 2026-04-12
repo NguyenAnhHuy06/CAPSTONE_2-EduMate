@@ -1,10 +1,10 @@
 const express = require("express");
 const router = express.Router();
-// const auth = require("../middleware/auth"); // tạm bỏ auth cho flashcard
+const auth = require("../middleware/auth");
 const Flashcard = require("../models/Flashcard");
 
 // Generate flashcards using AI
-router.post("/generate", async (req, res) => {
+router.post("/generate", auth, async (req, res) => {
     try {
         const { s3Key } = req.body;
         if (!s3Key) {
@@ -69,9 +69,9 @@ ${contextText}`;
 });
 
 // Create flashcards (batch) — tạm bỏ auth, dùng user_id mặc định
-router.post("/", async (req, res) => {
+router.post("/", auth, async (req, res) => {
     try {
-        const { document_id, flashcards, user_id } = req.body;
+        const { document_id, flashcards } = req.body;
 
         if (!document_id || !Array.isArray(flashcards) || !flashcards.length) {
             return res.status(400).json({
@@ -80,13 +80,16 @@ router.post("/", async (req, res) => {
             });
         }
 
-        const effectiveUserId = Number(user_id) || 14;
+        const effectiveUserId = req.user.id;
+
+        const creatorRole = String(req.user.role || '').toUpperCase();
 
         const records = flashcards.map((f) => ({
             user_id: effectiveUserId,
             document_id: Number(document_id),
             front_text: f.front_text || f.front || f.question || "",
             back_text: f.back_text || f.back || f.answer || "",
+            creator_role: creatorRole,
         }));
 
         const created = await Flashcard.bulkCreate(records);
@@ -101,13 +104,20 @@ router.post("/", async (req, res) => {
     }
 });
 
-// List flashcards for a document — tạm không lọc theo user
-router.get("/document/:documentId", async (req, res) => {
+// List flashcards for a document — lọc theo creator_role
+router.get("/document/:documentId", auth, async (req, res) => {
     try {
         const documentId = Number(req.params.documentId);
 
+        if (!Number.isFinite(documentId)) {
+            return res.status(400).json({ success: false, message: "Invalid document ID." });
+        }
+
         const cards = await Flashcard.findAll({
-            where: { document_id: documentId },
+            where: {
+                document_id: documentId,
+                creator_role: ["LECTURER", "ADMIN"],
+            },
             order: [["created_at", "DESC"]],
         });
 
@@ -118,9 +128,10 @@ router.get("/document/:documentId", async (req, res) => {
 });
 
 // List all flashcards
-router.get("/mine", async (req, res) => {
+router.get("/mine", auth, async (req, res) => {
     try {
         const cards = await Flashcard.findAll({
+            where: { user_id: req.user.id },
             order: [["created_at", "DESC"]],
             limit: 200,
         });
@@ -131,11 +142,16 @@ router.get("/mine", async (req, res) => {
 });
 
 // Delete a flashcard — tạm bỏ check owner
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", auth, async (req, res) => {
     try {
         const card = await Flashcard.findByPk(req.params.id);
+
         if (!card) {
             return res.status(404).json({ success: false, message: "Flashcard not found." });
+        }
+
+        if (card.user_id !== req.user.id) {
+            return res.status(403).json({ success: false, message: "Forbidden. "});
         }
 
         await card.destroy();

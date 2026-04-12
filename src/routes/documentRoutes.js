@@ -9,9 +9,9 @@ const { uploadDocument, getRecentDocuments, getDocumentsForQuiz, getS3Documents 
 router.post("/upload", auth, ...uploadDocument);
 
 // Listing — authenticated users
-router.get("/recent", getRecentDocuments);
+router.get("/recent", auth, getRecentDocuments);
 router.get("/for-quiz", auth, getDocumentsForQuiz);
-router.get("/s3-list", getS3Documents);
+router.get("/s3-list", auth, getS3Documents);
 
 // Document verification — Lecturer/Admin only (Design: UC04)
 router.patch("/:id/verify", auth, rbac("LECTURER", "ADMIN"), async (req, res) => {
@@ -83,7 +83,7 @@ router.patch("/:id/reject", auth, rbac("LECTURER", "ADMIN"), async (req, res) =>
 });
 
 // Download — authenticated
-router.get("/download", async (req, res) => {
+router.get("/download", auth, async (req, res) => {
   try {
     const s3 = require("../services/s3Upload");
     const key = req.query.key;
@@ -96,7 +96,7 @@ router.get("/download", async (req, res) => {
 });
 
 // Preview — authenticated
-router.get("/preview", async (req, res) => {
+router.get("/preview", auth, async (req, res) => {
   try {
     const s3 = require("../services/s3Upload");
     const key = req.query.key;
@@ -109,7 +109,7 @@ router.get("/preview", async (req, res) => {
   }
 });
 
-router.get("/preview-word", async (req, res) => {
+router.get("/preview-word", auth, async (req, res) => {
   try {
     const s3 = require("../services/s3Upload");
     const mammoth = require("mammoth");
