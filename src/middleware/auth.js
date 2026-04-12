@@ -21,7 +21,7 @@ const authMiddleware = async (req, res, next) => {
 
         // Attach user info to request
         const user = await User.findByPk(decoded.id, {
-            attributes: ['id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
+            attributes: ['user_id', 'email', 'name', 'role', 'user_code', 'is_verified']
         });
 
         if (!user) {
@@ -33,9 +33,9 @@ const authMiddleware = async (req, res, next) => {
         }
 
         req.user = {
-            id: user.id,
+            user_id: user.user_id,
             email: user.email,
-            full_name: user.full_name,
+            name: user.name,
             role: user.role,
             user_code: user.user_code,
         };

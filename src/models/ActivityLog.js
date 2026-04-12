@@ -9,7 +9,7 @@ const ActivityLog = sequelize.define('ActivityLog', {
         primaryKey: true
     },
     user_id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: true
     },
     action: {

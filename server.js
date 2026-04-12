@@ -20,7 +20,7 @@ const db = require("./db");
 const { ensureIndexedForQuiz } = require("./documentPipeline");
 
 const app = express();
-const PORT = Number(process.env.PORT || 3001);
+const PORT = Number(process.env.PORT || 5000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 /** Client-facing copy only — never include stack traces, SQL, or infra names. */
@@ -125,6 +125,23 @@ app.get("/", (req, res) => {
   });
 });
 
+// --- NEW MODULAR FEATURES ---
+const chatRoutes = require("./src/routes/chatRoutes");
+const flashcardRoutes = require("./src/routes/flashcardRoutes");
+const adminRoutes = require("./src/routes/adminRoutes");
+const notificationRoutes = require("./src/routes/notificationRoutes");
+const quizRoutes = require("./src/routes/quizRoutes"); // For Leaderboard and modular quiz controllers
+const activityLog = require("./src/middleware/activityLog");
+
+// Mount modular features
+app.use("/api/chat", chatRoutes);
+app.use("/api/flashcards", flashcardRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/quiz-v2", quizRoutes); // Modular version alongside legacy
+// --- END MODULAR FEATURES ---
+
+
 function authJwtSecret() {
   const s = process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim();
   return s || "dev-only-secret-change-me";
@@ -190,12 +207,10 @@ async function sendOtpEmail({ toEmail, code, purpose }) {
 
 function mapUserForClient(row) {
   if (!row) return null;
-  const userId = Number(row.user_id ?? row.id);
+  const userId = Number(row.user_id);
   return {
     user_id: userId,
-    id: userId,
-    name: String(row.display_name || row.full_name || row.name || "").trim() || "User",
-    full_name: String(row.full_name || row.display_name || row.name || "").trim() || "User",
+    name: String(row.display_name || row.name || "").trim() || "User",
     email: String(row.email || "").trim(),
     role: String(row.role || "STUDENT").trim().toUpperCase(),
   };
@@ -206,13 +221,13 @@ app.post("/api/auth/register", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const fullName = String(req.body.full_name ?? req.body.fullName ?? req.body.name ?? "").trim();
+    const name = String(req.body.name || req.body.full_name || "").trim();
     const email = String(req.body.email ?? "").trim().toLowerCase();
     const password = String(req.body.password ?? "").trim();
     const role = String(req.body.role ?? "STUDENT").trim().toUpperCase();
     const userCode = req.body.user_code ?? req.body.userCode ?? null;
 
-    if (!fullName || !email || password.length < 8) {
+    if (!name || !email || password.length < 8) {
       return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
     }
     if (!isAllowedStudentEmail(email)) {
@@ -231,7 +246,7 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     const encryptedPassword = await bcrypt.hash(password, 10);
-    await db.createUser({ fullName, email, password: encryptedPassword, role, userCode });
+    await db.createUser({ name, email, password: encryptedPassword, role, userCode });
     const code = generateOtpCode();
     const expiresAt = Date.now() + otpExpiryMs();
     otpStore.set(email, { code, expiresAt, purpose: "register" });

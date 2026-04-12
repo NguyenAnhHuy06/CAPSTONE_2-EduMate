@@ -9,7 +9,7 @@ const { logActivity } = require('../middleware/activityLog');
 const register = async (req, res) => {
     try {
         console.log('[Register] Request body:', JSON.stringify(req.body));
-        let { email, password, full_name, role, user_code } = req.body;
+        let { email, password, name, role, user_code } = req.body;
 
         if (!email || !password) {
             return res.status(400).json({ message: 'Email and password are required' });
@@ -17,7 +17,7 @@ const register = async (req, res) => {
 
         // Sanitize inputs
         email = validator.trim(email).toLowerCase();
-        full_name = full_name ? validator.escape(validator.trim(full_name)) : '';
+        name = name ? validator.escape(validator.trim(name)) : '';
 
         // Validate email format server-side
         if (!validator.isEmail(email)) {
@@ -58,8 +58,8 @@ const register = async (req, res) => {
 
         if (existingUser && !existingUser.is_verified) {
             console.log('[Register] Updating unverified user...');
-            existingUser.password_hash = password_hash;
-            existingUser.full_name = full_name;
+            existingUser.password = password_hash;
+            existingUser.name = name;
             existingUser.role = role || 'STUDENT';
             existingUser.user_code = user_code;
             existingUser.otp_code = otp_code;
@@ -69,8 +69,8 @@ const register = async (req, res) => {
             console.log('[Register] Creating new user...');
             await User.create({
                 email,
-                password_hash,
-                full_name,
+                password: password_hash,
+                name,
                 role: role || 'STUDENT',
                 user_code,
                 otp_code,
@@ -137,22 +137,22 @@ const login = async (req, res) => {
             return res.status(403).json({ message: 'Please verify your email first' });
         }
 
-        const isMatch = await bcrypt.compare(password, user.password_hash);
+        const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: 'Incorrect email or password' });
         }
 
         const payload = {
-            id: user.id,
+            id: user.user_id,
             role: user.role
         };
 
         const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1d' });
 
-        res.status(200).json({ message: 'Login successful', token, user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role, user_code: user.user_code } });
+        res.status(200).json({ message: 'Login successful', token, user: { id: user.user_id, email: user.email, name: user.name, role: user.role, user_code: user.user_code } });
 
         // Log login activity
-        logActivity(user.id, 'login', `User ${user.email} logged in`, req.ip);
+        logActivity(user.user_id, 'login', `User ${user.email} logged in`, req.ip);
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Server error' });

@@ -512,9 +512,7 @@ async function findUserByEmail(email) {
   if (!em) return null;
   const p = getPool();
   const [rows] = await p.execute(
-    `SELECT user_id, email, role,
-      COALESCE(NULLIF(full_name,''), NULLIF(name,''), '') AS display_name,
-      password
+    `SELECT user_id, email, role, name AS display_name, password
      FROM users
      WHERE LOWER(email) = ?
      LIMIT 1`,
@@ -523,18 +521,17 @@ async function findUserByEmail(email) {
   return rows.length ? rows[0] : null;
 }
 
-async function createUser({ fullName, name, email, password, role, userCode }) {
+async function createUser({ name, email, password, role, userCode }) {
   const em = String(email || "").trim().toLowerCase();
   if (!em) throw new Error("Invalid email.");
   const r = String(role || "STUDENT").trim().toUpperCase() || "STUDENT";
-  const nm = String(name || fullName || "").trim() || null;
-  const fn = String(fullName || name || "").trim() || null;
+  const nm = String(name || "").trim() || null;
   const code = userCode != null && String(userCode).trim() ? String(userCode).trim().slice(0, 64) : null;
   const p = getPool();
   const [hdr] = await p.execute(
-    `INSERT INTO users (email, password, role, full_name, name, user_code)
-     VALUES (?,?,?,?,?,?)`,
-    [em, String(password || ""), r, fn, nm, code]
+    `INSERT INTO users (email, password, role, name, user_code)
+     VALUES (?,?,?,?,?)`,
+    [em, String(password || ""), r, nm, code]
   );
   return Number(hdr.insertId);
 }

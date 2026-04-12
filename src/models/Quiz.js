@@ -16,7 +16,7 @@ const Quiz = sequelize.define('Quiz', {
         allowNull: true
     },
     created_by: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: true
     },
     is_published: {
