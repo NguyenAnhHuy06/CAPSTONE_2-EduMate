@@ -7,6 +7,7 @@ const {
   ListObjectsV2Command,
   GetObjectCommand,
 } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
 function isS3Configured() {
   return !!(
@@ -163,6 +164,22 @@ async function putJsonObject({ key, value }) {
   return { bucket, key, url: buildObjectPublicUrl(key) };
 }
 
+/** Time-limited HTTPS URL for private buckets (GET object). */
+async function getPresignedDownloadUrl(key, expiresInSeconds = 300) {
+  if (!key || String(key).includes("..")) {
+    throw new Error("Invalid S3 key.");
+  }
+  const client = getClient();
+  const bucket = getBucket();
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: String(key).trim(),
+  });
+  return getSignedUrl(client, command, {
+    expiresIn: Math.min(Math.max(Number(expiresInSeconds) || 300, 60), 3600),
+  });
+}
+
 module.exports = {
   isS3Configured,
   uploadDocumentBuffer,
@@ -173,4 +190,5 @@ module.exports = {
   getObjectBuffer,
   documentsPrefix,
   putJsonObject,
+  getPresignedDownloadUrl,
 };

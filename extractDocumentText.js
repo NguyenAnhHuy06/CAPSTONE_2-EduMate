@@ -9,16 +9,40 @@ const MAX_CHARS = 120_000;
 
 /** pdf.js (pdf-parse) often warns on TrueType fonts; text extraction is usually still fine. */
 function withPdfNoiseSuppressed(fn) {
+  const isPdfFontNoise = (msg) =>
+    msg.includes("TT: undefined function") ||
+    msg.includes("TT: undefined funciton") ||
+    msg.includes("Warning: TT: undefined function") ||
+    msg.includes("TT: invalid function id") ||
+    msg.includes("invalid function id");
   const originalWarn = console.warn;
+  const originalError = console.error;
+  const originalLog = console.log;
   console.warn = (...args) => {
     const msg = String(args[0] ?? "");
-    if (msg.includes("TT: undefined function") || msg.includes("TT: undefined funciton")) {
+    if (isPdfFontNoise(msg)) {
       return;
     }
     originalWarn.apply(console, args);
   };
+  console.error = (...args) => {
+    const msg = String(args[0] ?? "");
+    if (isPdfFontNoise(msg)) {
+      return;
+    }
+    originalError.apply(console, args);
+  };
+  console.log = (...args) => {
+    const msg = String(args[0] ?? "");
+    if (isPdfFontNoise(msg)) {
+      return;
+    }
+    originalLog.apply(console, args);
+  };
   return Promise.resolve(fn()).finally(() => {
     console.warn = originalWarn;
+    console.error = originalError;
+    console.log = originalLog;
   });
 }
 
@@ -31,7 +55,14 @@ function truncate(text) {
 async function extractFromPdf(buffer) {
   return withPdfNoiseSuppressed(async () => {
     const data = await pdfParse(buffer);
-    return truncate(data.text);
+    const text = truncate(data.text);
+    /** pdf-parse only reads embedded text streams — scanned/image-only PDFs often yield "". */
+    if (!String(text).trim()) {
+      throw new Error(
+        "PDF_HAS_NO_TEXT_LAYER: This PDF has no extractable text (often scanned images). Use a text-based PDF, Word, or run OCR first."
+      );
+    }
+    return text;
   });
 }
 
