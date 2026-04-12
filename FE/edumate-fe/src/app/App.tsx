@@ -3,15 +3,16 @@ import { Login } from '../app/pages/Login';
 import { Register } from '../app/pages/Register';
 import { InstructorDashboard } from '../app/pages/lecturer/InstructorDashboard';
 import { StudentDashboard } from '../app/pages/student/StudentDashboard';
+import { AdminDashboard } from '../app/pages/AdminDashboard';
 import { NotificationProvider } from '../app/pages/NotificationContext';
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
-  const [userRole, setUserRole] = useState<'instructor' | 'student' | null>(null);
+  const [userRole, setUserRole] = useState<'instructor' | 'student' | 'admin' | null>(null);
   const [userData, setUserData] = useState<any>(null);
 
-  const handleLogin = (role: 'instructor' | 'student', data: any) => {
+  const handleLogin = (role: 'instructor' | 'student' | 'admin', data: any) => {
     setUserRole(role);
     setUserData(data);
     setIsLoggedIn(true);
@@ -48,6 +49,8 @@ export default function App() {
             onGoToRegister={() => setShowRegister(true)}
           />
         )
+      ) : userRole === 'admin' ? (
+        <AdminDashboard user={userData} onLogout={handleLogout} />
       ) : userRole === 'instructor' ? (
         <InstructorDashboard
           user={userData}

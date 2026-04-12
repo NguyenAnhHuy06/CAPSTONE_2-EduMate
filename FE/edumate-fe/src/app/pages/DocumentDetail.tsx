@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, Download, MessageSquare, Sparkles, Send, CheckCircle } from 'lucide-react';
+import {
+  ArrowLeft,
+  Download,
+  MessageSquare,
+  Sparkles,
+  Send,
+  CheckCircle,
+  ExternalLink,
+  AlertCircle,
+  Loader2,
+} from 'lucide-react';
 import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator } from '../pages/FlashcardCreator';
 import { FlashcardViewer } from '../pages/student/FlashcardViewer';
+import { AIChatPanel } from './AIChatPanel';
 import api from '@/services/api';
 import { useNotification } from './NotificationContext';
 
@@ -11,8 +22,10 @@ interface DocumentDetailProps {
   userRole: 'instructor' | 'student';
   user: any;
   onBack: () => void;
-  /** When set (e.g. instructor portal), runs real AI quiz flow instead of the mock QuizCreator. */
+  /** Instructor dashboard: run real AI quiz flow (e.g. Quiz Management). */
   onCreateQuizWithAi?: () => void;
+  /** Alternative: parent handles navigation to quiz (optional). */
+  onOpenQuiz?: (document: any) => void;
 }
 
 type DiscussionComment = {
@@ -23,7 +36,6 @@ type DiscussionComment = {
   role: 'instructor' | 'student';
 };
 
-/** Raw bucket/object URLs (…amazonaws.com/…) are blocked for private buckets — browser shows XML AccessDenied. */
 function isDirectS3ConsoleUrl(url: string): boolean {
   try {
     return new URL(url).hostname.toLowerCase().includes('amazonaws.com');
@@ -37,7 +49,6 @@ function fileNameFromStorageKey(key: string, fallback: string): string {
   return seg && seg.length ? seg : fallback;
 }
 
-/** Avoid showing "CMU-X" and "Course CMU-X" on the same row. */
 function displayCourseName(courseCode: string | undefined, courseName: string | undefined): string {
   const code = String(courseCode || '').trim();
   const raw = String(courseName || '').trim();
@@ -59,10 +70,18 @@ function triggerBrowserDownload(blob: Blob, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizWithAi }: DocumentDetailProps) {
+export function DocumentDetail({
+  document,
+  userRole,
+  user,
+  onBack,
+  onCreateQuizWithAi,
+  onOpenQuiz,
+}: DocumentDetailProps) {
   const { showNotification } = useNotification();
   const [showQuizCreator, setShowQuizCreator] = useState(false);
   const [showFlashcardCreator, setShowFlashcardCreator] = useState(false);
+  const [showAIChat, setShowAIChat] = useState(false);
   const [descriptionLoading, setDescriptionLoading] = useState(false);
   const [displayDescription, setDisplayDescription] = useState('');
   const [comments, setComments] = useState<DiscussionComment[]>([]);
@@ -70,6 +89,24 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
   const [commentsPosting, setCommentsPosting] = useState(false);
   const [newComment, setNewComment] = useState('');
   const [downloadLoading, setDownloadLoading] = useState(false);
+
+  const [docStatus, setDocStatus] = useState(document?.status || 'pending');
+  const [isVerifying, setIsVerifying] = useState(false);
+
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [wordViewerUrl, setWordViewerUrl] = useState<string | null>(null);
+  const [wordLoading, setWordLoading] = useState(false);
+  const [wordError, setWordError] = useState<string | null>(null);
+
+  const isPdf = String(document?.s3Key || '')
+    .toLowerCase()
+    .endsWith('.pdf');
+  const isWord =
+    String(document?.s3Key || '')
+      .toLowerCase()
+      .endsWith('.docx') || String(document?.s3Key || '').toLowerCase().endsWith('.doc');
 
   const documentRefKey = useCallback(() => {
     const documentId = document?.documentId ?? document?.id;
@@ -81,7 +118,6 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
     return { documentId: numericId, s3Key };
   }, [document?.documentId, document?.id, document?.s3Key]);
 
-  /** Prefer documentId only — avoids huge URLs / proxy issues when both id + long s3Key are sent. */
   function commentQueryParams() {
     const { documentId, s3Key } = documentRefKey();
     if (documentId != null) return { documentId };
@@ -176,6 +212,67 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
       cancelled = true;
     };
   }, [document?.documentId, document?.id, document?.s3Key, document?.uploadDescription]);
+
+  useEffect(() => {
+    if (!isPdf || !document.s3Key) return;
+    const fetchPreview = async () => {
+      setPreviewLoading(true);
+      setPreviewError(null);
+      try {
+        const res = await fetch(
+          `/api/documents/preview?key=${encodeURIComponent(document.s3Key)}`
+        );
+        const data = await res.json();
+        if (data.success && data.url) {
+          setPreviewUrl(data.url);
+        } else {
+          setPreviewError('Could not load preview.');
+        }
+      } catch {
+        setPreviewError('Failed to connect to server.');
+      } finally {
+        setPreviewLoading(false);
+      }
+    };
+    void fetchPreview();
+  }, [document.s3Key, isPdf]);
+
+  useEffect(() => {
+    if (!isWord || !document.s3Key) return;
+    const fetchWordViewer = async () => {
+      setWordLoading(true);
+      setWordError(null);
+      try {
+        const res = await fetch(
+          `/api/documents/preview?key=${encodeURIComponent(document.s3Key)}`
+        );
+        const data = await res.json();
+        if (data.success && data.url) {
+          const viewerUrl = `https://docs.google.com/viewer?url=${encodeURIComponent(data.url)}&embedded=true`;
+          setWordViewerUrl(viewerUrl);
+        } else {
+          setWordError('Could not load document preview.');
+        }
+      } catch {
+        setWordError('Failed to connect to server.');
+      } finally {
+        setWordLoading(false);
+      }
+    };
+    void fetchWordViewer();
+  }, [document.s3Key, isWord]);
+
+  const handleOpenQuizFlow = () => {
+    if (onCreateQuizWithAi) {
+      onCreateQuizWithAi();
+      return;
+    }
+    if (onOpenQuiz) {
+      onOpenQuiz(document);
+      return;
+    }
+    setShowQuizCreator(true);
+  };
 
   const handleDownload = async () => {
     const token = localStorage.getItem('edumate_token');
@@ -290,6 +387,76 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
     }
   };
 
+  const handleVerify = async () => {
+    if (!document.documentId) {
+      showNotification({
+        type: 'warning',
+        title: 'Verify',
+        message: 'No document ID available for verification.',
+      });
+      return;
+    }
+    setIsVerifying(true);
+    try {
+      const res: any = await api.patch(`/documents/${document.documentId}/verify`);
+      if (res?.success) {
+        setDocStatus('verified');
+        showNotification({
+          type: 'success',
+          title: 'Verified',
+          message: 'Document verified successfully.',
+        });
+      } else {
+        showNotification({
+          type: 'error',
+          title: 'Verify',
+          message: String(res?.message || 'Could not verify.'),
+        });
+      }
+    } catch (e: any) {
+      showNotification({
+        type: 'error',
+        title: 'Verify',
+        message: String(e?.message || 'Could not verify.'),
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!document.documentId) {
+      showNotification({
+        type: 'warning',
+        title: 'Reject',
+        message: 'No document ID available.',
+      });
+      return;
+    }
+    setIsVerifying(true);
+    try {
+      const res: any = await api.patch(`/documents/${document.documentId}/reject`);
+      if (res?.success) {
+        setDocStatus('rejected');
+        showNotification({ type: 'info', title: 'Rejected', message: 'Document rejected.' });
+      } else {
+        showNotification({
+          type: 'error',
+          title: 'Reject',
+          message: String(res?.message || 'Could not reject.'),
+        });
+      }
+    } catch (e: any) {
+      showNotification({
+        type: 'error',
+        title: 'Reject',
+        message: String(e?.message || 'Could not reject.'),
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
   if (showQuizCreator) {
     return (
       <QuizCreator
@@ -301,26 +468,18 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
   }
 
   if (showFlashcardCreator) {
-    // For students, use the simple viewer; for instructors, use the full creator
     if (userRole === 'student') {
       return (
-        <FlashcardViewer
-          document={document}
-          onBack={() => setShowFlashcardCreator(false)}
-        />
+        <FlashcardViewer document={document} onBack={() => setShowFlashcardCreator(false)} />
       );
     }
     return (
-      <FlashcardCreator
-        document={document}
-        onBack={() => setShowFlashcardCreator(false)}
-      />
+      <FlashcardCreator document={document} onBack={() => setShowFlashcardCreator(false)} />
     );
   }
 
   return (
     <div>
-      {/* Back Button */}
       <button
         onClick={onBack}
         className="flex items-center gap-2 text-blue-600 hover:text-blue-700 mb-6"
@@ -329,7 +488,6 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
         Back to Documents
       </button>
 
-      {/* Document Header */}
       <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between mb-4">
           <div className="flex-1">
@@ -346,10 +504,31 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
                   Verified
                 </span>
               )}
+              {docStatus && (
+                <span
+                  className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold ${
+                    docStatus === 'verified'
+                      ? 'bg-green-100 text-green-700'
+                      : docStatus === 'rejected'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-yellow-100 text-yellow-700'
+                  }`}
+                >
+                  {docStatus === 'verified'
+                    ? 'Admin verified'
+                    : docStatus === 'rejected'
+                      ? 'Rejected'
+                      : 'Pending verification'}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-2 text-gray-600 mb-3 flex-wrap">
               <span className="bg-blue-100 text-blue-700 px-3 py-1 rounded">
-                {document.type === 'general' ? 'General' : document.type === 'general-major' ? 'General Major' : 'Specialized'}
+                {document.type === 'general'
+                  ? 'General'
+                  : document.type === 'general-major'
+                    ? 'General Major'
+                    : 'Specialized'}
               </span>
               {document.courseCode ? <span>{document.courseCode}</span> : null}
               {displayCourseName(document.courseCode, document.courseName) ? (
@@ -361,81 +540,205 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
             </div>
             <p className="text-gray-700 mb-3">{document.description}</p>
             <div className="flex items-center gap-4 text-gray-500">
-              <span>Uploaded by {document.author} ({document.authorRole})</span>
+              <span>
+                Uploaded by {document.author} ({document.authorRole})
+              </span>
               <span>•</span>
               <span>{document.uploadDate}</span>
             </div>
           </div>
         </div>
 
-        {/* Action Buttons */}
-        <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-100">
-          {(() => {
-            const raw = document?.documentId ?? document?.id;
-            const numericId =
-              raw != null && String(raw).trim() !== '' && Number.isFinite(Number(raw))
-                ? Number(raw)
-                : null;
-            const s3KeyStr = String(document?.s3Key || '').trim();
-            const idAsKey =
-              typeof raw === 'string' && raw.includes('/') && !raw.startsWith('http')
-                ? raw.trim()
-                : '';
-            const publicUrl = String(document?.fileUrl || '').trim();
-            const hasPresignable = numericId != null || !!s3KeyStr || !!idAsKey;
-            const hasPublicCdn = !!publicUrl && !isDirectS3ConsoleUrl(publicUrl);
-            const hasFile = hasPresignable || hasPublicCdn;
-            if (!hasFile) {
+        <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-100 items-center justify-between">
+          <div className="flex flex-wrap gap-3">
+            {(() => {
+              const raw = document?.documentId ?? document?.id;
+              const numericId =
+                raw != null && String(raw).trim() !== '' && Number.isFinite(Number(raw))
+                  ? Number(raw)
+                  : null;
+              const s3KeyStr = String(document?.s3Key || '').trim();
+              const idAsKey =
+                typeof raw === 'string' && raw.includes('/') && !raw.startsWith('http')
+                  ? raw.trim()
+                  : '';
+              const publicUrl = String(document?.fileUrl || '').trim();
+              const hasPresignable = numericId != null || !!s3KeyStr || !!idAsKey;
+              const hasPublicCdn = !!publicUrl && !isDirectS3ConsoleUrl(publicUrl);
+              const hasFile = hasPresignable || hasPublicCdn;
+              if (!hasFile) {
+                return (
+                  <button
+                    type="button"
+                    disabled
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-500 rounded-lg cursor-not-allowed"
+                  >
+                    <Download size={18} />
+                    Download unavailable
+                  </button>
+                );
+              }
               return (
                 <button
                   type="button"
-                  disabled
-                  className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-500 rounded-lg cursor-not-allowed"
+                  onClick={() => void handleDownload()}
+                  disabled={downloadLoading}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-70 disabled:cursor-wait"
                 >
                   <Download size={18} />
-                  Download unavailable
+                  {downloadLoading ? 'Preparing…' : 'Download'}
                 </button>
               );
-            }
-            return (
-              <button
-                type="button"
-                onClick={() => void handleDownload()}
-                disabled={downloadLoading}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-70 disabled:cursor-wait"
-              >
-                <Download size={18} />
-                {downloadLoading ? 'Preparing…' : 'Download'}
-              </button>
-            );
-          })()}
-          <button
-            type="button"
-            onClick={() => {
-              if (onCreateQuizWithAi) {
-                onCreateQuizWithAi();
-                return;
-              }
-              setShowQuizCreator(true);
-            }}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
-          >
-            <Sparkles size={18} />
-            Create Quiz with AI
-          </button>
-          {userRole === 'student' && (
+            })()}
             <button
-              onClick={() => setShowFlashcardCreator(true)}
+              type="button"
+              onClick={handleOpenQuizFlow}
               className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
             >
               <Sparkles size={18} />
-              Create Flashcards with AI
+              Create Quiz with AI
             </button>
+            <button
+              type="button"
+              onClick={() => setShowAIChat((v) => !v)}
+              title="Chat about this document"
+              className={`flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors ${
+                showAIChat
+                  ? 'bg-blue-50 border-blue-600 text-blue-600'
+                  : 'bg-white border-blue-600 text-blue-600 hover:bg-blue-50'
+              }`}
+            >
+              <MessageSquare size={18} />
+              {showAIChat ? 'Close Chat' : 'Chat with AI'}
+            </button>
+            {userRole === 'student' && (
+              <button
+                type="button"
+                onClick={() => setShowFlashcardCreator(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+              >
+                <Sparkles size={18} />
+                Create Flashcards with AI
+              </button>
+            )}
+          </div>
+
+          {userRole === 'instructor' && docStatus === 'pending' && (
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleVerify()}
+                disabled={isVerifying}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors text-sm font-medium"
+              >
+                <CheckCircle size={16} />
+                {isVerifying ? 'Processing…' : 'Verify'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleReject()}
+                disabled={isVerifying}
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-red-200 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-50 transition-colors text-sm font-medium"
+              >
+                Reject
+              </button>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Upload description (replaces chunked text preview) */}
+      <div className={`grid gap-6 mb-6 ${showAIChat ? 'lg:grid-cols-[2fr_1fr]' : 'grid-cols-1'}`}>
+        <div className="bg-white rounded-lg border border-gray-200 p-4 shrink-0">
+          <div className="flex items-center justify-between mb-4">
+            <h3>Document preview</h3>
+            {isPdf && previewUrl && (
+              <a
+                href={previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-sm text-blue-600 hover:underline"
+              >
+                <ExternalLink size={14} />
+                Open in new tab
+              </a>
+            )}
+          </div>
+
+          {isPdf ? (
+            <div
+              className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50"
+              style={{ height: '700px' }}
+            >
+              {previewLoading && (
+                <div className="flex items-center justify-center h-full text-gray-500">
+                  <Loader2 className="animate-spin mr-2" size={24} />
+                  <span>Loading preview…</span>
+                </div>
+              )}
+              {previewError && !previewLoading && (
+                <div className="flex flex-col items-center justify-center h-full text-red-500 gap-2">
+                  <AlertCircle size={40} />
+                  <p>{previewError}</p>
+                </div>
+              )}
+              {previewUrl && !previewLoading && !previewError && (
+                <iframe
+                  src={previewUrl}
+                  title={document.title}
+                  className="w-full h-full border-0"
+                  loading="lazy"
+                />
+              )}
+            </div>
+          ) : isWord ? (
+            <div
+              className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50"
+              style={{ height: '700px' }}
+            >
+              {wordLoading && (
+                <div className="flex items-center justify-center h-full text-gray-500">
+                  <Loader2 className="animate-spin mr-2" size={24} />
+                  <span>Loading document preview…</span>
+                </div>
+              )}
+              {wordError && !wordLoading && (
+                <div className="flex flex-col items-center justify-center h-full text-red-500 gap-2">
+                  <AlertCircle size={40} />
+                  <p>{wordError}</p>
+                </div>
+              )}
+              {wordViewerUrl && !wordLoading && !wordError && (
+                <iframe
+                  src={wordViewerUrl}
+                  title={document.title}
+                  className="w-full h-full border-0"
+                  loading="lazy"
+                />
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center bg-gray-50 rounded-lg border border-dashed border-gray-300 py-16 gap-4">
+              <AlertCircle size={48} className="text-gray-400" />
+              <p className="text-gray-600 text-center">
+                Preview is not available for{' '}
+                <strong>{document.s3Key?.split('.').pop()?.toUpperCase() || 'this'}</strong> files.
+              </p>
+              <p className="text-gray-400 text-sm">Use Download to open the file locally.</p>
+            </div>
+          )}
+        </div>
+
+        {showAIChat && (
+          <div className="h-[730px] min-h-[400px]">
+            <AIChatPanel
+              documentId={document.documentId}
+              s3Key={document.s3Key}
+              onClose={() => setShowAIChat(false)}
+            />
+          </div>
+        )}
+      </div>
+
       <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
         <h3 className="mb-4">Description</h3>
         <div className="bg-gray-50 p-6 rounded-lg border border-gray-200 min-h-[120px]">
@@ -449,7 +752,6 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
         </div>
       </div>
 
-      {/* Discussion Section */}
       <div className="bg-white rounded-lg border border-gray-200 p-6">
         <h3 className="mb-4 flex items-center gap-2">
           <MessageSquare size={24} />
@@ -462,7 +764,6 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
           <p className="text-gray-600 text-sm mb-6">No comments yet. Start the discussion.</p>
         ) : null}
 
-        {/* Comments List */}
         <div className="space-y-4 mb-6">
           {comments.map((comment) => (
             <div key={comment.id} className="border-b border-gray-100 pb-4 last:border-0">
@@ -485,7 +786,6 @@ export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizW
           ))}
         </div>
 
-        {/* Add Comment */}
         <div>
           <label className="block text-gray-700 font-medium mb-2" htmlFor="doc-comment-input">
             Add a comment
