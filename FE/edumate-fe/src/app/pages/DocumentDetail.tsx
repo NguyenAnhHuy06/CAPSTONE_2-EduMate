@@ -259,6 +259,15 @@ export function DocumentDetail({ document, userRole, user, onBack, onOpenQuiz }:
               Quiz
             </button>
             <button
+              onClick={() => setShowFlashcardCreator(true)}
+              title={userRole === 'student' ? 'Study Flashcards' : 'Generate Flashcards with AI'}
+              className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+            >
+                <Sparkles size={18} />
+              Flashcards
+            </button>
+
+            <button
               onClick={() => setShowAIChat(!showAIChat)}
               title="Chat about this document"
               className={`flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors ${showAIChat ? 'bg-blue-50 border-blue-600 text-blue-600' : 'bg-white border-blue-600 text-blue-600 hover:bg-blue-50'}`}

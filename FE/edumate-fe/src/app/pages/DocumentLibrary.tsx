@@ -1,6 +1,7 @@
-import { useState } from 'react';
-import { Search, Filter, FileText, Download, MessageSquare, Eye, Sparkles, CheckCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle } from 'lucide-react';
 import { DocumentDetail } from '../pages/DocumentDetail';
+import api from '../../services/api';
 
 interface DocumentLibraryProps {
   userRole: 'instructor' | 'student';
@@ -11,96 +12,151 @@ export function DocumentLibrary({ userRole, user }: DocumentLibraryProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'general' | 'general-major' | 'specialized'>('all');
   const [selectedDocument, setSelectedDocument] = useState<any>(null);
+  const [ documents, setDocuments ] = useState<any[]>([]);
+  const [ loading, setLoading ] = useState(true);
+  const [ error, setError ] = useState('');
 
-  // Mock documents data
-  const documents = [
-    {
-      id: 1,
-      title: 'Introduction to Data Structures',
-      type: 'general',
-      courseCode: 'CS101',
-      courseName: 'Computer Science Fundamentals',
-      author: 'Dr. Sarah Johnson',
-      authorRole: 'instructor',
-      uploadDate: '2026-03-25',
-      downloads: 145,
-      comments: 12,
-      views: 234,
-      description: 'Comprehensive guide covering basic data structures including arrays, linked lists, and stacks.',
-      highCredibility: true,
-    },
-    {
-      id: 2,
-      title: 'Advanced Algorithms - Sorting',
-      type: 'specialized',
-      courseCode: 'CS301',
-      courseName: 'Algorithm Analysis',
-      author: 'Alex Smith',
-      authorRole: 'student',
-      uploadDate: '2026-03-28',
-      downloads: 87,
-      comments: 8,
-      views: 156,
-      description: 'Detailed notes on various sorting algorithms with complexity analysis.',
-      highCredibility: false,
-    },
-    {
-      id: 3,
-      title: 'Database Normalization Guide',
-      type: 'general-major',
-      courseCode: 'DB201',
-      courseName: 'Database Management',
-      author: 'Dr. Sarah Johnson',
-      authorRole: 'instructor',
-      uploadDate: '2026-03-27',
-      downloads: 203,
-      comments: 15,
-      views: 312,
-      description: 'Step-by-step guide to database normalization from 1NF to BCNF.',
-      highCredibility: true,
-    },
-    {
-      id: 4,
-      title: 'Web Development Best Practices',
-      type: 'general',
-      courseCode: 'WEB102',
-      courseName: 'Web Technologies',
-      author: 'Jordan Lee',
-      authorRole: 'student',
-      uploadDate: '2026-03-26',
-      downloads: 98,
-      comments: 6,
-      views: 187,
-      description: 'Collection of best practices for modern web development.',
-      highCredibility: false,
-    },
-    {
-      id: 5,
-      title: 'Machine Learning Fundamentals',
-      type: 'specialized',
-      courseCode: 'AI401',
-      courseName: 'Artificial Intelligence',
-      author: 'Dr. Michael Chen',
-      authorRole: 'instructor',
-      uploadDate: '2026-03-24',
-      downloads: 267,
-      comments: 23,
-      views: 445,
-      description: 'Introduction to machine learning concepts, algorithms, and applications.',
-      highCredibility: true,
-    },
-  ];
+  // // Mock documents data
+  // const documents = [
+  //   {
+  //     id: 1,
+  //     title: 'Introduction to Data Structures',
+  //     type: 'general',
+  //     courseCode: 'CS101',
+  //     courseName: 'Computer Science Fundamentals',
+  //     author: 'Dr. Sarah Johnson',
+  //     authorRole: 'instructor',
+  //     uploadDate: '2026-03-25',
+  //     downloads: 145,
+  //     comments: 12,
+  //     views: 234,
+  //     description: 'Comprehensive guide covering basic data structures including arrays, linked lists, and stacks.',
+  //     highCredibility: true,
+  //   },
+  //   {
+  //     id: 2,
+  //     title: 'Advanced Algorithms - Sorting',
+  //     type: 'specialized',
+  //     courseCode: 'CS301',
+  //     courseName: 'Algorithm Analysis',
+  //     author: 'Alex Smith',
+  //     authorRole: 'student',
+  //     uploadDate: '2026-03-28',
+  //     downloads: 87,
+  //     comments: 8,
+  //     views: 156,
+  //     description: 'Detailed notes on various sorting algorithms with complexity analysis.',
+  //     highCredibility: false,
+  //   },
+  //   {
+  //     id: 3,
+  //     title: 'Database Normalization Guide',
+  //     type: 'general-major',
+  //     courseCode: 'DB201',
+  //     courseName: 'Database Management',
+  //     author: 'Dr. Sarah Johnson',
+  //     authorRole: 'instructor',
+  //     uploadDate: '2026-03-27',
+  //     downloads: 203,
+  //     comments: 15,
+  //     views: 312,
+  //     description: 'Step-by-step guide to database normalization from 1NF to BCNF.',
+  //     highCredibility: true,
+  //   },
+  //   {
+  //     id: 4,
+  //     title: 'Web Development Best Practices',
+  //     type: 'general',
+  //     courseCode: 'WEB102',
+  //     courseName: 'Web Technologies',
+  //     author: 'Jordan Lee',
+  //     authorRole: 'student',
+  //     uploadDate: '2026-03-26',
+  //     downloads: 98,
+  //     comments: 6,
+  //     views: 187,
+  //     description: 'Collection of best practices for modern web development.',
+  //     highCredibility: false,
+  //   },
+  //   {
+  //     id: 5,
+  //     title: 'Machine Learning Fundamentals',
+  //     type: 'specialized',
+  //     courseCode: 'AI401',
+  //     courseName: 'Artificial Intelligence',
+  //     author: 'Dr. Michael Chen',
+  //     authorRole: 'instructor',
+  //     uploadDate: '2026-03-24',
+  //     downloads: 267,
+  //     comments: 23,
+  //     views: 445,
+  //     description: 'Introduction to machine learning concepts, algorithms, and applications.',
+  //     highCredibility: true,
+  //   },
+  // ];
+useEffect(() => {
+  const loadDocuments = async () => {
+    try {
+      setLoading(true);
+      setError('');
 
-  const filteredDocuments = documents.filter((doc) => {
-    const matchesSearch =
-      doc.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      doc.courseCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      doc.courseName.toLowerCase().includes(searchQuery.toLowerCase());
+      const res: any = await api.get('/documents/recent');
+      const rows = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
 
-    const matchesType = typeFilter === 'all' || doc.type === typeFilter;
+      const mapped = rows.map((doc: any) => ({
+        id: doc.id,
+        documentId: doc.id,
+        title: doc.title,
+        s3Key: doc.s3Key,
+        type: doc.type || 'general',
+        courseCode: doc.courseCode || 'N/A',
+        courseName: doc.courseName || 'Unknown Course',
+        author: doc.author || 'Unknown',
+        authorRole: doc.authorRole || 'instructor',
+        uploadDate: doc.uploadedAt || '',
+        downloads: doc.downloads || 0,
+        comments: doc.comments || 0,
+        views: doc.views || 0,
+        description: doc.description || '',
+        highCredibility: true,
+      }));
 
-    return matchesSearch && matchesType;
-  });
+      setDocuments(mapped);
+    } catch (err: any) {
+      setError(err?.response?.data?.message || err?.message || 'Could not load documents.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  loadDocuments();
+}, []);
+
+const filteredDocuments = documents.filter((doc) => {
+  const matchesSearch =
+    (doc.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (doc.courseCode || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (doc.courseName || '').toLowerCase().includes(searchQuery.toLowerCase());
+
+  const matchesType = typeFilter === 'all' || doc.type === typeFilter;
+  return matchesSearch && matchesType;
+});
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <p className="text-gray-600">Loading documents...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-white rounded-lg border border-red-200 p-6">
+        <p className="text-red-600">{error}</p>
+      </div>
+    );
+  }
 
   if (selectedDocument) {
     return (
@@ -181,7 +237,7 @@ export function DocumentLibrary({ userRole, user }: DocumentLibraryProps) {
                 <div className="flex items-center gap-4 text-gray-500">
                   <span>By {doc.author} ({doc.authorRole})</span>
                   <span>•</span>
-                  <span>{doc.uploadDate}</span>
+                  <span>{doc.uploadDate || 'Unknown date'}</span>
                 </div>
               </div>
               <FileText className="text-blue-600" size={32} />

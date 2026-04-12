@@ -1,0 +1,56 @@
+.
++--- .gitignore
++--- eslint.config.js
++--- index.html
++--- package-lock.json
++--- package.json
++--- public
+|   +--- favicon.svg
+|   +--- icons.svg
++--- README.md
++--- src
+|   +--- app
+|   |   +--- App.tsx
+|   |   +--- components
+|   |   |   +--- ui
+|   |   |   |   +--- button.tsx
+|   |   |   |   +--- utils.ts
+|   |   +--- pages
+|   |   |   +--- AdminDashboard.tsx
+|   |   |   +--- AIChatPanel.tsx
+|   |   |   +--- DocumentDetail.tsx
+|   |   |   +--- DocumentLibrary.tsx
+|   |   |   +--- FlashcardCreator.tsx
+|   |   |   +--- lecturer
+|   |   |   |   +--- InstructorDashboard.tsx
+|   |   |   |   +--- QuizManagement.tsx
+|   |   |   +--- Login.tsx
+|   |   |   +--- NotificationContext.tsx
+|   |   |   +--- Profile.tsx
+|   |   |   +--- QuizCreator.tsx
+|   |   |   +--- Register.tsx
+|   |   |   +--- Sidebar.tsx
+|   |   |   +--- student
+|   |   |   |   +--- FlashcardViewer.tsx
+|   |   |   |   +--- Leaderboard.tsx
+|   |   |   |   +--- ProgressTracker.tsx
+|   |   |   |   +--- StudentDashboard.tsx
+|   |   |   |   +--- StudentQuizSection.tsx
+|   |   |   +--- UploadDocument.tsx
+|   +--- main.tsx
+|   +--- services
+|   |   +--- api.ts
+|   +--- styles
+|   |   +--- index.css
+|   |   +--- tailwind.css
+|   |   +--- theme.css
+|   +--- utils
+|   |   +--- .gitkeep
+|   |   +--- constants.ts
+|   |   +--- safeErrorMessage.ts
+|   +--- vite-env.d.ts
++--- structure.txt
++--- tsconfig.app.json
++--- tsconfig.json
++--- tsconfig.node.json
++--- vite.config.ts
