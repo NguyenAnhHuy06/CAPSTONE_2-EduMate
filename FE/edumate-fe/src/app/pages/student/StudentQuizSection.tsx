@@ -332,6 +332,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                     id: detail?.quiz_id || quiz.id,
                     title: detail?.title || quiz.title,
                     questions,
+                    passPercentage: Number(
+                        (detail as any)?.pass_percentage ??
+                            (detail as any)?.passPercentage ??
+                            quiz.passPercentage ??
+                            70
+                    ),
+                    duration: Number((detail as any)?.duration_minutes ?? (detail as any)?.duration ?? quiz.duration ?? 10),
                 };
                 await recordAttemptStart(generatedQuiz.id);
                 setSelectedQuiz(generatedQuiz);
@@ -369,7 +376,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 '/quiz/generate',
                 {
                     s3Key: quiz?.s3Key,
-                    persist: true,
+                    persist: false,
                     quizTitle: quiz?.title,
                     numQuestions: numQuestionsForGenerate(quiz),
                     language: 'English',
@@ -416,6 +423,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 ...quiz,
                 id: persistedQuizId,
                 questions: finalQuestions,
+                passPercentage: Number(quiz.passPercentage ?? 70),
             };
 
             await recordAttemptStart(generatedQuiz.id);
@@ -505,6 +513,11 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         });
 
         const score = Math.round((correctCount / questions.length) * 100);
+        const passThreshold = Math.max(
+            1,
+            Math.min(100, Number(selectedQuiz?.passPercentage ?? selectedQuiz?.pass_percentage ?? 70))
+        );
+        const passed = score >= passThreshold;
 
         const durationMinutes = Number(selectedQuiz.duration) || 10;
         const plannedSeconds = Math.max(0, Math.floor(durationMinutes * 60));
@@ -520,6 +533,8 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             timeTaken: resolvedTimeTaken,
             answers: answers,
             completedDate: new Date().toISOString().split('T')[0],
+            passThreshold,
+            passed,
         };
 
         setQuizResult(result);
@@ -548,8 +563,8 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         showNotification({
             type: 'success',
             title: 'Quiz Submitted!',
-            message: `You scored ${score}%. ${correctCount} out of ${questions.length} correct.`,
-            duration: 5000,
+            message: `You scored ${score}%. ${correctCount} out of ${questions.length} correct. ${passed ? 'Pass — you met the required score.' : `Not passed — need at least ${passThreshold}%.`}`,
+            duration: 6000,
         });
 
         setShowResults(true);
@@ -578,7 +593,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                     <div className="flex items-start justify-between mb-4">
                         <div className="flex-1">
                             <h3 className="text-gray-900 mb-2">{quiz.title}</h3>
-                            <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
+                            <p className="text-gray-600 mb-1">Document Type: {quiz.subject}</p>
                             {'instructor' in quiz && (
                                 <p className="text-gray-500 text-sm">Instructor: {quiz.instructor}</p>
                             )}
@@ -643,7 +658,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                                     </span>
                                 )}
                             </div>
-                            <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
+                            <p className="text-gray-600 mb-1">Document Type: {quiz.subject}</p>
                             {'instructor' in quiz ? (
                                 <p className="text-gray-500 text-sm">Instructor: {quiz.instructor}</p>
                             ) : (
@@ -785,7 +800,7 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                         <div className="flex items-start justify-between mb-4">
                             <div className="flex-1">
                                 <h3 className="text-gray-900 mb-2">{quiz.title}</h3>
-                                <p className="text-gray-600 mb-1">Subject: {quiz.subject}</p>
+                                <p className="text-gray-600 mb-1">Document Type: {quiz.subject}</p>
                                 {'createdDate' in quiz && (
                                     <p className="text-gray-500 text-sm">Created: {quiz.createdDate}</p>
                                 )}
@@ -1005,13 +1020,26 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
 
                     <div className="p-6">
                         {/* Score Summary */}
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
                             <div className="bg-blue-50 rounded-lg p-4 text-center">
                                 <div className="text-blue-600 mb-2">
                                     <Award size={32} className="mx-auto" />
                                 </div>
                                 <p className="text-gray-600 text-sm mb-1">Your Score</p>
                                 <p className="text-2xl text-blue-600">{quizResult.score}%</p>
+                            </div>
+                            <div
+                                className={`rounded-lg p-4 text-center ${(quizResult as any).passed ? 'bg-green-50' : 'bg-amber-50'}`}
+                            >
+                                <p className="text-gray-600 text-sm mb-1">Result</p>
+                                <p
+                                    className={`text-2xl font-semibold ${(quizResult as any).passed ? 'text-green-700' : 'text-amber-800'}`}
+                                >
+                                    {(quizResult as any).passed ? 'Pass' : 'Not passed'}
+                                </p>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    Required: {(quizResult as any).passThreshold ?? 70}%
+                                </p>
                             </div>
                             <div className="bg-green-50 rounded-lg p-4 text-center">
                                 <div className="text-green-600 mb-2">

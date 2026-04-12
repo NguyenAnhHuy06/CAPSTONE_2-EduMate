@@ -11,9 +11,10 @@ import { StudentQuizSection } from '../student/StudentQuizSection';
 interface StudentDashboardProps {
     user: any;
     onLogout: () => void;
+    onUserUpdate?: (user: any) => void;
 }
 
-export function StudentDashboard({ user, onLogout }: StudentDashboardProps) {
+export function StudentDashboard({ user, onLogout, onUserUpdate }: StudentDashboardProps) {
     const [activeTab, setActiveTab] = useState<'dashboard' | 'documents' | 'upload' | 'quizzes' | 'progress' | 'leaderboard' | 'profile'>('dashboard');
 
     const menuItems = [
@@ -131,7 +132,7 @@ export function StudentDashboard({ user, onLogout }: StudentDashboardProps) {
                     )}
 
                     {activeTab === 'upload' && (
-                        <UploadDocument userRole="student" onUploadComplete={() => setActiveTab('documents')} />
+                        <UploadDocument user={user} userRole="student" onUploadComplete={() => setActiveTab('documents')} />
                     )}
 
                     {activeTab === 'quizzes' && (
@@ -147,7 +148,7 @@ export function StudentDashboard({ user, onLogout }: StudentDashboardProps) {
                     )}
 
                     {activeTab === 'profile' && (
-                        <Profile user={user} />
+                        <Profile user={user} onUserUpdate={onUserUpdate} />
                     )}
                 </div>
             </div>

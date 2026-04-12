@@ -1,50 +1,292 @@
-import { useState } from 'react';
-import { ArrowLeft, Download, MessageSquare, Sparkles, CheckCircle, Send } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { ArrowLeft, Download, MessageSquare, Sparkles, Send, CheckCircle } from 'lucide-react';
 import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator } from '../pages/FlashcardCreator';
 import { FlashcardViewer } from '../pages/student/FlashcardViewer';
+import api from '@/services/api';
+import { useNotification } from './NotificationContext';
 
 interface DocumentDetailProps {
   document: any;
   userRole: 'instructor' | 'student';
   user: any;
   onBack: () => void;
+  /** When set (e.g. instructor portal), runs real AI quiz flow instead of the mock QuizCreator. */
+  onCreateQuizWithAi?: () => void;
 }
 
-export function DocumentDetail({ document, userRole, user, onBack }: DocumentDetailProps) {
+type DiscussionComment = {
+  id: number;
+  author: string;
+  text: string;
+  date: string;
+  role: 'instructor' | 'student';
+};
+
+/** Raw bucket/object URLs (…amazonaws.com/…) are blocked for private buckets — browser shows XML AccessDenied. */
+function isDirectS3ConsoleUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.toLowerCase().includes('amazonaws.com');
+  } catch {
+    return false;
+  }
+}
+
+function fileNameFromStorageKey(key: string, fallback: string): string {
+  const seg = key.split('/').filter(Boolean).pop();
+  return seg && seg.length ? seg : fallback;
+}
+
+/** Avoid showing "CMU-X" and "Course CMU-X" on the same row. */
+function displayCourseName(courseCode: string | undefined, courseName: string | undefined): string {
+  const code = String(courseCode || '').trim();
+  const raw = String(courseName || '').trim();
+  if (!raw) return '';
+  const lower = raw.toLowerCase();
+  if (code && (lower === code.toLowerCase() || lower === `course ${code}`.toLowerCase())) return '';
+  return raw;
+}
+
+function triggerBrowserDownload(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function DocumentDetail({ document, userRole, user, onBack, onCreateQuizWithAi }: DocumentDetailProps) {
+  const { showNotification } = useNotification();
   const [showQuizCreator, setShowQuizCreator] = useState(false);
   const [showFlashcardCreator, setShowFlashcardCreator] = useState(false);
-  const [comments, setComments] = useState([
-    {
-      id: 1,
-      author: 'Emma Wilson',
-      text: 'This is really helpful! Thanks for sharing.',
-      date: '2026-03-29',
-      role: 'student',
-    },
-    {
-      id: 2,
-      author: 'Dr. Sarah Johnson',
-      text: 'Great resource. I\'ve added some additional references in the discussion.',
-      date: '2026-03-28',
-      role: 'instructor',
-    },
-  ]);
+  const [descriptionLoading, setDescriptionLoading] = useState(false);
+  const [displayDescription, setDisplayDescription] = useState('');
+  const [comments, setComments] = useState<DiscussionComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(true);
+  const [commentsPosting, setCommentsPosting] = useState(false);
   const [newComment, setNewComment] = useState('');
+  const [downloadLoading, setDownloadLoading] = useState(false);
 
-  const handleAddComment = () => {
-    if (newComment.trim()) {
-      setComments([
-        ...comments,
-        {
-          id: comments.length + 1,
-          author: user.name,
-          text: newComment,
-          date: new Date().toISOString().split('T')[0],
-          role: userRole,
-        },
-      ]);
+  const documentRefKey = useCallback(() => {
+    const documentId = document?.documentId ?? document?.id;
+    const s3Key = String(document?.s3Key || '').trim();
+    const numericId =
+      documentId != null && documentId !== '' && Number.isFinite(Number(documentId))
+        ? Number(documentId)
+        : null;
+    return { documentId: numericId, s3Key };
+  }, [document?.documentId, document?.id, document?.s3Key]);
+
+  /** Prefer documentId only — avoids huge URLs / proxy issues when both id + long s3Key are sent. */
+  function commentQueryParams() {
+    const { documentId, s3Key } = documentRefKey();
+    if (documentId != null) return { documentId };
+    if (s3Key) return { s3Key };
+    return {};
+  }
+
+  function commentPostBody() {
+    const { documentId, s3Key } = documentRefKey();
+    if (documentId != null) return { documentId };
+    if (s3Key) return { s3Key };
+    return {};
+  }
+
+  const loadComments = useCallback(async () => {
+    const { documentId, s3Key } = documentRefKey();
+    if (documentId == null && !s3Key) {
+      setComments([]);
+      setCommentsLoading(false);
+      return;
+    }
+    setCommentsLoading(true);
+    try {
+      const res: any = await api.get('/documents/comments', {
+        params: commentQueryParams(),
+      });
+      const raw = Array.isArray(res?.data) ? res.data : [];
+      const mapped: DiscussionComment[] = raw.map((c: any, idx: number) => ({
+        id: Number(c?.id ?? idx),
+        author: String(c?.author || 'User').trim(),
+        text: String(c?.text || '').trim(),
+        date: String(c?.date || '').trim(),
+        role: c?.role === 'instructor' ? 'instructor' : 'student',
+      }));
+      setComments(mapped);
+    } catch {
+      setComments([]);
+      showNotification({
+        type: 'error',
+        title: 'Discussion',
+        message: 'Could not load comments. Please try again later.',
+      });
+    } finally {
+      setCommentsLoading(false);
+    }
+  }, [documentRefKey, showNotification]);
+
+  useEffect(() => {
+    void loadComments();
+  }, [loadComments]);
+
+  useEffect(() => {
+    const fromList = String(document?.uploadDescription || '').trim();
+    if (fromList) {
+      setDisplayDescription(fromList);
+      return;
+    }
+
+    const documentId = document?.documentId ?? document?.id;
+    const s3Key = String(document?.s3Key || '').trim();
+    let cancelled = false;
+
+    const loadDescription = async () => {
+      if (!documentId && !s3Key) {
+        setDisplayDescription('');
+        return;
+      }
+      setDescriptionLoading(true);
+      try {
+        const did = document?.documentId ?? document?.id;
+        const sk = String(document?.s3Key || '').trim();
+        const num =
+          did != null && did !== '' && Number.isFinite(Number(did)) ? Number(did) : null;
+        const previewParams =
+          num != null ? { documentId: num } : sk ? { s3Key: sk } : {};
+
+        const res: any = await api.get('/documents/preview', {
+          params: previewParams,
+        });
+        if (cancelled) return;
+        const d = String(res?.data?.description || '').trim();
+        setDisplayDescription(d);
+      } catch {
+        if (!cancelled) setDisplayDescription('');
+      } finally {
+        if (!cancelled) setDescriptionLoading(false);
+      }
+    };
+
+    void loadDescription();
+    return () => {
+      cancelled = true;
+    };
+  }, [document?.documentId, document?.id, document?.s3Key, document?.uploadDescription]);
+
+  const handleDownload = async () => {
+    const token = localStorage.getItem('edumate_token');
+    if (!token) {
+      showNotification({
+        type: 'warning',
+        title: 'Sign in required',
+        message: 'Please sign in to download this file.',
+      });
+      return;
+    }
+
+    let s3Key = String(document?.s3Key || '').trim();
+    const rawDocId = document?.documentId ?? document?.id;
+    const numId =
+      rawDocId != null &&
+      String(rawDocId).trim() !== '' &&
+      Number.isFinite(Number(rawDocId))
+        ? Number(rawDocId)
+        : null;
+    if (!s3Key && typeof rawDocId === 'string' && rawDocId.includes('/') && !rawDocId.startsWith('http')) {
+      s3Key = rawDocId.trim();
+    }
+
+    const publicUrl = String(document?.fileUrl || '').trim();
+
+    if (numId == null && !s3Key) {
+      if (publicUrl && !isDirectS3ConsoleUrl(publicUrl)) {
+        window.open(publicUrl, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      showNotification({
+        type: 'warning',
+        title: 'Download',
+        message: publicUrl
+          ? 'This file is stored privately. Use a signed download from the server (ensure the document is linked in the library).'
+          : 'No file link is available for this document yet.',
+      });
+      return;
+    }
+
+    setDownloadLoading(true);
+    try {
+      const params = numId != null ? { documentId: numId } : { s3Key };
+      const suggestedName = fileNameFromStorageKey(
+        s3Key,
+        numId != null ? `document-${numId}` : 'document'
+      );
+      const blob = (await api.get('/documents/download-file', {
+        params,
+        responseType: 'blob',
+        timeout: 180_000,
+      })) as unknown as Blob;
+      if (!(blob instanceof Blob) || blob.size === 0) {
+        showNotification({
+          type: 'error',
+          title: 'Download',
+          message: 'Empty or invalid file response. Please try again.',
+        });
+        return;
+      }
+      triggerBrowserDownload(blob, suggestedName);
+    } catch {
+      showNotification({
+        type: 'error',
+        title: 'Download',
+        message: 'Could not download. Check your connection or try again later.',
+      });
+    } finally {
+      setDownloadLoading(false);
+    }
+  };
+
+  const handleAddComment = async () => {
+    const text = newComment.trim();
+    if (!text) return;
+    const token = localStorage.getItem('edumate_token');
+    if (!token) {
+      showNotification({
+        type: 'warning',
+        title: 'Sign in required',
+        message: 'Please sign in to post a comment.',
+      });
+      return;
+    }
+    const { documentId, s3Key } = documentRefKey();
+    if (documentId == null && !s3Key) {
+      showNotification({
+        type: 'warning',
+        title: 'Discussion',
+        message: 'This document cannot be commented on yet.',
+      });
+      return;
+    }
+    setCommentsPosting(true);
+    try {
+      await api.post('/documents/comments', {
+        text,
+        ...commentPostBody(),
+      });
       setNewComment('');
+      await loadComments();
+    } catch (err: any) {
+      const msg = err?.response?.data?.message;
+      showNotification({
+        type: 'error',
+        title: 'Could not post',
+        message: typeof msg === 'string' && msg.trim() ? msg : 'Please try again.',
+      });
+    } finally {
+      setCommentsPosting(false);
     }
   };
 
@@ -91,22 +333,31 @@ export function DocumentDetail({ document, userRole, user, onBack }: DocumentDet
       <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between mb-4">
           <div className="flex-1">
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
               <h2>{document.title}</h2>
-              {document.highCredibility && (
-                <span className="flex items-center gap-1 bg-green-100 text-green-700 px-2 py-1 rounded text-xs">
-                  <CheckCircle size={14} />
-                  High Credibility
+              {(!!document.isLecturerUpload ||
+                !!document.highCredibility ||
+                (document.authorRole === 'instructor' && document.highCredibility !== false)) && (
+                <span
+                  className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-xs font-medium"
+                  title="Uploaded by course staff — marked as reliable"
+                >
+                  <CheckCircle size={14} aria-hidden />
+                  Verified
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-4 text-gray-600 mb-3">
+            <div className="flex items-center gap-2 text-gray-600 mb-3 flex-wrap">
               <span className="bg-blue-100 text-blue-700 px-3 py-1 rounded">
                 {document.type === 'general' ? 'General' : document.type === 'general-major' ? 'General Major' : 'Specialized'}
               </span>
-              <span>{document.courseCode}</span>
-              <span>•</span>
-              <span>{document.courseName}</span>
+              {document.courseCode ? <span>{document.courseCode}</span> : null}
+              {displayCourseName(document.courseCode, document.courseName) ? (
+                <>
+                  {document.courseCode ? <span className="text-gray-300">·</span> : null}
+                  <span>{displayCourseName(document.courseCode, document.courseName)}</span>
+                </>
+              ) : null}
             </div>
             <p className="text-gray-700 mb-3">{document.description}</p>
             <div className="flex items-center gap-4 text-gray-500">
@@ -119,12 +370,54 @@ export function DocumentDetail({ document, userRole, user, onBack }: DocumentDet
 
         {/* Action Buttons */}
         <div className="flex flex-wrap gap-3 pt-4 border-t border-gray-100">
-          <button className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors">
-            <Download size={18} />
-            Download
-          </button>
+          {(() => {
+            const raw = document?.documentId ?? document?.id;
+            const numericId =
+              raw != null && String(raw).trim() !== '' && Number.isFinite(Number(raw))
+                ? Number(raw)
+                : null;
+            const s3KeyStr = String(document?.s3Key || '').trim();
+            const idAsKey =
+              typeof raw === 'string' && raw.includes('/') && !raw.startsWith('http')
+                ? raw.trim()
+                : '';
+            const publicUrl = String(document?.fileUrl || '').trim();
+            const hasPresignable = numericId != null || !!s3KeyStr || !!idAsKey;
+            const hasPublicCdn = !!publicUrl && !isDirectS3ConsoleUrl(publicUrl);
+            const hasFile = hasPresignable || hasPublicCdn;
+            if (!hasFile) {
+              return (
+                <button
+                  type="button"
+                  disabled
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-200 text-gray-500 rounded-lg cursor-not-allowed"
+                >
+                  <Download size={18} />
+                  Download unavailable
+                </button>
+              );
+            }
+            return (
+              <button
+                type="button"
+                onClick={() => void handleDownload()}
+                disabled={downloadLoading}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-70 disabled:cursor-wait"
+              >
+                <Download size={18} />
+                {downloadLoading ? 'Preparing…' : 'Download'}
+              </button>
+            );
+          })()}
           <button
-            onClick={() => setShowQuizCreator(true)}
+            type="button"
+            onClick={() => {
+              if (onCreateQuizWithAi) {
+                onCreateQuizWithAi();
+                return;
+              }
+              setShowQuizCreator(true);
+            }}
             className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
           >
             <Sparkles size={18} />
@@ -142,33 +435,17 @@ export function DocumentDetail({ document, userRole, user, onBack }: DocumentDet
         </div>
       </div>
 
-      {/* Document Content Preview */}
+      {/* Upload description (replaces chunked text preview) */}
       <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
-        <h3 className="mb-4">Document Preview</h3>
-        <div className="bg-gray-50 p-6 rounded-lg border border-gray-200 min-h-[400px]">
-          <p className="text-gray-600 mb-4">
-            This is a preview of the document content. In a real application, the actual document would be displayed here.
-          </p>
-          <div className="space-y-4">
-            <div>
-              <h4 className="mb-2">1. Introduction</h4>
-              <p className="text-gray-700">
-                Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
-              </p>
-            </div>
-            <div>
-              <h4 className="mb-2">2. Key Concepts</h4>
-              <p className="text-gray-700">
-                Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.
-              </p>
-            </div>
-            <div>
-              <h4 className="mb-2">3. Examples</h4>
-              <p className="text-gray-700">
-                Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.
-              </p>
-            </div>
-          </div>
+        <h3 className="mb-4">Description</h3>
+        <div className="bg-gray-50 p-6 rounded-lg border border-gray-200 min-h-[120px]">
+          {descriptionLoading ? (
+            <p className="text-gray-600">Loading description…</p>
+          ) : displayDescription ? (
+            <p className="text-gray-700 whitespace-pre-wrap">{displayDescription}</p>
+          ) : (
+            <p className="text-gray-600">No description was provided for this document.</p>
+          )}
         </div>
       </div>
 
@@ -179,49 +456,66 @@ export function DocumentDetail({ document, userRole, user, onBack }: DocumentDet
           Discussion ({comments.length})
         </h3>
 
+        {commentsLoading ? (
+          <p className="text-gray-600 text-sm mb-6">Loading comments…</p>
+        ) : comments.length === 0 ? (
+          <p className="text-gray-600 text-sm mb-6">No comments yet. Start the discussion.</p>
+        ) : null}
+
         {/* Comments List */}
         <div className="space-y-4 mb-6">
           {comments.map((comment) => (
             <div key={comment.id} className="border-b border-gray-100 pb-4 last:border-0">
-              <div className="flex items-center gap-2 mb-2">
-                <p className="text-gray-900">{comment.author}</p>
-                <span className={`px-2 py-1 rounded text-xs ${
-                  comment.role === 'instructor'
-                    ? 'bg-purple-100 text-purple-700'
-                    : 'bg-blue-100 text-blue-700'
-                }`}>
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <p className="text-gray-900 font-medium">{comment.author}</p>
+                <span
+                  className={`px-2 py-1 rounded text-xs ${
+                    comment.role === 'instructor'
+                      ? 'bg-purple-100 text-purple-700'
+                      : 'bg-blue-100 text-blue-700'
+                  }`}
+                >
                   {comment.role}
                 </span>
                 <span className="text-gray-500">•</span>
-                <span className="text-gray-500">{comment.date}</span>
+                <span className="text-gray-500">{comment.date || '—'}</span>
               </div>
-              <p className="text-gray-700">{comment.text}</p>
+              <p className="text-gray-700 whitespace-pre-wrap">{comment.text}</p>
             </div>
           ))}
         </div>
 
         {/* Add Comment */}
         <div>
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 font-medium mb-2" htmlFor="doc-comment-input">
             Add a comment
           </label>
-          <div className="flex gap-2">
-            <input
-              type="text"
+          <div className="flex flex-col sm:flex-row gap-2">
+            <textarea
+              id="doc-comment-input"
               value={newComment}
               onChange={(e) => setNewComment(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleAddComment()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  void handleAddComment();
+                }
+              }}
               placeholder="Share your thoughts..."
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+              rows={3}
+              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 resize-y min-h-[44px]"
             />
             <button
-              onClick={handleAddComment}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+              type="button"
+              onClick={() => void handleAddComment()}
+              disabled={commentsPosting || !newComment.trim()}
+              className="sm:self-start px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send size={18} />
-              Post
+              {commentsPosting ? 'Posting…' : 'Post'}
             </button>
           </div>
+          <p className="text-gray-400 text-xs mt-2">Tip: Ctrl+Enter to post</p>
         </div>
       </div>
     </div>

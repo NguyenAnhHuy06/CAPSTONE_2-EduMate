@@ -20,8 +20,17 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
       const res: any = await api.post('/auth/login', { email, password });
       const token = res?.token || res?.data?.token || null;
       const user = res?.user || res?.data?.user || null;
-      if (!res?.success || !token || !user) {
-        setError('Unable to sign in. Please try again.');
+      if (!res?.success) {
+        const code = res?.code;
+        const msg = res?.message != null ? String(res.message).trim() : '';
+        if (msg) setError(msg);
+        else if (code === 'WRONG_PASSWORD') setError('Incorrect password.');
+        else if (code === 'UNKNOWN_EMAIL') setError('No account found for this email.');
+        else setError('No account found or incorrect password.');
+        return;
+      }
+      if (!token || !user) {
+        setError('Sign-in failed. Please try again.');
         return;
       }
       const role: 'instructor' | 'student' =
@@ -31,11 +40,23 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
       setError('');
       onLogin(role, user);
     } catch (err: any) {
-      const apiMessage = String(err?.response?.data?.message || '').trim().toLowerCase();
-      if (apiMessage === 'incorrect password.') {
-        setError('Incorrect password.');
+      const status = err?.response?.status;
+      const data = err?.response?.data;
+      const msg = data?.message != null ? String(data.message).trim() : '';
+      const code = data?.code;
+
+      if (status === 401) {
+        if (msg) {
+          setError(msg);
+        } else if (code === 'WRONG_PASSWORD') {
+          setError('Incorrect password.');
+        } else if (code === 'UNKNOWN_EMAIL') {
+          setError('No account found for this email.');
+        } else {
+          setError('No account found or incorrect password.');
+        }
       } else {
-        setError('Unable to sign in. Please check your credentials.');
+        setError(msg || 'Sign-in failed. Please try again.');
       }
     } finally {
       setSubmitting(false);
