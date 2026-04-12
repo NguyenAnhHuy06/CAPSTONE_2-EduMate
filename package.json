@@ -2,16 +2,16 @@
   "name": "edumate-be",
   "version": "1.0.0",
   "private": true,
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "start:api": "node src/index.js",
-    "dev:api": "node --watch src/index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "start:sequelize": "node src/sequelizeServer.js",
+    "dev:sequelize": "node --watch src/sequelizeServer.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
-    "@aws-sdk/s3-request-presigner": "^3.1019.0",
+    "@aws-sdk/s3-request-presigner": "^3.1029.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

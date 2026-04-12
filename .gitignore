@@ -1,4 +1,7 @@
-node_modules/ 
-.env 
-*.log 
-uploads/ 
+node_modules/
+.env
+*.log
+uploads/
+
+# Vite/React build — build lại bằng npm run build trong FE/edumate-fe
+FE/edumate-fe/dist/

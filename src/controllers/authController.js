@@ -12,28 +12,28 @@ const register = async (req, res) => {
         let { email, password, full_name, role, user_code } = req.body;
 
         if (!email || !password) {
-            return res.status(400).json({ message: 'Email and password are required' });
+            return res.status(400).json({ success: false, message: 'Email and password are required' });
         }
 
         email = validator.trim(email).toLowerCase();
         full_name = full_name ? validator.escape(validator.trim(full_name)) : '';
 
         if (!validator.isEmail(email)) {
-            return res.status(400).json({ message: 'Invalid email format' });
+            return res.status(400).json({ success: false, message: 'Invalid email format' });
         }
 
         if (role === 'LECTURER' || role === 'ADMIN') {
             if (!email.endsWith('@duytan.edu.vn')) {
-                return res.status(400).json({ message: 'Lecturer email must end with @duytan.edu.vn' });
+                return res.status(400).json({ success: false, message: 'Lecturer email must end with @duytan.edu.vn' });
             }
         } else {
             if (!email.endsWith('@dtu.edu.vn')) {
-                return res.status(400).json({ message: 'Student email must end with @dtu.edu.vn' });
+                return res.status(400).json({ success: false, message: 'Student email must end with @dtu.edu.vn' });
             }
         }
 
         if (password.length < 8) {
-            return res.status(400).json({ message: 'Password must be at least 8 characters' });
+            return res.status(400).json({ success: false, message: 'Password must be at least 8 characters' });
         }
 
         const otp_code = generateOtp();
@@ -44,6 +44,7 @@ const register = async (req, res) => {
 
         if (existingUser && existingUser.is_verified) {
             return res.status(400).json({
+                success: false,
                 message: 'This email is already registered. Please use another email or login.'
             });
         }
@@ -121,8 +122,10 @@ const verifyOtp = async (req, res) => {
             message: 'OTP verified successfully. You can now login.',
             user: {
                 user_id: user.user_id,
+                id: user.user_id,
                 email: user.email,
                 full_name: user.full_name,
+                name: user.full_name,
                 role: user.role,
                 user_code: user.user_code
             }
@@ -163,6 +166,7 @@ const login = async (req, res) => {
             id: user.user_id,
             email: user.email,
             full_name: user.full_name,
+            name: user.full_name,
             role: user.role,
             user_code: user.user_code
         };

@@ -28,7 +28,7 @@ function activityLogMiddleware(action) {
         // Log after response is sent
         res.on("finish", () => {
             if (res.statusCode < 400) {
-                const userId = req.user?.id || null;
+                const userId = req.user?.user_id || null;
                 const ip = req.ip || req.connection?.remoteAddress || null;
                 logActivity(userId, action, `${req.method} ${req.originalUrl}`, ip);
             }

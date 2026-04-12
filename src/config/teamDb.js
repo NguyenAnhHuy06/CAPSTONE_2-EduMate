@@ -1,9 +1,9 @@
 /**
  * teamDb.js — Adapter mysql2 raw queries từ codebase team.
- * Đã điều chỉnh để tương thích schema `users` của chúng ta:
- *   - Primary key: `id` (UUID) thay vì `user_id` (INT)
+ * Đã điều chỉnh để tương thích hoàn toàn với schema eudmate.sql:
+ *   - Primary key users: user_id (INT)
+ *   - Column: name thay vì full_name
  *   - Role: ENUM viết HOA 'STUDENT'/'LECTURER' thay vì 'lecturer'/'teacher'
- *   - Column: `full_name` thay vì `name`
  */
 const path = require("path");
 const mysql = require("mysql2/promise");
@@ -300,13 +300,12 @@ async function listQuizHistory(limit = 20, userId = null) {
 async function listPublishedQuizzes(limit = 20) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 100);
-  // FIX: Dùng `full_name` và `id` để khớp schema users của chúng ta
   const sql = `SELECT q.quiz_id, q.title, q.created_at, q.published_at, c.course_code,
     (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
     (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
-    u.full_name AS creator_name
+    u.name AS creator_name
     FROM quizzes q LEFT JOIN courses c ON c.course_id = q.course_id
-    LEFT JOIN users u ON u.id = q.created_by
+    LEFT JOIN users u ON u.user_id = q.created_by
     WHERE q.is_published = 1
     ORDER BY COALESCE(q.published_at, q.created_at) DESC LIMIT ${lim}`;
   try {
@@ -324,12 +323,11 @@ async function listPublishedQuizzes(limit = 20) {
 }
 
 /**
- * FIX: Dùng `id` và `role` ENUM uppercase để khớp schema users của chúng ta.
  * Role values: 'STUDENT', 'LECTURER', 'ADMIN'
  */
 async function getUserRole(userId) {
   if (!userId) return null;
-  const [rows] = await getPool().execute("SELECT role FROM users WHERE id = ? LIMIT 1", [String(userId)]);
+  const [rows] = await getPool().execute("SELECT role FROM users WHERE user_id = ? LIMIT 1", [String(userId)]);
   return rows.length ? rows[0].role : null;
 }
 
@@ -523,6 +521,61 @@ async function getQuizQuestionsById(quizId) {
 }
 
 
+async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const p = getPool();
+
+  const sql = `
+    SELECT
+      u.user_id                                     AS userId,
+      u.name                                        AS name,
+      u.email,
+      COUNT(qa.attempt_id)                          AS totalAttempts,
+      ROUND(AVG(qa.score / qq_count.total * 100))   AS avgScore,
+      ROUND(MAX(qa.score / qq_count.total * 100))   AS bestScore
+    FROM quiz_attempts qa
+    INNER JOIN users u ON u.user_id = qa.user_id
+    INNER JOIN (
+      SELECT quiz_id, COUNT(*) AS total
+      FROM quiz_questions
+      GROUP BY quiz_id
+    ) qq_count ON qq_count.quiz_id = qa.quiz_id
+    WHERE qa.completed_at IS NOT NULL
+      AND qa.user_id IS NOT NULL
+      AND qq_count.total > 0
+    GROUP BY u.user_id, u.name, u.email
+    ORDER BY avgScore DESC, totalAttempts DESC
+  `;
+
+  const [rows] = await p.execute(sql);
+
+  const allRanked = rows.map((r, i) => ({
+    rank: i + 1,
+    userId: r.userId,
+    name: r.name || 'Anonymous',
+    email: r.email || null,
+    avgScore: Number(r.avgScore ?? 0),
+    totalAttempts: Number(r.totalAttempts ?? 0),
+    bestScore: Number(r.bestScore ?? 0),
+  }));
+
+  let myRank = null;
+  if (requestingUserId) {
+    const found = allRanked.find(r => String(r.userId) === String(requestingUserId));
+    if (found) {
+      myRank = {
+        rank: found.rank,
+        avgScore: found.avgScore,
+        totalAttempts: found.totalAttempts,
+        bestScore: found.bestScore,
+      };
+    }
+  }
+
+  return { total: allRanked.length, data: allRanked.slice(0, lim), myRank };
+}
+
+
 module.exports = {
   isConfigured, initDb, getPool,
   upsertDocument, ensureDocumentStub, deleteChunksByDocumentId,
@@ -536,5 +589,5 @@ module.exports = {
   startQuizAttempt, finishQuizAttempt, scoreToPercent,
   getUserRole, canUserManageQuiz, replaceQuizQuestions,
   updateQuizTitle, setQuizPublished, quizRowIsPublished, normalizeQuestionInput,
-  findQuizByS3Key, getQuizQuestionsById,
+  findQuizByS3Key, getQuizQuestionsById, getLeaderboard,
 };
