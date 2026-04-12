@@ -1198,11 +1198,11 @@ async function updateUserProfile(userId, fields) {
   }
 }
 
-async function createUser({ fullName, name, email, password, role, userCode }) {
+async function createUser({ name, fullName, email, password, role, userCode }) {
   const em = String(email || "").trim().toLowerCase();
   if (!em) throw new Error("Invalid email.");
   const r = String(role || "STUDENT").trim().toUpperCase() || "STUDENT";
-  // Registration input fullName must populate users.name.
+  // Registration: fullName (when provided) maps to users.name / full_name when present.
   const normalizedFullName = String(fullName || name || "").trim() || null;
   const nm = normalizedFullName;
   const fn = normalizedFullName;
