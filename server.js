@@ -6,6 +6,7 @@ const fs = require("fs");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+const mysql = require("mysql2/promise");
 
 const app = express();
 const PORT = 3001;
@@ -17,6 +18,11 @@ const SMTP_SECURE = String(process.env.SMTP_SECURE || "false").toLowerCase() ===
 const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = process.env.SMTP_PASS || "";
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || "";
+const MYSQL_HOST = process.env.MYSQL_HOST || "127.0.0.1";
+const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
+const MYSQL_USER = process.env.MYSQL_USER || "root";
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || "";
+const MYSQL_DATABASE = process.env.MYSQL_DATABASE || "edumate";
 
 app.use(cors());
 app.use(express.json());
@@ -101,9 +107,20 @@ const upload = multer({
 const recentUploads = [];
 const quizzes = [];
 const quizAttempts = [];
+/** In-memory discussion thread for mock server (key: id:123 or key:s3filename). */
+const documentCommentsByKey = new Map();
 const users = [];
 const pendingRegs = new Map();
 const LETTERS = ["A", "B", "C", "D"];
+// Seed lecturer account for local development/testing.
+users.push({
+  user_id: 1001,
+  full_name: "Demo Lecturer",
+  email: "lecturer.demo@edumate.local",
+  user_code: "LEC_DEMO_001",
+  role: "LECTURER",
+  password_hash: bcrypt.hashSync("123456", 10),
+});
 const mailer =
   SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_FROM
     ? nodemailer.createTransport({
@@ -113,6 +130,100 @@ const mailer =
         auth: { user: SMTP_USER, pass: SMTP_PASS },
       })
     : null;
+
+let mysqlPool = null;
+let questionBankTableReady = null;
+
+function getMysqlPool() {
+  if (!mysqlPool) {
+    mysqlPool = mysql.createPool({
+      host: MYSQL_HOST,
+      port: MYSQL_PORT,
+      user: MYSQL_USER,
+      password: MYSQL_PASSWORD,
+      database: MYSQL_DATABASE,
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      charset: "utf8mb4",
+    });
+  }
+  return mysqlPool;
+}
+
+async function ensureQuestionBankTable() {
+  if (!questionBankTableReady) {
+    const pool = getMysqlPool();
+    questionBankTableReady = pool.query(`
+      CREATE TABLE IF NOT EXISTS question_bank (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        lecturer_user_id BIGINT NOT NULL,
+        question_text TEXT NOT NULL,
+        question_type VARCHAR(32) NOT NULL DEFAULT 'multiple-choice',
+        topic VARCHAR(255) NOT NULL DEFAULT 'General',
+        difficulty VARCHAR(32) NOT NULL DEFAULT 'medium',
+        options_json JSON NULL,
+        correct_answer VARCHAR(255) NULL,
+        quiz_id BIGINT NULL,
+        quiz_title VARCHAR(255) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_qb_lecturer (lecturer_user_id),
+        KEY idx_qb_topic (topic),
+        KEY idx_qb_difficulty (difficulty)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+  }
+  return questionBankTableReady;
+}
+
+function parseOptionsJson(raw) {
+  if (!raw) return undefined;
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(parsed)) return undefined;
+    const cleaned = parsed
+      .map((x) => String(x || "").trim())
+      .filter(Boolean);
+    return cleaned.length ? cleaned : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLecturerUserId(userId) {
+  if (userId == null || userId === "") return false;
+  const uid = String(userId);
+  const userRow = users.find((u) => String(u?.user_id) === uid);
+  return String(userRow?.role || "").toUpperCase() === "LECTURER";
+}
+
+function normalizeQuestionInput(payload) {
+  const question = String(payload?.question || "").trim();
+  const typeRaw = String(payload?.type || "multiple-choice").trim().toLowerCase();
+  const topic = String(payload?.topic || "General").trim() || "General";
+  const difficultyRaw = String(payload?.difficulty || "medium").trim().toLowerCase();
+  const correctAnswer = payload?.correctAnswer != null ? String(payload.correctAnswer).trim() : "";
+  const type = ["multiple-choice", "true-false", "short-answer"].includes(typeRaw)
+    ? typeRaw
+    : "multiple-choice";
+  const difficulty = ["easy", "medium", "hard"].includes(difficultyRaw)
+    ? difficultyRaw
+    : "medium";
+  const options = Array.isArray(payload?.options)
+    ? payload.options.map((x) => String(x || "").trim()).filter(Boolean)
+    : [];
+
+  return {
+    question,
+    type,
+    topic,
+    difficulty,
+    options,
+    correctAnswer,
+  };
+}
 
 function isEmpty(value) {
   return !value || !String(value).trim();
@@ -388,6 +499,69 @@ app.get("/api/documents/for-quiz", (req, res) => {
   });
 });
 
+function commentsStorageKey(documentId, s3Key) {
+  const raw = documentId != null && String(documentId).trim() !== "" ? Number(documentId) : NaN;
+  if (Number.isFinite(raw)) return `id:${raw}`;
+  const k = String(s3Key || "").trim();
+  return k ? `key:${k}` : "";
+}
+
+function getBearerUserIdMock(req) {
+  const h = req.headers.authorization || req.headers.Authorization || "";
+  const m = /^Bearer\s+(.+)$/i.exec(String(h));
+  if (!m) return null;
+  try {
+    const decoded = jwt.verify(String(m[1]).trim(), JWT_SECRET);
+    const id = decoded.user_id != null ? Number(decoded.user_id) : null;
+    return Number.isFinite(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+app.get("/api/documents/comments", (req, res) => {
+  const documentId = req.query.documentId ?? req.query.document_id;
+  const s3Key = String(req.query.s3Key ?? req.query.s3_key ?? "").trim();
+  const key = commentsStorageKey(documentId, s3Key);
+  if (!key) {
+    return res.status(400).json({ success: false, message: "Missing documentId or s3Key." });
+  }
+  const data = documentCommentsByKey.get(key) || [];
+  return res.status(200).json({ success: true, data });
+});
+
+app.post("/api/documents/comments", (req, res) => {
+  const uid = getBearerUserIdMock(req);
+  if (uid == null) {
+    return res.status(401).json({ success: false, message: "Unauthorized." });
+  }
+  const text = String(req.body.text ?? req.body.body ?? "").trim();
+  const documentId = req.body.documentId ?? req.body.document_id;
+  const s3Key = String(req.body.s3Key ?? req.body.s3_key ?? "").trim();
+  if (!text) {
+    return res.status(400).json({ success: false, message: "Comment cannot be empty." });
+  }
+  const key = commentsStorageKey(documentId, s3Key);
+  if (!key) {
+    return res.status(400).json({ success: false, message: "Missing documentId or s3Key." });
+  }
+  const u = users.find((x) => x.user_id === uid);
+  const author = u?.full_name || "User";
+  const role =
+    u && String(u.role || "").toUpperCase() === "LECTURER" ? "instructor" : "student";
+  const row = {
+    id: Date.now(),
+    author,
+    text,
+    date: new Date().toISOString().slice(0, 10),
+    role,
+  };
+  const arr = documentCommentsByKey.get(key) || [];
+  arr.push(row);
+  documentCommentsByKey.set(key, arr);
+  return res.status(201).json({ success: true, message: "Posted." });
+});
+
 /**
  * Quiz generate — mock handler for local FE (no external AI).
  */
@@ -441,6 +615,8 @@ app.post("/api/quiz/generate", (req, res) => {
       questions: quiz,
       attemptsCount: 0,
       courseCode: fromDoc?.subjectCode || "DOC",
+      isPublished: false,
+      publishedAt: null,
     });
   }
 
@@ -473,6 +649,8 @@ app.get("/api/quizzes/history", (req, res) => {
       quizId: q.id,
       title: q.title,
       createdAt: q.createdAt,
+      publishedAt: q.publishedAt || null,
+      isPublished: Boolean(q.isPublished),
       lastAttemptAt: q.lastAttemptAt,
       scorePercent: q.scorePercent,
       questionCount: q.questionsCount,
@@ -484,10 +662,11 @@ app.get("/api/quizzes/history", (req, res) => {
 });
 
 app.get("/api/quizzes/published", (req, res) => {
+  const publishedRows = quizzes.filter((q) => Boolean(q.isPublished));
   return res.status(200).json({
     success: true,
-    total: quizzes.length,
-    data: quizzes.map((q) => ({
+    total: publishedRows.length,
+    data: publishedRows.map((q) => ({
       id: q.id,
       quizId: q.id,
       title: q.title,
@@ -495,8 +674,34 @@ app.get("/api/quizzes/published", (req, res) => {
       courseCode: q.courseCode || "DOC",
       creatorName: "Lecturer",
       createdAt: q.createdAt,
-      publishedAt: q.createdAt,
+      publishedAt: q.publishedAt || q.createdAt,
     })),
+  });
+});
+
+app.post("/api/quizzes/:id/publish", (req, res) => {
+  const qid = toNum(req.params.id, NaN);
+  if (!Number.isFinite(qid)) {
+    return res.status(400).json({ success: false, message: "Invalid quiz id." });
+  }
+  const idx = quizzes.findIndex((q) => q.id === qid);
+  if (idx < 0) {
+    return res.status(404).json({ success: false, message: "Quiz not found." });
+  }
+  const now = new Date().toISOString();
+  quizzes[idx] = {
+    ...quizzes[idx],
+    isPublished: true,
+    publishedAt: now,
+  };
+  return res.status(200).json({
+    success: true,
+    message: "Quiz published successfully.",
+    data: {
+      quizId: quizzes[idx].id,
+      isPublished: true,
+      publishedAt: now,
+    },
   });
 });
 
@@ -517,6 +722,184 @@ app.get("/api/quizzes/:id", (req, res) => {
       questions: Array.isArray(quizRow.questions) ? quizRow.questions : [],
     },
   });
+});
+
+app.get("/api/questions/bank", async (req, res) => {
+  const userId = req.query?.userId;
+  const uid = toNum(userId, NaN);
+  if (!Number.isFinite(uid)) {
+    return res.status(400).json({ success: false, message: "Invalid userId." });
+  }
+
+  try {
+    await ensureQuestionBankTable();
+    const pool = getMysqlPool();
+    const [rows] = await pool.query(
+      `SELECT id, lecturer_user_id, question_text, question_type, topic, difficulty, options_json, correct_answer, quiz_id, quiz_title
+       FROM question_bank
+       WHERE lecturer_user_id = ?
+       ORDER BY updated_at DESC, id DESC`,
+      [uid]
+    );
+
+    const data = rows.map((r) => ({
+      id: Number(r.id),
+      question: String(r.question_text || ""),
+      type: String(r.question_type || "multiple-choice"),
+      topic: String(r.topic || "General"),
+      difficulty: String(r.difficulty || "medium"),
+      options: parseOptionsJson(r.options_json),
+      correctAnswer: r.correct_answer != null ? String(r.correct_answer) : "",
+      quizId: r.quiz_id != null ? Number(r.quiz_id) : undefined,
+      quizTitle: r.quiz_title != null ? String(r.quiz_title) : undefined,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      total: data.length,
+      data,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Question bank MySQL error.",
+      error: err?.message || "Unknown database error.",
+    });
+  }
+});
+
+app.post("/api/questions/bank", async (req, res) => {
+  const userId = req.body?.userId;
+  const uid = toNum(userId, NaN);
+  if (!Number.isFinite(uid)) {
+    return res.status(400).json({ success: false, message: "Invalid userId." });
+  }
+  if (!isLecturerUserId(uid)) {
+    return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+  }
+
+  const payload = normalizeQuestionInput(req.body || {});
+  if (!payload.question) {
+    return res.status(400).json({ success: false, message: "Question is required." });
+  }
+  if (payload.type === "multiple-choice" && payload.options.length < 2) {
+    return res.status(400).json({
+      success: false,
+      message: "Multiple-choice questions need at least 2 options.",
+    });
+  }
+
+  try {
+    await ensureQuestionBankTable();
+    const pool = getMysqlPool();
+    const [result] = await pool.query(
+      `INSERT INTO question_bank
+       (lecturer_user_id, question_text, question_type, topic, difficulty, options_json, correct_answer, quiz_id, quiz_title)
+       VALUES (?, ?, ?, ?, ?, CAST(? AS JSON), ?, NULL, NULL)`,
+      [
+        uid,
+        payload.question,
+        payload.type,
+        payload.topic,
+        payload.difficulty,
+        JSON.stringify(payload.options),
+        payload.correctAnswer || null,
+      ]
+    );
+    return res.status(201).json({
+      success: true,
+      message: "Question added successfully.",
+      data: { id: Number(result.insertId) },
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Question bank MySQL error.",
+      error: err?.message || "Unknown database error.",
+    });
+  }
+});
+
+app.patch("/api/questions/bank/:id", async (req, res) => {
+  const qid = toNum(req.params.id, NaN);
+  const uid = toNum(req.body?.userId, NaN);
+  if (!Number.isFinite(qid)) {
+    return res.status(400).json({ success: false, message: "Invalid question id." });
+  }
+  if (!Number.isFinite(uid)) {
+    return res.status(400).json({ success: false, message: "Invalid userId." });
+  }
+  if (!isLecturerUserId(uid)) {
+    return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+  }
+
+  const payload = normalizeQuestionInput(req.body || {});
+  if (!payload.question) {
+    return res.status(400).json({ success: false, message: "Question is required." });
+  }
+
+  try {
+    await ensureQuestionBankTable();
+    const pool = getMysqlPool();
+    const [result] = await pool.query(
+      `UPDATE question_bank
+       SET question_text = ?, question_type = ?, topic = ?, difficulty = ?, options_json = CAST(? AS JSON), correct_answer = ?
+       WHERE id = ? AND lecturer_user_id = ?`,
+      [
+        payload.question,
+        payload.type,
+        payload.topic,
+        payload.difficulty,
+        JSON.stringify(payload.options),
+        payload.correctAnswer || null,
+        qid,
+        uid,
+      ]
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ success: false, message: "Question not found." });
+    }
+    return res.status(200).json({ success: true, message: "Question updated successfully." });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Question bank MySQL error.",
+      error: err?.message || "Unknown database error.",
+    });
+  }
+});
+
+app.delete("/api/questions/bank/:id", async (req, res) => {
+  const qid = toNum(req.params.id, NaN);
+  const uid = toNum(req.query?.userId, NaN);
+  if (!Number.isFinite(qid)) {
+    return res.status(400).json({ success: false, message: "Invalid question id." });
+  }
+  if (!Number.isFinite(uid)) {
+    return res.status(400).json({ success: false, message: "Invalid userId." });
+  }
+  if (!isLecturerUserId(uid)) {
+    return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+  }
+
+  try {
+    await ensureQuestionBankTable();
+    const pool = getMysqlPool();
+    const [result] = await pool.query(
+      "DELETE FROM question_bank WHERE id = ? AND lecturer_user_id = ?",
+      [qid, uid]
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ success: false, message: "Question not found." });
+    }
+    return res.status(200).json({ success: true, message: "Question deleted successfully." });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Question bank MySQL error.",
+      error: err?.message || "Unknown database error.",
+    });
+  }
 });
 
 /**
@@ -678,6 +1061,71 @@ app.get("/api/quiz/result/:attemptId", (req, res) => {
       answers: Array.isArray(attempt.answers) ? attempt.answers : [],
       completed_at: attempt.completedAt || attempt.createdAt,
     },
+  });
+});
+
+/**
+ * GET /api/leaderboard
+ * Aggregate quizAttempts by userId and return ranked list.
+ * Query params: limit (default 50), userId (optional – to identify current user)
+ */
+app.get("/api/leaderboard", (req, res) => {
+  const limit = Math.min(Math.max(toNum(req.query.limit, 50), 1), 200);
+  const requestingUserId = req.query.userId != null ? String(req.query.userId) : null;
+
+  // Aggregate completed attempts by userId
+  const map = new Map();
+  for (const a of quizAttempts) {
+    if (a.status !== "completed" || a.scorePercent == null) continue;
+    const uid = String(a.userId ?? "__anon__");
+    const g = map.get(uid) || { userId: uid, scores: [], completedAt: [] };
+    g.scores.push(Number(a.scorePercent));
+    if (a.completedAt) g.completedAt.push(a.completedAt);
+    map.set(uid, g);
+  }
+
+  // Build ranked array
+  const rows = Array.from(map.values())
+    .map((g) => {
+      const avg = Math.round(g.scores.reduce((s, x) => s + x, 0) / g.scores.length);
+      const best = Math.max(...g.scores);
+      // Lookup user name
+      const userRecord = users.find((u) => String(u.user_id) === g.userId);
+      return {
+        userId: g.userId,
+        name: userRecord?.full_name || userRecord?.name || "Anonymous",
+        email: userRecord?.email || null,
+        avgScore: avg,
+        totalAttempts: g.scores.length,
+        bestScore: best,
+      };
+    })
+    .sort((a, b) => b.avgScore - a.avgScore || b.totalAttempts - a.totalAttempts);
+
+  // Assign rank
+  rows.forEach((r, i) => { r.rank = i + 1; });
+
+  const limited = rows.slice(0, limit);
+
+  // myRank for requesting user
+  let myRank = null;
+  if (requestingUserId) {
+    const found = rows.find((r) => String(r.userId) === requestingUserId);
+    if (found) {
+      myRank = {
+        rank: found.rank,
+        avgScore: found.avgScore,
+        totalAttempts: found.totalAttempts,
+        bestScore: found.bestScore,
+      };
+    }
+  }
+
+  return res.status(200).json({
+    success: true,
+    total: rows.length,
+    data: limited,
+    myRank,
   });
 });
 

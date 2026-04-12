@@ -2,13 +2,16 @@
 
 import { useState } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
+import { getApiBaseUrl } from '@/services/api';
 
 interface UploadDocumentProps {
   userRole: 'instructor' | 'student';
   onUploadComplete: () => void;
+  /** When set, sent as `uploaderId` so `documents.uploader_id` is stored (JWT on the server also supplies this). */
+  user?: { user_id?: number; id?: number; userId?: number } | null;
 }
 
-export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentProps) {
+export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocumentProps) {
   const [formData, setFormData] = useState({
     type: 'general',
     courseCode: '',
@@ -61,13 +64,24 @@ const handleSubmit = async (e: React.FormEvent) => {
     form.append("tags", formData.courseCode); 
     form.append("description", formData.description);
 
-    const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+    const uploaderId = user?.user_id ?? user?.id ?? user?.userId;
+    if (uploaderId != null && String(uploaderId).trim() !== '') {
+      form.append('uploaderId', String(uploaderId));
+    }
+
+    const base = getApiBaseUrl();
+    const uploadUrl = `${base.replace(/\/$/, '')}/documents/upload`;
 
     let res;
 
     try {
-      res = await fetch(`${API_URL}/api/documents/upload`, {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('edumate_token') : null;
+      const headers: HeadersInit = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      res = await fetch(uploadUrl, {
           method: "POST",
+          headers,
           body: form,
         });
     } catch (err) {
@@ -168,7 +182,7 @@ const handleSubmit = async (e: React.FormEvent) => {
         {/* Type */}
         <div className="mb-4">
           <label className="block text-gray-700 mb-2">
-            Document Type *
+            Document Type
           </label>
           <select
             name="type"

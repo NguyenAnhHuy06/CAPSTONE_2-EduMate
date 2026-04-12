@@ -60,9 +60,17 @@ export default function App() {
       ) : userRole === 'admin' ? (
         <AdminDashboard user={userData} onLogout={handleLogout} />
       ) : userRole === 'instructor' ? (
-        <InstructorDashboard user={userData} onLogout={handleLogout} />
+        <InstructorDashboard
+          user={userData}
+          onLogout={handleLogout}
+          onUserUpdate={(u) => setUserData(u)}
+        />
       ) : (
-        <StudentDashboard user={userData} onLogout={handleLogout} />
+        <StudentDashboard
+          user={userData}
+          onLogout={handleLogout}
+          onUserUpdate={(u) => setUserData(u)}
+        />
       )}
     </NotificationProvider>
   );

@@ -1,162 +1,220 @@
-import { useEffect, useState } from 'react';
-import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle } from 'lucide-react';
-import { DocumentDetail } from '../pages/DocumentDetail';
-import api from '../../services/api';
+import { useEffect, useMemo, useState } from 'react'
+import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle } from 'lucide-react'
+import { DocumentDetail } from '../pages/DocumentDetail'
+import api from '@/services/api'
+import { useNotification } from '../pages/NotificationContext'
 
 interface DocumentLibraryProps {
-  userRole: 'instructor' | 'student';
-  user: any;
+  userRole: 'instructor' | 'student'
+  user: any
+  onInstructorCreateQuizWithAi?: (doc: CourseMaterialDoc) => void
 }
 
-export function DocumentLibrary({ userRole, user }: DocumentLibraryProps) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'general' | 'general-major' | 'specialized'>('all');
-  const [selectedDocument, setSelectedDocument] = useState<any>(null);
-  const [ documents, setDocuments ] = useState<any[]>([]);
-  const [ loading, setLoading ] = useState(true);
-  const [ error, setError ] = useState('');
+export type CourseMaterialDoc = {
+  id: string | number
+  title: string
+  type: 'general' | 'general-major' | 'specialized'
+  courseCode: string
+  courseName: string
+  author: string
+  authorRole: 'instructor' | 'student'
+  uploadDate: string
+  downloads: number
+  comments: number
+  views: number
+  description: string
+  uploadDescription?: string
+  s3Key?: string
+  fileUrl?: string
+  documentId?: number | null
+  chunkCount?: number
+  attemptsCount?: number
+  inDatabase?: boolean
+  estimatedQuestions?: number
+  highCredibility: boolean
+  isLecturerUpload: boolean
+  categoryKey: 'general' | 'general-major' | 'specialized' | 'uncategorized'
+  status?: string
+}
 
-  // // Mock documents data
-  // const documents = [
-  //   {
-  //     id: 1,
-  //     title: 'Introduction to Data Structures',
-  //     type: 'general',
-  //     courseCode: 'CS101',
-  //     courseName: 'Computer Science Fundamentals',
-  //     author: 'Dr. Sarah Johnson',
-  //     authorRole: 'instructor',
-  //     uploadDate: '2026-03-25',
-  //     downloads: 145,
-  //     comments: 12,
-  //     views: 234,
-  //     description: 'Comprehensive guide covering basic data structures including arrays, linked lists, and stacks.',
-  //     highCredibility: true,
-  //   },
-  //   {
-  //     id: 2,
-  //     title: 'Advanced Algorithms - Sorting',
-  //     type: 'specialized',
-  //     courseCode: 'CS301',
-  //     courseName: 'Algorithm Analysis',
-  //     author: 'Alex Smith',
-  //     authorRole: 'student',
-  //     uploadDate: '2026-03-28',
-  //     downloads: 87,
-  //     comments: 8,
-  //     views: 156,
-  //     description: 'Detailed notes on various sorting algorithms with complexity analysis.',
-  //     highCredibility: false,
-  //   },
-  //   {
-  //     id: 3,
-  //     title: 'Database Normalization Guide',
-  //     type: 'general-major',
-  //     courseCode: 'DB201',
-  //     courseName: 'Database Management',
-  //     author: 'Dr. Sarah Johnson',
-  //     authorRole: 'instructor',
-  //     uploadDate: '2026-03-27',
-  //     downloads: 203,
-  //     comments: 15,
-  //     views: 312,
-  //     description: 'Step-by-step guide to database normalization from 1NF to BCNF.',
-  //     highCredibility: true,
-  //   },
-  //   {
-  //     id: 4,
-  //     title: 'Web Development Best Practices',
-  //     type: 'general',
-  //     courseCode: 'WEB102',
-  //     courseName: 'Web Technologies',
-  //     author: 'Jordan Lee',
-  //     authorRole: 'student',
-  //     uploadDate: '2026-03-26',
-  //     downloads: 98,
-  //     comments: 6,
-  //     views: 187,
-  //     description: 'Collection of best practices for modern web development.',
-  //     highCredibility: false,
-  //   },
-  //   {
-  //     id: 5,
-  //     title: 'Machine Learning Fundamentals',
-  //     type: 'specialized',
-  //     courseCode: 'AI401',
-  //     courseName: 'Artificial Intelligence',
-  //     author: 'Dr. Michael Chen',
-  //     authorRole: 'instructor',
-  //     uploadDate: '2026-03-24',
-  //     downloads: 267,
-  //     comments: 23,
-  //     views: 445,
-  //     description: 'Introduction to machine learning concepts, algorithms, and applications.',
-  //     highCredibility: true,
-  //   },
-  // ];
-useEffect(() => {
-  const loadDocuments = async () => {
-    try {
-      setLoading(true);
-      setError('');
+function formatYmd(value: string | Date | undefined | null): string {
+  if (value == null || value === '') return '—'
+  const d = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(d.getTime())) return '—'
+  return d.toISOString().slice(0, 10)
+}
 
-      const res: any = await api.get('/documents/recent');
-      const rows = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : [];
+function deriveMaterialType(api: any): 'general' | 'general-major' | 'specialized' {
+  const chunks = Number(api.chunkCount || 0)
+  const inDb = !!api.inDatabase
+  if (inDb && chunks >= 10) return 'specialized'
+  if (inDb && chunks >= 4) return 'general-major'
+  return 'general'
+}
 
-      const mapped = rows.map((doc: any) => ({
-        id: doc.id,
-        documentId: doc.id,
-        title: doc.title,
-        s3Key: doc.s3Key,
-        type: doc.type || 'general',
-        courseCode: doc.courseCode || 'N/A',
-        courseName: doc.courseName || 'Unknown Course',
-        author: doc.author || 'Unknown',
-        authorRole: doc.authorRole || 'instructor',
-        uploadDate: doc.uploadedAt || '',
-        downloads: doc.downloads || 0,
-        comments: doc.comments || 0,
-        views: doc.views || 0,
-        description: doc.description || '',
-        highCredibility: true,
-      }));
+function mapCategoryToDocType(category: unknown): 'general' | 'general-major' | 'specialized' | null {
+  const c = String(category ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, '-')
+  if (c === 'general-major') return 'general-major'
+  if (c === 'specialized') return 'specialized'
+  if (c === 'general') return 'general'
+  return null
+}
 
-      setDocuments(mapped);
-    } catch (err: any) {
-      setError(err?.response?.data?.message || err?.message || 'Could not load documents.');
-    } finally {
-      setLoading(false);
+function normalizeMaterialCategoryKeyFromApi(
+  raw: unknown
+): 'general' | 'general-major' | 'specialized' | 'uncategorized' {
+  const c = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, '-')
+  if (!c) return 'uncategorized'
+  if (c === 'general-major' || c === 'general major') return 'general-major'
+  if (c === 'specialized' || c === 'specialised') return 'specialized'
+  if (c === 'general') return 'general'
+  return 'uncategorized'
+}
+
+function mapUploaderRole(roleRaw: string | undefined): 'instructor' | 'student' {
+  const u = String(roleRaw || '').toUpperCase()
+  if (u.includes('STUDENT')) return 'student'
+  return 'instructor'
+}
+
+function normalizeCourseName(courseCode: string, subjectName: string): string {
+  const code = String(courseCode || '').trim()
+  const raw = String(subjectName || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  if (code && (lower === code.toLowerCase() || lower === `course ${code}`.toLowerCase())) return ''
+  return raw
+}
+
+function isLecturerUploaderRole(roleRaw: string | undefined): boolean {
+  const r = String(roleRaw || '').trim().toLowerCase()
+  if (!r || r === 'student') return false
+  const allowed = new Set(['lecturer', 'teacher', 'instructor', 'faculty', 'admin', 'lecture'])
+  if (allowed.has(r)) return true
+  if (r.includes('lectur') || r.includes('instruct')) return true
+  return false
+}
+
+function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
+  const courseCode = String(apiRow.courseCode || '').trim()
+  const courseName = normalizeCourseName(courseCode, String(apiRow.subjectName || ''))
+  const chunkCount = Number(apiRow.chunkCount || 0)
+  const attemptsCount = Number(apiRow.attemptsCount || 0)
+  const downloadCount = Number(apiRow.downloadCount ?? 0)
+  const uploaderName = String(apiRow.uploaderName || '').trim()
+  const author = uploaderName || 'Unknown uploader'
+  const authorRole = mapUploaderRole(apiRow.uploaderRole)
+  const lastMod = apiRow.lastModified ?? apiRow.created_at ?? apiRow.uploadedAt
+  const categoryKey = normalizeMaterialCategoryKeyFromApi(apiRow.category)
+  const type = mapCategoryToDocType(apiRow.category) ?? deriveMaterialType(apiRow)
+  const docId = apiRow.documentId != null ? Number(apiRow.documentId) : null
+  const id = docId != null && Number.isFinite(docId) ? docId : String(apiRow.s3Key || apiRow.fileName || apiRow.title)
+
+  const description =
+    chunkCount > 0
+      ? `Indexed learning material with ${chunkCount} text segment${chunkCount === 1 ? '' : 's'}. Suitable for AI quizzes and study.`
+      : apiRow.inDatabase
+        ? 'Registered in the system; indexing may still be running.'
+        : 'File in cloud storage; connect and index this document to enable AI features.'
+
+  const uploadDescription = String(apiRow.description || '').trim()
+  const uploaderRoleStr = String(apiRow.uploaderRole || '').trim()
+  const highCredibility =
+    typeof apiRow.highCredibility === 'boolean'
+      ? apiRow.highCredibility
+      : isLecturerUploaderRole(apiRow.uploaderRole)
+  const isLecturerUpload = isLecturerUploaderRole(uploaderRoleStr) || highCredibility
+
+  return {
+    id,
+    title: String(apiRow.title || apiRow.fileName || 'Untitled document'),
+    type,
+    courseCode,
+    courseName,
+    author,
+    authorRole,
+    uploadDate: formatYmd(lastMod),
+    downloads: downloadCount,
+    comments: Number(apiRow.commentsCount ?? 0),
+    views: chunkCount,
+    description,
+    uploadDescription: uploadDescription || undefined,
+    s3Key: apiRow.s3Key,
+    fileUrl: apiRow.fileUrl,
+    documentId: docId,
+    chunkCount,
+    attemptsCount,
+    inDatabase: !!apiRow.inDatabase,
+    estimatedQuestions: apiRow.estimatedQuestions,
+    highCredibility,
+    isLecturerUpload,
+    categoryKey,
+    status: apiRow.status,
+  }
+}
+
+export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }: DocumentLibraryProps) {
+  const { showNotification } = useNotification()
+  const [searchQuery, setSearchQuery] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState<
+    'all' | 'general' | 'general-major' | 'specialized' | 'uncategorized'
+  >('all')
+  const [selectedDocument, setSelectedDocument] = useState<CourseMaterialDoc | null>(null)
+  const [documents, setDocuments] = useState<CourseMaterialDoc[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadMessage, setLoadMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      setLoadMessage(null)
+      try {
+        const res: any = await api.get('/documents/for-quiz')
+        const raw = Array.isArray(res?.data) ? res.data : []
+        const mapped = raw.map(mapApiRowToDoc)
+        if (!cancelled) {
+          setDocuments(mapped)
+          if (raw.length === 0 && res?.message) setLoadMessage(String(res.message))
+        }
+      } catch {
+        if (!cancelled) {
+          setDocuments([])
+          setLoadMessage('Could not load course materials. Please try again later.')
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
     }
-  };
+  }, [])
 
-  loadDocuments();
-}, []);
+  const filteredDocuments = useMemo(() => {
+    return documents.filter((doc) => {
+      const q = searchQuery.toLowerCase().trim()
+      const matchesSearch =
+        !q ||
+        (doc.title || '').toLowerCase().includes(q) ||
+        (doc.courseCode || '').toLowerCase().includes(q) ||
+        (doc.courseName || '').toLowerCase().includes(q)
 
-const filteredDocuments = documents.filter((doc) => {
-  const matchesSearch =
-    (doc.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (doc.courseCode || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (doc.courseName || '').toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCategory =
+        categoryFilter === 'all' ||
+        (categoryFilter === 'uncategorized'
+          ? doc.categoryKey === 'uncategorized'
+          : doc.categoryKey === categoryFilter)
 
-  const matchesType = typeFilter === 'all' || doc.type === typeFilter;
-  return matchesSearch && matchesType;
-});
-
-  if (loading) {
-    return (
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <p className="text-gray-600">Loading documents...</p>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="bg-white rounded-lg border border-red-200 p-6">
-        <p className="text-red-600">{error}</p>
-      </div>
-    );
-  }
+      return matchesSearch && matchesCategory
+    })
+  }, [documents, searchQuery, categoryFilter])
 
   if (selectedDocument) {
     return (
@@ -165,8 +223,24 @@ const filteredDocuments = documents.filter((doc) => {
         userRole={userRole}
         user={user}
         onBack={() => setSelectedDocument(null)}
+        onCreateQuizWithAi={
+          userRole === 'instructor' && onInstructorCreateQuizWithAi
+            ? () => {
+                const d = selectedDocument
+                if (!String(d.s3Key || '').trim()) {
+                  showNotification({
+                    type: 'warning',
+                    title: 'Create Quiz with AI',
+                    message: 'This file has no storage key yet. Re-upload or wait for indexing, then try again.',
+                  })
+                  return
+                }
+                onInstructorCreateQuizWithAi(d)
+              }
+            : undefined
+        }
       />
-    );
+    )
   }
 
   return (
@@ -175,7 +249,6 @@ const filteredDocuments = documents.filter((doc) => {
         <h2>Course Materials</h2>
       </div>
 
-      {/* Search and Filters */}
       <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
         <div className="flex flex-col md:flex-row gap-4">
           <div className="flex-1 relative">
@@ -192,81 +265,118 @@ const filteredDocuments = documents.filter((doc) => {
           <div className="flex items-center gap-2">
             <Filter className="text-gray-400" size={20} />
             <select
-              aria-label="Filter documents by type"
-              value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as any)}
+              aria-label="Filter by material category"
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value as typeof categoryFilter)}
               className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             >
-              <option value="all">All Types</option>
+              <option value="all">All categories</option>
               <option value="general">General</option>
               <option value="general-major">General Major</option>
               <option value="specialized">Specialized</option>
+              <option value="uncategorized">Uncategorized</option>
             </select>
           </div>
         </div>
       </div>
 
-      {/* Documents List */}
+      {loading && (
+        <div className="bg-blue-50 border border-blue-100 text-blue-900 rounded-lg px-4 py-3 mb-4 text-sm">
+          Loading course materials…
+        </div>
+      )}
+
+      {!loading && loadMessage && documents.length === 0 && (
+        <div className="bg-amber-50 border border-amber-100 text-amber-900 rounded-lg px-4 py-3 mb-4 text-sm">
+          {loadMessage}
+        </div>
+      )}
+
       <div className="space-y-4">
         {filteredDocuments.map((doc) => (
           <div
-            key={doc.id}
+            key={String(doc.id)}
             className="bg-white rounded-lg border border-gray-200 p-6 hover:shadow-md transition-shadow cursor-pointer"
             onClick={() => setSelectedDocument(doc)}
           >
             <div className="flex items-start justify-between mb-3">
               <div className="flex-1">
-                <div className="flex items-center gap-2 mb-2">
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <h3 className="text-gray-900">{doc.title}</h3>
-                  {doc.highCredibility && (
-                    <span className="flex items-center gap-1 bg-green-100 text-green-700 px-2 py-1 rounded text-xs">
-                      <CheckCircle size={14} />
-                      High Credibility
+                  {(doc.isLecturerUpload || doc.highCredibility) && (
+                    <span
+                      className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-xs font-medium"
+                      title="Uploaded by course staff — marked as reliable"
+                    >
+                      <CheckCircle size={14} aria-hidden />
+                      Verified
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-4 text-gray-600 mb-2">
+                <div className="flex items-center gap-2 text-gray-600 mb-2 flex-wrap">
                   <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs">
-                    {doc.type === 'general' ? 'General' : doc.type === 'general-major' ? 'General Major' : 'Specialized'}
+                    {doc.categoryKey === 'uncategorized'
+                      ? 'Uncategorized'
+                      : doc.categoryKey === 'general'
+                        ? 'General'
+                        : doc.categoryKey === 'general-major'
+                          ? 'General Major'
+                          : 'Specialized'}
                   </span>
-                  <span>{doc.courseCode}</span>
-                  <span>•</span>
-                  <span>{doc.courseName}</span>
+                  {doc.courseCode ? <span>{doc.courseCode}</span> : null}
+                  {doc.courseName ? (
+                    <>
+                      {doc.courseCode ? <span className="text-gray-300">·</span> : null}
+                      <span>{doc.courseName}</span>
+                    </>
+                  ) : null}
                 </div>
                 <p className="text-gray-600 mb-3">{doc.description}</p>
-                <div className="flex items-center gap-4 text-gray-500">
-                  <span>By {doc.author} ({doc.authorRole})</span>
+                <div className="flex items-center gap-4 text-gray-500 flex-wrap">
+                  <span>
+                    By {doc.author} ({doc.authorRole})
+                  </span>
                   <span>•</span>
                   <span>{doc.uploadDate || 'Unknown date'}</span>
                 </div>
               </div>
-              <FileText className="text-blue-600" size={32} />
+              <FileText className="text-blue-600 shrink-0" size={32} />
             </div>
 
-            <div className="flex items-center gap-6 pt-3 border-t border-gray-100">
-              <div className="flex items-center gap-2 text-gray-600">
+            <div className="flex items-center gap-6 pt-3 border-t border-gray-100 flex-wrap text-sm">
+              <div className="flex items-center gap-2 text-gray-600" title="Indexed text segments">
                 <Eye size={16} />
-                <span>{doc.views} views</span>
+                <span>
+                  {doc.views} segment{doc.views === 1 ? '' : 's'}
+                </span>
               </div>
-              <div className="flex items-center gap-2 text-gray-600">
+              <div className="flex items-center gap-2 text-gray-600" title="File downloads">
                 <Download size={16} />
-                <span>{doc.downloads} downloads</span>
+                <span>
+                  {doc.downloads} download{doc.downloads === 1 ? '' : 's'}
+                </span>
               </div>
               <div className="flex items-center gap-2 text-gray-600">
                 <MessageSquare size={16} />
-                <span>{doc.comments} comments</span>
+                <span>
+                  {doc.comments} comment{doc.comments === 1 ? '' : 's'}
+                </span>
               </div>
             </div>
           </div>
         ))}
 
-        {filteredDocuments.length === 0 && (
+        {!loading && filteredDocuments.length === 0 && (
           <div className="text-center py-12 text-gray-500">
             <FileText className="mx-auto mb-4 text-gray-400" size={48} />
-            <p>No documents found matching your search criteria.</p>
+            <p>
+              {documents.length === 0
+                ? 'No course materials yet. Upload a document from the Upload tab.'
+                : 'No documents found matching your search criteria.'}
+            </p>
           </div>
         )}
       </div>
     </div>
-  );
+  )
 }

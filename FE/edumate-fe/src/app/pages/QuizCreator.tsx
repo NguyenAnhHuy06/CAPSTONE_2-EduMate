@@ -175,7 +175,6 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                 questions: questions,
                 createdBy: 'instructor',
                 status: 'published',
-                highCredibility: true,
             };
 
             if (onQuizCreated) {
@@ -185,7 +184,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
             showNotification({
                 type: 'success',
                 title: 'Quiz Published!',
-                message: 'Your quiz has been published with high credibility badge and is now available to students.',
+                message: 'Your quiz has been published and is now available to students.',
                 duration: 4000,
             });
 
@@ -459,7 +458,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                     </h2>
                     <p className="text-gray-600">
                         {userRole === 'instructor'
-                            ? 'Your quiz has been published with high credibility badge and is now available to students.'
+                            ? 'Your quiz has been published and is now available to students.'
                             : 'Your practice quiz has been created. Take the quiz to test your knowledge and see the correct answers!'}
                     </p>
                 </div>
@@ -535,7 +534,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
                         >
                             <Save size={18} />
-                            {userRole === 'instructor' ? 'Publish Quiz (High Credibility)' : 'Save Practice Quiz'}
+                            {userRole === 'instructor' ? 'Publish Quiz' : 'Save Practice Quiz'}
                         </button>
                     </div>
                 )}
