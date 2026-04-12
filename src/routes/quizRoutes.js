@@ -10,6 +10,7 @@ const {
   getQuizById,
   updateQuiz,
   publishQuiz,
+  getLeaderboard,
 } = require("../controllers/quizController");
 const { getS3Documents } = require("../controllers/documentController");
 
@@ -50,6 +51,7 @@ router.post("/quiz/generate-direct", auth, async (req, res) => {
 // Quiz CRUD — authenticated
 router.get("/quizzes/history", auth, getQuizHistory);
 router.get("/quizzes/published", auth, getPublishedQuizzes);
+router.get("/leaderboard", auth, getLeaderboard);
 router.post("/quiz/attempts", auth, recordQuizAttempt);
 router.get("/quizzes/:id", auth, getQuizById);
 

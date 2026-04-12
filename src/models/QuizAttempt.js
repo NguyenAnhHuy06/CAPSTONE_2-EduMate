@@ -12,7 +12,7 @@ const QuizAttempt = sequelize.define('QuizAttempt', {
         allowNull: false
     },
     user_id: {
-        type: DataTypes.STRING(36), // Standardized for MySQL FK compatibility
+        type: DataTypes.INTEGER,
         allowNull: true
     },
     score: {
