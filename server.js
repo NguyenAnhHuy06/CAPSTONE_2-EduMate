@@ -681,6 +681,71 @@ app.get("/api/quiz/result/:attemptId", (req, res) => {
   });
 });
 
+/**
+ * GET /api/leaderboard
+ * Aggregate quizAttempts by userId and return ranked list.
+ * Query params: limit (default 50), userId (optional – to identify current user)
+ */
+app.get("/api/leaderboard", (req, res) => {
+  const limit = Math.min(Math.max(toNum(req.query.limit, 50), 1), 200);
+  const requestingUserId = req.query.userId != null ? String(req.query.userId) : null;
+
+  // Aggregate completed attempts by userId
+  const map = new Map();
+  for (const a of quizAttempts) {
+    if (a.status !== "completed" || a.scorePercent == null) continue;
+    const uid = String(a.userId ?? "__anon__");
+    const g = map.get(uid) || { userId: uid, scores: [], completedAt: [] };
+    g.scores.push(Number(a.scorePercent));
+    if (a.completedAt) g.completedAt.push(a.completedAt);
+    map.set(uid, g);
+  }
+
+  // Build ranked array
+  const rows = Array.from(map.values())
+    .map((g) => {
+      const avg = Math.round(g.scores.reduce((s, x) => s + x, 0) / g.scores.length);
+      const best = Math.max(...g.scores);
+      // Lookup user name
+      const userRecord = users.find((u) => String(u.user_id) === g.userId);
+      return {
+        userId: g.userId,
+        name: userRecord?.full_name || userRecord?.name || "Anonymous",
+        email: userRecord?.email || null,
+        avgScore: avg,
+        totalAttempts: g.scores.length,
+        bestScore: best,
+      };
+    })
+    .sort((a, b) => b.avgScore - a.avgScore || b.totalAttempts - a.totalAttempts);
+
+  // Assign rank
+  rows.forEach((r, i) => { r.rank = i + 1; });
+
+  const limited = rows.slice(0, limit);
+
+  // myRank for requesting user
+  let myRank = null;
+  if (requestingUserId) {
+    const found = rows.find((r) => String(r.userId) === requestingUserId);
+    if (found) {
+      myRank = {
+        rank: found.rank,
+        avgScore: found.avgScore,
+        totalAttempts: found.totalAttempts,
+        bestScore: found.bestScore,
+      };
+    }
+  }
+
+  return res.status(200).json({
+    success: true,
+    total: rows.length,
+    data: limited,
+    myRank,
+  });
+});
+
 app.use("/uploads", express.static(uploadDir));
 
 app.use((req, res) => {
