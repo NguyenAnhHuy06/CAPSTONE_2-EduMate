@@ -65,16 +65,21 @@ export function InstructorDashboard({ user, onLogout, onUserUpdate }: Instructor
           }),
         ]);
         const docs = Array.isArray(docsRes?.data) ? docsRes.data : [];
+        const ownDocs = docs.filter((d: any) => {
+          const uploaderId = Number(d?.uploaderId ?? d?.uploader_id);
+          const ownerId = Number(lecturerUserId);
+          return Number.isFinite(uploaderId) && Number.isFinite(ownerId) && uploaderId === ownerId;
+        });
         const history = Array.isArray(historyRes?.data) ? historyRes.data : [];
         const analytics = analyticsRes?.data || analyticsRes || {};
         const perf = Array.isArray(analytics?.performance) ? analytics.performance : [];
 
-        const materialsUploaded = docs.length;
+        const materialsUploaded = ownDocs.length;
         const quizzesCreated = history.length;
         const totalAttempts = perf.reduce((sum: number, q: any) => sum + Number(q?.attempts || 0), 0);
         const publishedQuizzes = perf.filter((q: any) => !!q?.isPublished).length;
 
-        const activitiesFromDocs = docs.map((d: any) => ({
+        const activitiesFromDocs = ownDocs.map((d: any) => ({
           action: `Uploaded "${String(d?.title || d?.fileName || 'Document')}"`,
           at: String(d?.lastModified || d?.uploadedAt || d?.createdAt || ''),
         }));
