@@ -6,9 +6,6 @@ import {
   Sparkles,
   Send,
   CheckCircle,
-  ExternalLink,
-  AlertCircle,
-  Loader2,
 } from 'lucide-react';
 import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator } from '../pages/FlashcardCreator';
@@ -92,21 +89,6 @@ export function DocumentDetail({
 
   const [docStatus, setDocStatus] = useState(document?.status || 'pending');
   const [isVerifying, setIsVerifying] = useState(false);
-
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [wordViewerUrl, setWordViewerUrl] = useState<string | null>(null);
-  const [wordLoading, setWordLoading] = useState(false);
-  const [wordError, setWordError] = useState<string | null>(null);
-
-  const isPdf = String(document?.s3Key || '')
-    .toLowerCase()
-    .endsWith('.pdf');
-  const isWord =
-    String(document?.s3Key || '')
-      .toLowerCase()
-      .endsWith('.docx') || String(document?.s3Key || '').toLowerCase().endsWith('.doc');
 
   const documentRefKey = useCallback(() => {
     const documentId = document?.documentId ?? document?.id;
@@ -212,55 +194,6 @@ export function DocumentDetail({
       cancelled = true;
     };
   }, [document?.documentId, document?.id, document?.s3Key, document?.uploadDescription]);
-
-  useEffect(() => {
-    if (!isPdf || !document.s3Key) return;
-    const fetchPreview = async () => {
-      setPreviewLoading(true);
-      setPreviewError(null);
-      try {
-        const res = await fetch(
-          `/api/documents/preview?key=${encodeURIComponent(document.s3Key)}`
-        );
-        const data = await res.json();
-        if (data.success && data.url) {
-          setPreviewUrl(data.url);
-        } else {
-          setPreviewError('Could not load preview.');
-        }
-      } catch {
-        setPreviewError('Failed to connect to server.');
-      } finally {
-        setPreviewLoading(false);
-      }
-    };
-    void fetchPreview();
-  }, [document.s3Key, isPdf]);
-
-  useEffect(() => {
-    if (!isWord || !document.s3Key) return;
-    const fetchWordViewer = async () => {
-      setWordLoading(true);
-      setWordError(null);
-      try {
-        const res = await fetch(
-          `/api/documents/preview?key=${encodeURIComponent(document.s3Key)}`
-        );
-        const data = await res.json();
-        if (data.success && data.url) {
-          const viewerUrl = `https://docs.google.com/viewer?url=${encodeURIComponent(data.url)}&embedded=true`;
-          setWordViewerUrl(viewerUrl);
-        } else {
-          setWordError('Could not load document preview.');
-        }
-      } catch {
-        setWordError('Failed to connect to server.');
-      } finally {
-        setWordLoading(false);
-      }
-    };
-    void fetchWordViewer();
-  }, [document.s3Key, isWord]);
 
   const handleOpenQuizFlow = () => {
     if (onCreateQuizWithAi) {
@@ -647,97 +580,15 @@ export function DocumentDetail({
         </div>
       </div>
 
-      <div className={`grid gap-6 mb-6 ${showAIChat ? 'lg:grid-cols-[2fr_1fr]' : 'grid-cols-1'}`}>
-        <div className="bg-white rounded-lg border border-gray-200 p-4 shrink-0">
-          <div className="flex items-center justify-between mb-4">
-            <h3>Document preview</h3>
-            {isPdf && previewUrl && (
-              <a
-                href={previewUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-sm text-blue-600 hover:underline"
-              >
-                <ExternalLink size={14} />
-                Open in new tab
-              </a>
-            )}
-          </div>
-
-          {isPdf ? (
-            <div
-              className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50"
-              style={{ height: '700px' }}
-            >
-              {previewLoading && (
-                <div className="flex items-center justify-center h-full text-gray-500">
-                  <Loader2 className="animate-spin mr-2" size={24} />
-                  <span>Loading preview…</span>
-                </div>
-              )}
-              {previewError && !previewLoading && (
-                <div className="flex flex-col items-center justify-center h-full text-red-500 gap-2">
-                  <AlertCircle size={40} />
-                  <p>{previewError}</p>
-                </div>
-              )}
-              {previewUrl && !previewLoading && !previewError && (
-                <iframe
-                  src={previewUrl}
-                  title={document.title}
-                  className="w-full h-full border-0"
-                  loading="lazy"
-                />
-              )}
-            </div>
-          ) : isWord ? (
-            <div
-              className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50"
-              style={{ height: '700px' }}
-            >
-              {wordLoading && (
-                <div className="flex items-center justify-center h-full text-gray-500">
-                  <Loader2 className="animate-spin mr-2" size={24} />
-                  <span>Loading document preview…</span>
-                </div>
-              )}
-              {wordError && !wordLoading && (
-                <div className="flex flex-col items-center justify-center h-full text-red-500 gap-2">
-                  <AlertCircle size={40} />
-                  <p>{wordError}</p>
-                </div>
-              )}
-              {wordViewerUrl && !wordLoading && !wordError && (
-                <iframe
-                  src={wordViewerUrl}
-                  title={document.title}
-                  className="w-full h-full border-0"
-                  loading="lazy"
-                />
-              )}
-            </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center bg-gray-50 rounded-lg border border-dashed border-gray-300 py-16 gap-4">
-              <AlertCircle size={48} className="text-gray-400" />
-              <p className="text-gray-600 text-center">
-                Preview is not available for{' '}
-                <strong>{document.s3Key?.split('.').pop()?.toUpperCase() || 'this'}</strong> files.
-              </p>
-              <p className="text-gray-400 text-sm">Use Download to open the file locally.</p>
-            </div>
-          )}
+      {showAIChat && (
+        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 h-[730px] min-h-[400px]">
+          <AIChatPanel
+            documentId={document.documentId}
+            s3Key={document.s3Key}
+            onClose={() => setShowAIChat(false)}
+          />
         </div>
-
-        {showAIChat && (
-          <div className="h-[730px] min-h-[400px]">
-            <AIChatPanel
-              documentId={document.documentId}
-              s3Key={document.s3Key}
-              onClose={() => setShowAIChat(false)}
-            />
-          </div>
-        )}
-      </div>
+      )}
 
       <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
         <h3 className="mb-4">Description</h3>
