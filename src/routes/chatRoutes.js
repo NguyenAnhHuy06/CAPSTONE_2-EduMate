@@ -4,7 +4,7 @@ const auth = require("../middleware/auth");
 const { askQuestion, getSessions, getSessionMessages } = require("../controllers/chatController");
 
 // AI Chat — all authenticated users (Design: UC02)
-router.post("/ask", auth, askQuestion);
+router.post("/ask", askQuestion);
 router.get("/sessions", auth, getSessions);
 router.get("/sessions/:id/messages", auth, getSessionMessages);
 

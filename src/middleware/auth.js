@@ -3,19 +3,35 @@ const User = require('../models/User');
 
 const authMiddleware = async (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        const authHeader = req.headers.authorization || req.headers.Authorization;
+        const xAccessToken = req.headers['x-access-token'];
+        const bodyToken = req.body?.token;
+        const queryToken = req.query?.token;
+
+        let token = null;
+        if (authHeader) {
+            const raw = String(authHeader).trim();
+            token = raw.toLowerCase().startsWith('bearer ') ? raw.slice(7).trim() : raw;
+        } else if (xAccessToken) {
+            token = String(xAccessToken).trim();
+        } else if (bodyToken) {
+            token = String(bodyToken).trim();
+        } else if (queryToken) {
+            token = String(queryToken).trim();
+        }
+
+        if (!token) {
             return res.status(401).json({ success: false, message: 'Authentication required. Please login.' });
         }
 
-        const token = authHeader.split(' ')[1];
-        if (!token) {
-            return res.status(401).json({ success: false, message: 'Invalid token format.' });
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const tokenUserId = decoded?.id ?? decoded?.user_id ?? decoded?.sub;
+        const normalizedUserId = Number(tokenUserId);
+        if (!Number.isFinite(normalizedUserId) || normalizedUserId <= 0) {
+            return res.status(401).json({ success: false, message: 'Invalid token payload.' });
         }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-        const user = await User.findByPk(decoded.id, {
+        const user = await User.findByPk(normalizedUserId, {
             attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
         });
 

@@ -14,7 +14,7 @@ router.get("/for-quiz", auth, getDocumentsForQuiz);
 router.get("/s3-list", auth, getS3Documents);
 
 // Document verification — Lecturer/Admin only (Design: UC04)
-router.patch("/:id/verify", auth, rbac("LECTURER", "ADMIN"), async (req, res) => {
+const verifyDocumentHandler = async (req, res) => {
   try {
     const Document = require("../models/Document");
     const docId = Number(req.params.id);
@@ -52,7 +52,11 @@ router.patch("/:id/verify", auth, rbac("LECTURER", "ADMIN"), async (req, res) =>
     console.error("[verify]", err.message);
     return res.status(500).json({ success: false, message: err.message });
   }
-});
+};
+
+router.patch("/:id/verify", auth, rbac("LECTURER", "ADMIN"), verifyDocumentHandler);
+// FE compatibility: some clients send POST for this action.
+router.post("/:id/verify", auth, rbac("LECTURER", "ADMIN"), verifyDocumentHandler);
 
 router.patch("/:id/reject", auth, rbac("LECTURER", "ADMIN"), async (req, res) => {
   try {

@@ -8,6 +8,7 @@ const path = require("path");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { fileTypeFromBuffer } = require("file-type");
+const mammoth = require("mammoth");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { execFile } = require("child_process");
@@ -169,6 +170,22 @@ function isLecturerRole(role) {
   if (r === "student") return false;
   if (r.includes("lectur") || r.includes("instruct")) return true;
   return false;
+}
+
+function documentStatusLabel(status) {
+  const s = String(status || "").trim().toLowerCase();
+  if (s === "verified") return "Verified";
+  if (s === "rejected") return "Rejected";
+  return "Pending review";
+}
+
+function resolveModerationStatus(rawStatus, { chunkCount = 0, highCredibility = false } = {}) {
+  const s = String(rawStatus || "").trim().toLowerCase();
+  if (s === "verified" || s === "rejected" || s === "pending") return s;
+  // Legacy rows may have null status. If a document is already indexed (chunks > 0),
+  // treat it as reviewed so FE can render the same badge style as verified items.
+  if (Number(chunkCount) > 0 || highCredibility) return "verified";
+  return "pending";
 }
 
 const otpStore = new Map();
@@ -864,7 +881,12 @@ async function buildDocumentsForQuizList(options = {}) {
         ? String(m.uploader_name).trim()
         : "";
     const uploaderRole = m?.uploader_role != null ? String(m.uploader_role).trim() : "";
-    const highCredibility = isLecturerRole(uploaderRole);
+    const moderationStatus = resolveModerationStatus(m?.status, {
+      chunkCount: chunks,
+      highCredibility: isLecturerRole(uploaderRole),
+    });
+    const highCredibility =
+      isLecturerRole(uploaderRole) || moderationStatus === "verified";
     return {
       storage: "s3",
       s3Key: o.key,
@@ -884,6 +906,8 @@ async function buildDocumentsForQuizList(options = {}) {
       uploaderName,
       uploaderRole,
       highCredibility,
+      status: moderationStatus,
+      statusLabel: documentStatusLabel(moderationStatus),
       size: o.size,
       lastModified: o.lastModified || m?.created_at,
       fileUrl: s3.buildObjectPublicUrl(o.key),
@@ -939,15 +963,25 @@ app.get("/api/documents/preview", async (req, res) => {
     const rawDocumentId = req.query.documentId ?? req.query.document_id;
     const rawS3Key = String(req.query.s3Key ?? req.query.s3_key ?? "").trim();
 
+    const previewLimit = Math.min(Math.max(Number(req.query.limit) || 4, 1), 8);
+    const previewChars = Math.min(Math.max(Number(req.query.maxChars) || 3000, 500), 12000);
     let segments = [];
+    let totalSegments = 0;
     let docMeta = null;
+    let resolvedS3Key = rawS3Key;
     if (rawDocumentId != null && String(rawDocumentId).trim() !== "") {
-      segments = await db.listSegmentsByDocumentId(rawDocumentId);
+      segments = await db.listPreviewSegmentsByDocumentId(rawDocumentId, previewLimit);
+      totalSegments = await db.countSegmentsByDocumentId(rawDocumentId);
       docMeta = await db.getDocumentById(rawDocumentId);
+      resolvedS3Key = docMeta?.file_url != null ? String(docMeta.file_url).trim() : "";
     } else if (rawS3Key) {
-      segments = await db.listSegmentsByS3Key(rawS3Key);
+      segments = await db.listPreviewSegmentsByS3Key(rawS3Key, previewLimit);
+      totalSegments = await db.countSegmentsByS3Key(rawS3Key);
       const did = await db.getDocumentIdByS3Key(rawS3Key);
       if (did != null) docMeta = await db.getDocumentById(did);
+      if (!resolvedS3Key && docMeta?.file_url != null) {
+        resolvedS3Key = String(docMeta.file_url).trim();
+      }
     } else {
       return res.status(400).json({
         success: false,
@@ -963,12 +997,38 @@ app.get("/api/documents/preview", async (req, res) => {
     const previewChunks = segments
       .map((s) => String(s?.content || "").trim())
       .filter(Boolean)
-      .slice(0, 6);
-    const previewText = previewChunks.join("\n\n");
+      .slice(0, previewLimit);
+    const previewText = previewChunks.join("\n\n").slice(0, previewChars);
     const sections = previewChunks.map((text, i) => ({
       title: `Section ${i + 1}`,
-      content: text,
+      content: String(text).slice(0, Math.ceil(previewChars / Math.max(previewChunks.length, 1))),
     }));
+
+    const previewFileUrl =
+      rawDocumentId != null && String(rawDocumentId).trim() !== ""
+        ? `/api/documents/preview-file?documentId=${encodeURIComponent(String(rawDocumentId).trim())}`
+        : resolvedS3Key
+        ? `/api/documents/preview-file?s3Key=${encodeURIComponent(resolvedS3Key)}`
+        : null;
+    const downloadFileUrl =
+      rawDocumentId != null && String(rawDocumentId).trim() !== ""
+        ? `/api/documents/download-file?documentId=${encodeURIComponent(String(rawDocumentId).trim())}`
+        : resolvedS3Key
+        ? `/api/documents/download-file?s3Key=${encodeURIComponent(resolvedS3Key)}`
+        : null;
+    const sourceFileUrl = resolvedS3Key ? s3.buildObjectPublicUrl(resolvedS3Key) : null;
+    const fileExt = path.extname(resolvedS3Key || "").toLowerCase();
+    const isWordFile =
+      fileExt === ".doc" ||
+      fileExt === ".docx" ||
+      fileExt === ".docm" ||
+      fileExt === ".dotx" ||
+      fileExt === ".dotm";
+    const wordPreviewUrl =
+      isWordFile && resolvedS3Key
+        ? `/api/documents/preview-word-file?s3Key=${encodeURIComponent(resolvedS3Key)}`
+        : null;
+    const effectivePreviewUrl = wordPreviewUrl || previewFileUrl;
 
     return res.status(200).json({
       success: true,
@@ -976,7 +1036,23 @@ app.get("/api/documents/preview", async (req, res) => {
         sections,
         previewText,
         description,
-        totalSegments: Number(segments.length || 0),
+        totalSegments: Number(totalSegments || 0),
+        returnedSegments: Number(sections.length || 0),
+        hasMore: Number(totalSegments || 0) > Number(sections.length || 0),
+        mode: "preview",
+        s3Key: resolvedS3Key || null,
+        sourceFileUrl: effectivePreviewUrl || sourceFileUrl,
+        previewFileUrl: effectivePreviewUrl,
+        downloadFileUrl,
+        viewFullUrl: sourceFileUrl || effectivePreviewUrl,
+        officeViewerUrl: null,
+        previewProvider: wordPreviewUrl ? "word-html-render" : "native-inline",
+        // Compatibility aliases for different FE implementations.
+        previewUrl: effectivePreviewUrl,
+        fileUrl: effectivePreviewUrl || sourceFileUrl,
+        viewerUrl: effectivePreviewUrl,
+        // Compatibility alias for FE components expecting `url`.
+        url: effectivePreviewUrl,
       },
     });
   } catch (err) {
@@ -1093,11 +1169,11 @@ app.get("/api/documents/download-url", async (req, res) => {
   }
 });
 
-/** Stream file through the API so the browser can save locally (attachment) — avoids new-tab preview only. */
-app.get("/api/documents/download-file", async (req, res) => {
+async function streamDocumentFile(req, res, mode = "attachment", options = {}) {
   try {
+    const { allowAnonymous = false } = options;
     const uid = getBearerUserId(req);
-    if (uid == null) {
+    if (!allowAnonymous && uid == null) {
       return res.status(401).json({ success: false, message: "Unauthorized." });
     }
     if (!s3.isS3Configured()) {
@@ -1124,9 +1200,14 @@ app.get("/api/documents/download-file", async (req, res) => {
     const baseName = path.basename(s3Key) || "document";
     const safeBase = baseName.replace(/[\r\n"]/g, "_");
     res.setHeader("Content-Type", contentType || "application/octet-stream");
+    const forceInline =
+      mode === "inline" ||
+      req.query.inline === "1" ||
+      req.query.inline === "true" ||
+      req.query.mode === "inline";
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename*=UTF-8''${encodeURIComponent(safeBase)}`
+      `${forceInline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(safeBase)}`
     );
     res.setHeader("Content-Length", buffer.length);
     return res.status(200).send(buffer);
@@ -1134,7 +1215,242 @@ app.get("/api/documents/download-file", async (req, res) => {
     console.error("[api/documents/download-file]", err);
     return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
   }
+}
+
+/** Stream file as attachment (download). Supports inline via query: ?inline=1 */
+app.get("/api/documents/download-file", async (req, res) => streamDocumentFile(req, res, "attachment"));
+
+/** Stream file for in-browser preview (inline). */
+app.get("/api/documents/preview-file", async (req, res) =>
+  streamDocumentFile(req, res, "inline", { allowAnonymous: true })
+);
+
+/** Convert Word (.doc/.docx/.docm/.dotx/.dotm) to HTML for in-app preview (avoids auto-download). */
+app.get("/api/documents/preview-word", async (req, res) => {
+  try {
+    if (!s3.isS3Configured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+
+    const rawDocumentId = req.query.documentId ?? req.query.document_id;
+    const rawS3Key = String(req.query.s3Key ?? req.query.s3_key ?? "").trim();
+    let s3Key = rawS3Key;
+
+    if (!s3Key && rawDocumentId != null && String(rawDocumentId).trim() !== "" && db.isConfigured()) {
+      const doc = await db.getDocumentById(rawDocumentId);
+      s3Key = doc?.file_url != null ? String(doc.file_url).trim() : "";
+    }
+
+    if (!s3Key) {
+      return res.status(400).json({ success: false, message: "Missing documentId or s3Key." });
+    }
+    if (s3Key.includes("..")) {
+      return res.status(400).json({ success: false, message: "Invalid file reference." });
+    }
+
+    const ext = path.extname(s3Key || "").toLowerCase();
+    const isWord =
+      ext === ".doc" || ext === ".docx" || ext === ".docm" || ext === ".dotx" || ext === ".dotm";
+    if (!isWord) {
+      return res.status(400).json({
+        success: false,
+        message: "preview-word only supports Word files (.doc/.docx/.docm/.dotx/.dotm).",
+      });
+    }
+
+    const { buffer } = await s3.getObjectBuffer(s3Key);
+    if (!buffer || !buffer.length) {
+      return res.status(404).json({ success: false, message: "File not found." });
+    }
+
+    const converted = await mammoth.convertToHtml({ buffer });
+    const html = String(converted?.value || "").trim();
+    const text = String(converted?.value || "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const previewText = text.slice(0, 2000);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        s3Key,
+        html,
+        previewText,
+        mode: "preview-word",
+        sourceFileUrl: s3.buildObjectPublicUrl(s3Key),
+        viewFullUrl: `/api/documents/preview-file?s3Key=${encodeURIComponent(s3Key)}`,
+        downloadFileUrl: `/api/documents/download-file?s3Key=${encodeURIComponent(s3Key)}`,
+      },
+    });
+  } catch (err) {
+    console.error("[api/documents/preview-word]", err);
+    return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
+  }
 });
+
+/** Rendered HTML page for Word preview iframe/object usage. */
+app.get("/api/documents/preview-word-file", async (req, res) => {
+  try {
+    if (!s3.isS3Configured()) {
+      return res.status(503).send("Preview unavailable.");
+    }
+
+    const rawDocumentId = req.query.documentId ?? req.query.document_id;
+    const rawS3Key = String(req.query.s3Key ?? req.query.s3_key ?? "").trim();
+    let s3Key = rawS3Key;
+
+    if (!s3Key && rawDocumentId != null && String(rawDocumentId).trim() !== "" && db.isConfigured()) {
+      const doc = await db.getDocumentById(rawDocumentId);
+      s3Key = doc?.file_url != null ? String(doc.file_url).trim() : "";
+    }
+
+    if (!s3Key || s3Key.includes("..")) {
+      return res.status(400).send("Invalid file reference.");
+    }
+
+    const ext = path.extname(s3Key || "").toLowerCase();
+    const isWord =
+      ext === ".doc" || ext === ".docx" || ext === ".docm" || ext === ".dotx" || ext === ".dotm";
+    if (!isWord) {
+      return res.status(400).send("This preview endpoint supports only Word files.");
+    }
+
+    const { buffer } = await s3.getObjectBuffer(s3Key);
+    const converted = await mammoth.convertToHtml({ buffer });
+    const bodyHtml = String(converted?.value || "").trim() || "<p>No preview content.</p>";
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Word Preview</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #fff; color: #222; }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 20px; line-height: 1.6; }
+    img { max-width: 100%; height: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { border: 1px solid #ddd; padding: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">${bodyHtml}</div>
+</body>
+</html>`;
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(html);
+  } catch (err) {
+    console.error("[api/documents/preview-word-file]", err);
+    return res.status(500).send("Preview is temporarily unavailable.");
+  }
+});
+
+async function verifyOrRejectDocument(req, res, targetStatus) {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const uid = getBearerUserId(req);
+    if (uid == null) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+    const role = await db.getUserRole(uid);
+    if (!isLecturerRole(role)) {
+      return res.status(403).json({ success: false, message: "Only lecturers can verify/reject documents." });
+    }
+    const docId = Number(req.params.id);
+    if (!Number.isFinite(docId) || docId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid document ID." });
+    }
+    // Business rule: Reject button should remove the document.
+    if (targetStatus === "rejected") {
+      const removed = await db.deleteDocumentById(docId);
+      if (!removed) {
+        return res.status(404).json({ success: false, message: "Document not found." });
+      }
+      if (s3.isS3Configured() && removed.fileUrl) {
+        try {
+          await s3.deleteObject(removed.fileUrl);
+        } catch (e) {
+          console.warn("[api/documents/:id/reject] S3 cleanup warning:", e.message);
+        }
+      }
+      return res.status(200).json({
+        success: true,
+        message: "Document was rejected and removed.",
+        data: {
+          status: "rejected",
+          statusLabel: "Rejected",
+          removed: true,
+        },
+      });
+    }
+
+    const ok = await db.updateDocumentStatus(docId, targetStatus);
+    if (!ok) {
+      return res.status(404).json({ success: false, message: "Document not found." });
+    }
+    return res.status(200).json({
+      success: true,
+      message: "Document verified.",
+      data: {
+        status: "verified",
+        statusLabel: "Verified",
+      },
+    });
+  } catch (err) {
+    console.error(`[api/documents/${req.params.id}/${targetStatus}]`, err);
+    return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+}
+
+app.patch("/api/documents/:id/verify", async (req, res) => verifyOrRejectDocument(req, res, "verified"));
+app.post("/api/documents/:id/verify", async (req, res) => verifyOrRejectDocument(req, res, "verified"));
+app.patch("/api/documents/:id/reject", async (req, res) => verifyOrRejectDocument(req, res, "rejected"));
+app.post("/api/documents/:id/reject", async (req, res) => verifyOrRejectDocument(req, res, "rejected"));
+
+async function deleteDocumentHandler(req, res) {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const uid = getBearerUserId(req);
+    if (uid == null) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+    const role = await db.getUserRole(uid);
+    if (!isLecturerRole(role)) {
+      return res.status(403).json({ success: false, message: "Only lecturers can delete documents." });
+    }
+    const docId = Number(req.params.id);
+    if (!Number.isFinite(docId) || docId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid document ID." });
+    }
+    const removed = await db.deleteDocumentById(docId);
+    if (!removed) {
+      return res.status(404).json({ success: false, message: "Document not found." });
+    }
+
+    // Best-effort cleanup on S3 (ignore if object already gone).
+    if (s3.isS3Configured() && removed.fileUrl) {
+      try {
+        await s3.deleteObject(removed.fileUrl);
+      } catch (e) {
+        console.warn("[api/documents/:id/delete] S3 cleanup warning:", e.message);
+      }
+    }
+
+    return res.status(200).json({ success: true, message: "Document deleted successfully." });
+  } catch (err) {
+    console.error("[api/documents/:id DELETE]", err);
+    return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+}
+
+app.delete("/api/documents/:id", deleteDocumentHandler);
+app.post("/api/documents/:id/delete", deleteDocumentHandler);
 
 app.get("/api/progress/summary", async (req, res) => {
   try {
@@ -1477,6 +1793,13 @@ app.get("/api/s3/documents", async (req, res) => {
 function mapMysqlDocToRecent(row) {
   const uploaderRole =
     row.uploader_role != null ? String(row.uploader_role).trim() : "";
+  const chunkCount = Number(row.chunk_count || 0);
+  const moderationStatus = resolveModerationStatus(row.status, {
+    chunkCount,
+    highCredibility: isLecturerRole(uploaderRole),
+  });
+  const highCredibility =
+    isLecturerRole(uploaderRole) || moderationStatus === "verified";
   return {
     id: row.document_id,
     title: row.title,
@@ -1489,9 +1812,11 @@ function mapMysqlDocToRecent(row) {
     courseId: row.course_id,
     uploaderId: row.uploader_id,
     uploaderRole,
-    highCredibility: isLecturerRole(uploaderRole),
+    highCredibility,
+    status: moderationStatus,
+    statusLabel: documentStatusLabel(moderationStatus),
     uploadedAt: row.created_at,
-    chunkCount: Number(row.chunk_count || 0),
+    chunkCount,
     downloads: 0,
   };
 }
@@ -2028,6 +2353,15 @@ app.post(
       const tokenUserId = getBearerUserId(req);
       const resolvedUploaderId =
         optionalBodyNumber(uploaderId ?? req.body.user_id ?? req.body.userId) ?? tokenUserId;
+      let uploaderRole = "";
+      if (db.isConfigured() && resolvedUploaderId != null && Number.isFinite(Number(resolvedUploaderId))) {
+        try {
+          uploaderRole = String((await db.getUserRole(resolvedUploaderId)) || "").trim();
+        } catch (_) {
+          uploaderRole = "";
+        }
+      }
+      const moderationStatus = isLecturerRole(uploaderRole) ? "verified" : "pending";
 
       const row = {
         s3Key: key,
@@ -2036,6 +2370,7 @@ app.post(
         uploaderId: resolvedUploaderId,
         description: String(description || "").trim(),
         category: String(category || "").trim(),
+        status: moderationStatus,
       };
 
       let documentId = null;
@@ -2043,16 +2378,7 @@ app.post(
         documentId = await db.upsertDocument(row);
       }
 
-      let highCredibility = false;
-      const uid = resolvedUploaderId != null ? Number(resolvedUploaderId) : null;
-      if (db.isConfigured() && uid != null && Number.isFinite(uid)) {
-        try {
-          const role = await db.getUserRole(uid);
-          highCredibility = isLecturerRole(role);
-        } catch {
-          highCredibility = false;
-        }
-      }
+      const highCredibility = isLecturerRole(uploaderRole);
 
       const newDocument = {
         id: documentId != null ? documentId : key,
@@ -2067,6 +2393,8 @@ app.post(
           ? Number(resolvedUploaderId)
           : null,
         highCredibility,
+        status: moderationStatus,
+        statusLabel: documentStatusLabel(moderationStatus),
         storage: "s3",
         s3Key: key,
         originalFileName: req.file.originalname,

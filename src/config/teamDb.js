@@ -359,9 +359,29 @@ function normalizeQuestionInput(q) {
   } else {
     opts = { A: trunc255(q.option_a), B: trunc255(q.option_b), C: trunc255(q.option_c), D: trunc255(q.option_d) };
   }
-  let cor = q.correct_answer ?? q.correctAnswer;
-  if (typeof cor === "number" && cor >= 0 && cor <= 3) cor = ["A", "B", "C", "D"][cor];
-  const correct = String(cor || "A").toUpperCase().trim().slice(0, 1) || "A";
+  let cor = q.correct_answer ?? q.correctAnswer ?? q.correct ?? q.answer ?? q.answerKey;
+  const rawCor = String(cor ?? "").trim();
+  const rawUpper = rawCor.toUpperCase();
+  if (typeof cor === "number" && cor >= 0 && cor <= 3) {
+    cor = ["A", "B", "C", "D"][cor];
+  } else if (/^[0-3]$/.test(rawCor)) {
+    cor = ["A", "B", "C", "D"][Number(rawCor)];
+  } else if (/^(OPTION[_\s-]?)?[ABCD](\.|:|\)|\s|$)/i.test(rawCor)) {
+    cor = rawUpper.replace(/^OPTION[_\s-]?/i, "").trim().charAt(0);
+  } else {
+    cor = rawUpper;
+  }
+  let correct = String(cor || "A").trim().charAt(0) || "A";
+  if (!["A", "B", "C", "D"].includes(correct)) {
+    const entries = [
+      ["A", String(opts.A || "").trim()],
+      ["B", String(opts.B || "").trim()],
+      ["C", String(opts.C || "").trim()],
+      ["D", String(opts.D || "").trim()],
+    ];
+    const matched = entries.find(([, text]) => text && text.toUpperCase() === rawUpper);
+    correct = matched ? matched[0] : "A";
+  }
   return { question: questionText, options: opts, correct_answer: correct };
 }
 

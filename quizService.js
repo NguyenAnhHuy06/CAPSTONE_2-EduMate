@@ -1,5 +1,8 @@
 const { retrieveTopChunks } = require("./vectorSearch");
 const crypto = require("crypto");
+const path = require("path");
+const s3 = require("./s3Upload");
+const { extractDocumentText } = require("./extractDocumentText");
 
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-chat";
@@ -250,14 +253,38 @@ function calculateQuestionCount(chunks) {
   return Math.min(q, SOFT_MAX);
 }
 
+async function fallbackContextFromSourceFile(s3Key, maxContextChars = 6000) {
+  if (!s3Key || !s3.isS3Configured()) return { context: "", chunks: [] };
+  try {
+    const { buffer, contentType } = await s3.getObjectBuffer(s3Key);
+    const ext = path.extname(String(s3Key || "")).toLowerCase();
+    const plain = await extractDocumentText(buffer, ext, contentType || "");
+    const normalized = String(plain || "").replace(/\s+/g, " ").trim();
+    if (!normalized) return { context: "", chunks: [] };
+    const context = normalized.slice(0, Math.max(1000, Number(maxContextChars) || 6000));
+    return {
+      context,
+      chunks: [{ section: 1, content: context, score: 1 }],
+    };
+  } catch (e) {
+    console.warn("[quiz] source-file fallback context failed:", e.message);
+    return { context: "", chunks: [] };
+  }
+}
+
 async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Vietnamese" }) {
   const retrievalQuery = String(query || "core concept and key facts").trim();
-  const { context, chunks } = await retrieveTopChunks({
+  let { context, chunks } = await retrieveTopChunks({
     s3Key,
     query: retrievalQuery,
-    topK: 3,
-    maxContextChars: 2000,
+    topK: 5,
+    maxContextChars: 8000,
   });
+  if (!String(context || "").trim()) {
+    const fb = await fallbackContextFromSourceFile(s3Key, 6000);
+    context = fb.context;
+    chunks = fb.chunks;
+  }
 
   const chunkTexts = (chunks || []).map((c) => c.content);
   const autoQ = chunkTexts.length ? calculateQuestionCount(chunkTexts) : 3;
@@ -269,9 +296,12 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Vietna
 
   if (!context.trim()) return { questions: [], targetCount: qCount };
 
-  const system = `Generate multiple-choice questions based ONLY on the provided context.
+  const strictSystem = `Generate multiple-choice questions based ONLY on the provided context.
 Do not use external knowledge.
 If insufficient data, return exactly the JSON: {"questions":[]}.`;
+  const relaxedSystem = `Generate multiple-choice questions based ONLY on the provided context.
+Do not use external knowledge.
+Try your best to produce at least 3 meaningful questions when context has usable content.`;
 
   const user = [
     `Language: ${languageHint}`,
@@ -295,25 +325,28 @@ If insufficient data, return exactly the JSON: {"questions":[]}.`;
   ].join("\n");
 
   const useJsonSchema = String(process.env.QUIZ_OPENROUTER_JSON_MODE || "1").trim() !== "0";
-  const payload = {
-    model: OPENROUTER_MODEL,
-    temperature: 0.2,
-    max_tokens: computeQuizMaxTokens(qCount),
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-  };
-  if (useJsonSchema) {
-    payload.response_format = { type: "json_object" };
+  async function askOnce(systemPrompt) {
+    const payload = {
+      model: OPENROUTER_MODEL,
+      temperature: 0.2,
+      max_tokens: computeQuizMaxTokens(qCount),
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: user },
+      ],
+    };
+    if (useJsonSchema) payload.response_format = { type: "json_object" };
+    const completion = await callOpenRouterWithRetry(payload);
+    const choice0 = completion?.choices?.[0];
+    const content = getAssistantMessageText(choice0);
+    const parsed = parseQuizResponse(content);
+    return parsed.length > qCount ? parsed.slice(0, qCount) : parsed;
   }
 
-  const completion = await callOpenRouterWithRetry(payload);
-
-  const choice0 = completion?.choices?.[0];
-  const content = getAssistantMessageText(choice0);
-  const parsed = parseQuizResponse(content);
-  const questions = parsed.length > qCount ? parsed.slice(0, qCount) : parsed;
+  let questions = await askOnce(strictSystem);
+  if (!questions.length && String(context || "").trim()) {
+    questions = await askOnce(relaxedSystem);
+  }
   return { questions, targetCount: qCount };
 }
 

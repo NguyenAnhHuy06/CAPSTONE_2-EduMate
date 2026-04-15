@@ -6,6 +6,7 @@ const {
   PutObjectCommand,
   ListObjectsV2Command,
   GetObjectCommand,
+  DeleteObjectCommand,
 } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -180,6 +181,21 @@ async function getPresignedDownloadUrl(key, expiresInSeconds = 300) {
   });
 }
 
+async function deleteObject(key) {
+  if (!key || String(key).includes("..")) {
+    throw new Error("Invalid S3 key.");
+  }
+  const client = getClient();
+  const bucket = getBucket();
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: bucket,
+      Key: String(key).trim(),
+    })
+  );
+  return true;
+}
+
 module.exports = {
   isS3Configured,
   uploadDocumentBuffer,
@@ -191,4 +207,5 @@ module.exports = {
   documentsPrefix,
   putJsonObject,
   getPresignedDownloadUrl,
+  deleteObject,
 };

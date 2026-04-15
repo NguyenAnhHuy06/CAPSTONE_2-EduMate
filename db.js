@@ -352,6 +352,8 @@ async function upsertDocument(row) {
   const description = descRaw === "" ? null : descRaw;
   const catRaw = row.category != null ? trunc128(String(row.category)) : null;
   const category = catRaw === "" || catRaw == null ? null : catRaw;
+  const statusRaw = row.status != null ? String(row.status).trim().toLowerCase() : "";
+  const status = ["pending", "verified", "rejected"].includes(statusRaw) ? statusRaw : null;
 
   if (existing.length) {
     const id = existing[0].document_id;
@@ -359,9 +361,9 @@ async function upsertDocument(row) {
       await p.execute(
         `UPDATE documents SET title = ?, version = IFNULL(version, 0) + 1,
           course_id = COALESCE(?, course_id), uploader_id = COALESCE(?, uploader_id),
-          description = ?, category = ?
+          description = ?, category = ?, status = COALESCE(?, status)
          WHERE document_id = ?`,
-        [title, courseId, uploaderId, description, category, id]
+        [title, courseId, uploaderId, description, category, status, id]
       );
     } catch (e) {
       if (e.code === "ER_BAD_FIELD_ERROR") {
@@ -394,9 +396,9 @@ async function upsertDocument(row) {
 
   try {
     const [hdr] = await p.execute(
-      `INSERT INTO documents (title, course_id, uploader_id, file_url, version, description, category)
-       VALUES (?,?,?,?,1,?,?)`,
-      [title, courseId, uploaderId, key, description, category]
+      `INSERT INTO documents (title, course_id, uploader_id, file_url, version, description, category, status)
+       VALUES (?,?,?,?,1,?,?,COALESCE(?, 'pending'))`,
+      [title, courseId, uploaderId, key, description, category, status]
     );
     return hdr.insertId;
   } catch (e) {
@@ -744,13 +746,43 @@ async function listSegmentsByS3Key(s3Key) {
   });
 }
 
+async function listPreviewSegmentsByS3Key(s3Key, limit = 4) {
+  const lim = Math.min(Math.max(Number(limit) || 4, 1), 12);
+  const [rows] = await getPool().execute(
+    `SELECT s.segment_id, s.document_id, s.content
+     FROM document_segments s
+     INNER JOIN documents d ON d.document_id = s.document_id
+     WHERE d.file_url = ?
+     ORDER BY s.segment_id ASC
+     LIMIT ${lim}`,
+    [s3Key]
+  );
+  return rows.map((r, idx) => ({
+    segmentId: r.segment_id,
+    documentId: r.document_id,
+    section: idx + 1,
+    content: r.content,
+  }));
+}
+
+async function countSegmentsByS3Key(s3Key) {
+  const [rows] = await getPool().execute(
+    `SELECT COUNT(*) AS n
+     FROM document_segments s
+     INNER JOIN documents d ON d.document_id = s.document_id
+     WHERE d.file_url = ?`,
+    [s3Key]
+  );
+  return Number(rows?.[0]?.n || 0);
+}
+
 async function getDocumentById(documentId) {
   const id = Number(documentId);
   if (!Number.isFinite(id)) return null;
   const p = getPool();
   try {
     const [rows] = await p.execute(
-      `SELECT document_id, title, file_url, course_id, uploader_id, created_at, description, category
+      `SELECT document_id, title, file_url, course_id, uploader_id, created_at, status, description, category
        FROM documents WHERE document_id = ? LIMIT 1`,
       [id]
     );
@@ -777,6 +809,75 @@ async function getDocumentById(documentId) {
       }
     }
     throw e;
+  }
+}
+
+async function updateDocumentStatus(documentId, status) {
+  const id = Number(documentId);
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!Number.isFinite(id) || id <= 0) return false;
+  if (!["verified", "rejected", "pending"].includes(normalized)) return false;
+  const p = getPool();
+  try {
+    const [ret] = await p.execute(`UPDATE documents SET status = ? WHERE document_id = ?`, [
+      normalized,
+      id,
+    ]);
+    return Number(ret?.affectedRows || 0) > 0;
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") {
+      // Legacy schema without documents.status column.
+      const [rows] = await p.execute(`SELECT document_id FROM documents WHERE document_id = ? LIMIT 1`, [id]);
+      return rows.length > 0;
+    }
+    throw e;
+  }
+}
+
+async function deleteDocumentById(documentId) {
+  const id = Number(documentId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const p = getPool();
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute(
+      `SELECT document_id, file_url FROM documents WHERE document_id = ? LIMIT 1`,
+      [id]
+    );
+    if (!rows.length) {
+      await conn.rollback();
+      return null;
+    }
+    const fileUrl = rows[0].file_url != null ? String(rows[0].file_url).trim() : "";
+
+    // Keep quiz history readable even if source document is removed.
+    try {
+      await conn.execute(
+        `UPDATE quizzes SET document_id = NULL WHERE document_id = ?`,
+        [id]
+      );
+    } catch (_) {}
+
+    await conn.execute(`DELETE FROM document_segments WHERE document_id = ?`, [id]);
+    try {
+      await conn.execute(`DELETE FROM document_comments WHERE document_id = ?`, [id]);
+    } catch (_) {}
+    if (fileUrl) {
+      try {
+        await conn.execute(`DELETE FROM document_comments WHERE file_url = ?`, [fileUrl]);
+      } catch (_) {}
+    }
+    await conn.execute(`DELETE FROM documents WHERE document_id = ?`, [id]);
+    await conn.commit();
+    return { documentId: id, fileUrl };
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch (_) {}
+    throw e;
+  } finally {
+    conn.release();
   }
 }
 
@@ -807,6 +908,38 @@ async function listSegmentsByDocumentId(documentId) {
   });
 }
 
+async function listPreviewSegmentsByDocumentId(documentId, limit = 4) {
+  const id = Number(documentId);
+  if (!Number.isFinite(id)) return [];
+  const lim = Math.min(Math.max(Number(limit) || 4, 1), 12);
+  const [rows] = await getPool().execute(
+    `SELECT s.segment_id, s.document_id, s.content
+     FROM document_segments s
+     WHERE s.document_id = ?
+     ORDER BY s.segment_id ASC
+     LIMIT ${lim}`,
+    [id]
+  );
+  return rows.map((r, idx) => ({
+    segmentId: r.segment_id,
+    documentId: r.document_id,
+    section: idx + 1,
+    content: r.content,
+  }));
+}
+
+async function countSegmentsByDocumentId(documentId) {
+  const id = Number(documentId);
+  if (!Number.isFinite(id)) return 0;
+  const [rows] = await getPool().execute(
+    `SELECT COUNT(*) AS n
+     FROM document_segments
+     WHERE document_id = ?`,
+    [id]
+  );
+  return Number(rows?.[0]?.n || 0);
+}
+
 /**
  * True when every segment for this S3 key has a non-empty embedding vector in DB.
  */
@@ -827,7 +960,7 @@ async function getMetaMapForS3Keys(keys) {
   let docs;
   try {
     const [r] = await p.execute(
-      `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at,
+      `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at, d.status,
         IFNULL(d.download_count, 0) AS download_count,
         d.description, d.category,
         c.course_code,
@@ -895,7 +1028,7 @@ async function getMetaMapForS3Keys(keys) {
       let extra;
       try {
         const [r] = await p.execute(
-          `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at,
+          `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at, d.status,
             IFNULL(d.download_count, 0) AS download_count,
             d.description, d.category,
             c.course_code,
@@ -1890,9 +2023,10 @@ async function recordQuizAttempt(opts) {
 
 async function listDocumentsRecent(limit) {
   const p = getPool();
+  const lim = Math.min(Math.max(Number(limit) || 10, 1), 50);
   try {
     const [rows] = await p.execute(
-      `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at,
+      `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at, d.status,
         IFNULL(d.download_count, 0) AS download_count,
         d.description, d.category,
         u.role AS uploader_role,
@@ -1900,8 +2034,7 @@ async function listDocumentsRecent(limit) {
        FROM documents d
        LEFT JOIN users u ON u.user_id = d.uploader_id
        ORDER BY d.created_at DESC
-       LIMIT ?`,
-      [limit]
+       LIMIT ${lim}`
     );
     return rows;
   } catch (e) {
@@ -1914,8 +2047,7 @@ async function listDocumentsRecent(limit) {
             (SELECT COUNT(*) FROM document_segments s WHERE s.document_id = d.document_id) AS chunk_count
            FROM documents d
            ORDER BY d.created_at DESC
-           LIMIT ?`,
-          [limit]
+           LIMIT ${lim}`
         );
         return rows;
       } catch (e2) {
@@ -1926,8 +2058,7 @@ async function listDocumentsRecent(limit) {
               (SELECT COUNT(*) FROM document_segments s WHERE s.document_id = d.document_id) AS chunk_count
              FROM documents d
              ORDER BY d.created_at DESC
-             LIMIT ?`,
-            [limit]
+             LIMIT ${lim}`
           );
           return rows;
         }
@@ -1961,20 +2092,29 @@ function normalizeQuestionInput(q) {
       D: trunc255(q.option_d),
     };
   }
-  let cor = q.correct_answer ?? q.correctAnswer;
+  let cor = q.correct_answer ?? q.correctAnswer ?? q.correct ?? q.answer ?? q.answerKey;
+  const rawCor = String(cor ?? "").trim();
+  const rawUpper = rawCor.toUpperCase();
+
   if (typeof cor === "number" && cor >= 0 && cor <= 3) {
     cor = ["A", "B", "C", "D"][cor];
+  } else if (/^[0-3]$/.test(rawCor)) {
+    cor = ["A", "B", "C", "D"][Number(rawCor)];
+  } else if (/^(OPTION[_\s-]?)?[ABCD](\.|:|\)|\s|$)/i.test(rawCor)) {
+    cor = rawUpper.replace(/^OPTION[_\s-]?/i, "").trim().charAt(0);
+  } else {
+    cor = rawUpper;
   }
-  let correct = String(cor || "A").toUpperCase().trim().slice(0, 1) || "A";
+
+  let correct = String(cor || "A").trim().charAt(0) || "A";
   if (!["A", "B", "C", "D"].includes(correct)) {
-    const rawCor = String(cor || "").trim();
     const entries = [
       ["A", String(opts.A || "").trim()],
       ["B", String(opts.B || "").trim()],
       ["C", String(opts.C || "").trim()],
       ["D", String(opts.D || "").trim()],
     ];
-    const matched = entries.find(([, text]) => text && text === rawCor);
+    const matched = entries.find(([, text]) => text && text.toUpperCase() === rawUpper);
     correct = matched ? matched[0] : "A";
   }
   return { question: questionText, options: opts, correct_answer: correct };
@@ -2596,8 +2736,14 @@ module.exports = {
   countChunksByS3Key,
   getConcatenatedChunksByS3Key,
   listSegmentsByS3Key,
+  listPreviewSegmentsByS3Key,
+  countSegmentsByS3Key,
   getDocumentById,
+  updateDocumentStatus,
+  deleteDocumentById,
   listSegmentsByDocumentId,
+  listPreviewSegmentsByDocumentId,
+  countSegmentsByDocumentId,
   hasCompleteEmbeddingsForS3Key,
   getMetaMapForS3Keys,
   normalizeDocumentKeyForLookup,

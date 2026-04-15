@@ -9,33 +9,122 @@ const ChatMessage = require("../models/ChatMessage");
 const Citation = require("../models/Citation");
 const { retrieveTopChunks } = require("../services/vectorSearch");
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001";
+function resolveChatUserId(req) {
+    const fromAuth = req.user?.id ?? req.user?.user_id;
+    if (Number.isFinite(Number(fromAuth)) && Number(fromAuth) > 0) return Number(fromAuth);
+    const fromBody = req.body?.userId ?? req.body?.user_id;
+    if (Number.isFinite(Number(fromBody)) && Number(fromBody) > 0) return Number(fromBody);
+    const fromQuery = req.query?.userId ?? req.query?.user_id;
+    if (Number.isFinite(Number(fromQuery)) && Number(fromQuery) > 0) return Number(fromQuery);
+    const fallback =
+        process.env.DEFAULT_CHAT_USER_ID ||
+        process.env.DEFAULT_QUIZ_USER_ID ||
+        "14";
+    if (Number.isFinite(Number(fallback)) && Number(fallback) > 0) return Number(fallback);
+    return null;
+}
 
-async function callLLM(systemPrompt, userMessage) {
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            model: OPENROUTER_MODEL,
-            temperature: 0.2,
-            max_tokens: 2000,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userMessage },
-            ]
-        })
-    });
-
-    if (!resp.ok) {
-        throw new Error(`LLM Error: ${resp.status} ${resp.statusText}`);
+function getChatProviderConfigs() {
+    const configs = [];
+    const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
+    if (openaiKey) {
+        configs.push({
+            provider: "openai",
+            apiKey: openaiKey,
+            endpoint: "https://api.openai.com/v1/chat/completions",
+            model: process.env.OPENAI_MODEL || process.env.CHAT_MODEL || "gpt-4o-mini",
+        });
     }
 
-    const data = await resp.json();
-    return data?.choices?.[0]?.message?.content || "";
+    const openrouterKey = String(process.env.OPENROUTER_API_KEY || "").trim();
+    if (openrouterKey) {
+        configs.push({
+            provider: "openrouter",
+            apiKey: openrouterKey,
+            endpoint: "https://openrouter.ai/api/v1/chat/completions",
+            model: process.env.OPENROUTER_MODEL || process.env.CHAT_MODEL || "google/gemini-2.0-flash-001",
+        });
+    }
+
+    if (!configs.length) {
+        throw new Error("Missing AI API key. Set OPENAI_API_KEY or OPENROUTER_API_KEY.");
+    }
+    return configs;
+}
+
+function buildSystemPrompt(hasContext) {
+    return [
+        "You are EduMate AI Assistant for academic study support.",
+        "Always answer in the same language as the user's question.",
+        hasContext
+            ? "Use only the provided document context; if information is missing, explicitly say it is not in the documents."
+            : "No document context is available; provide a general best-effort answer and clearly mention it is not document-grounded.",
+        "Be concise, accurate, and avoid hallucinations.",
+        "When possible, provide actionable steps or examples for students.",
+    ].join("\n");
+}
+
+async function callLLM({ hasContext, context, question }) {
+    const configs = getChatProviderConfigs();
+    const userMessage = hasContext
+        ? `Document context:\n---\n${context}\n---\n\nQuestion: ${question}`
+        : `Question: ${question}`;
+    let lastErr = null;
+
+    for (const cfg of configs) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+        try {
+            const headers = {
+                Authorization: `Bearer ${cfg.apiKey}`,
+                "Content-Type": "application/json",
+            };
+
+            if (cfg.provider === "openrouter") {
+                headers["HTTP-Referer"] = "http://localhost";
+                headers["X-Title"] = "EduMate BE Chat";
+            }
+
+            const resp = await fetch(cfg.endpoint, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    model: cfg.model,
+                    temperature: 0.2,
+                    max_tokens: 1000,
+                    messages: [
+                        { role: "system", content: buildSystemPrompt(hasContext) },
+                        { role: "user", content: userMessage },
+                    ],
+                }),
+                signal: controller.signal,
+            });
+
+            if (!resp.ok) {
+                const detail = await resp.text().catch(() => "");
+                const err = new Error(`LLM Error: ${resp.status} ${resp.statusText}${detail ? ` - ${detail.slice(0, 300)}` : ""}`);
+                err.status = resp.status;
+                throw err;
+            }
+
+            const data = await resp.json();
+            const text = data?.choices?.[0]?.message?.content || "";
+            if (text && String(text).trim()) return text;
+            throw new Error("LLM returned empty content.");
+        } catch (err) {
+            lastErr = err;
+            const status = Number(err?.status);
+            const msg = String(err?.message || "").toLowerCase();
+            const shouldTryNext =
+                status === 401 || status === 402 || status === 403 || status === 429 ||
+                msg.includes("insufficient_quota") || msg.includes("rate limit");
+            if (!shouldTryNext) throw err;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    throw lastErr || new Error("All AI providers failed.");
 }
 
 /**
@@ -45,8 +134,15 @@ async function callLLM(systemPrompt, userMessage) {
  */
 const askQuestion = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = resolveChatUserId(req);
         const { question, s3Key, sessionId } = req.body;
+
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Missing user identity. Provide token or userId.",
+            });
+        }
 
         if (!question || !question.trim()) {
             return res.status(400).json({ success: false, message: "Question is required." });
@@ -93,22 +189,16 @@ const askQuestion = async (req, res) => {
 
         // 4. Call LLM with RAG context
         let answer;
-        if (context.trim()) {
-            const systemPrompt = [
-                "You are EduMate AI Assistant, an academic Q&A system.",
-                "Answer the user's question based ONLY on the provided document context.",
-                "If the context does not contain enough information, clearly state that you cannot answer based on the available documents.",
-                "Provide exact references to the source material when possible.",
-                "Answer in the same language as the user's question.",
-                "Do NOT make up information. Zero hallucination tolerance.",
-            ].join("\n");
-
-            const userMsg = `Context from verified documents:\n---\n${context}\n---\n\nQuestion: ${question.trim()}`;
-            answer = await callLLM(systemPrompt, userMsg);
-        } else {
-            // No context found
-            answer = "I could not find relevant information in the verified documents to answer your question. " +
-                "Please try rephrasing your question or ensure the relevant document has been uploaded and verified.";
+        const hasContext = context.trim().length > 0;
+        answer = await callLLM({
+            hasContext,
+            context,
+            question: question.trim(),
+        });
+        if (!answer || !answer.trim()) {
+            answer = hasContext
+                ? "I found document context but could not generate an answer at this time. Please try again."
+                : "I could not generate a response right now. Please try again.";
         }
 
         // 5. Save assistant message
