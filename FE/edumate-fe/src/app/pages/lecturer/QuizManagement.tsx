@@ -20,6 +20,36 @@ import api, { getApiErrorMessage } from '@/services/api';
 import { useNotification } from '../NotificationContext';
 const LETTERS = ['A', 'B', 'C', 'D'];
 
+function resolveCorrectAnswerIndex(options: string[], rawCorrect: unknown): number {
+    const normalizedOptions = (Array.isArray(options) ? options : []).map((x) => String(x ?? ''));
+    if (!normalizedOptions.length) return 0;
+
+    const raw = String(rawCorrect ?? '').trim();
+    if (!raw) return 0;
+
+    const upper = raw.toUpperCase();
+    const firstChar = upper.slice(0, 1);
+    const letterIdx = LETTERS.indexOf(firstChar);
+    if (letterIdx >= 0 && letterIdx < normalizedOptions.length) return letterIdx;
+
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) {
+        // Accept both 0-based and 1-based inputs.
+        if (numeric >= 0 && numeric < normalizedOptions.length) return numeric;
+        if (numeric >= 1 && numeric <= normalizedOptions.length) return numeric - 1;
+    }
+
+    const byExactText = normalizedOptions.findIndex((opt) => String(opt).trim() === raw);
+    if (byExactText >= 0) return byExactText;
+
+    const byInsensitiveText = normalizedOptions.findIndex(
+        (opt) => String(opt).trim().toLowerCase() === raw.toLowerCase()
+    );
+    if (byInsensitiveText >= 0) return byInsensitiveText;
+
+    return 0;
+}
+
 /** Display label for upload `documents.category` (Document Type), not course code. */
 function formatDocumentTypeLabel(raw: string | undefined | null): string {
     const s = String(raw ?? '').trim();
@@ -48,8 +78,6 @@ function normalizeMaterialCategoryKey(
 
 type QbCategoryFilter = 'all' | 'general' | 'general-major' | 'specialized' | 'uncategorized';
 
-/** Dedupes document→AI bootstrap when React Strict Mode remounts; each user click uses a fresh `nonce`. */
-const processedInitialAiDocumentNonces = new Set<number>();
 
 interface Quiz {
     id: number;
@@ -111,8 +139,7 @@ function mapQuizDetailRowsToQuestions(rows: any[], subject: string, linkQuizId: 
         if (optObj && typeof optObj === 'object' && !Array.isArray(optObj)) {
             opts = LETTERS.map((L) => String(optObj[L] ?? ''));
         }
-        const letter = String(q.correct_answer || 'A').toUpperCase().trim().slice(0, 1) || 'A';
-        const ci = Math.max(0, LETTERS.indexOf(letter));
+        const ci = resolveCorrectAnswerIndex(opts, q?.correct_answer ?? q?.correctAnswer);
         const id = quizSnapshotQuestionId(q.question_id, idx, base);
         return {
             id,
@@ -245,8 +272,9 @@ export function QuizManagement({ user, initialAiDocument, onInitialAiDocumentCon
     const [loadingQuestionBank, setLoadingQuestionBank] = useState(false);
     const [loadingAnalytics, setLoadingAnalytics] = useState(false);
     const [viewQuizLoading, setViewQuizLoading] = useState(false);
+    const [highlightedS3Key, setHighlightedS3Key] = useState('');
+    const quizCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
     const viewQuizFetchSeq = useRef(0);
-    const handleGenerateAndEditWithAIRef = useRef<(quiz: Quiz) => Promise<void>>(async () => {});
     const [analytics, setAnalytics] = useState<AnalyticsState>({
         summary: {
             totalQuizzes: 0,
@@ -601,7 +629,7 @@ export function QuizManagement({ user, initialAiDocument, onInitialAiDocumentCon
             const opts = Array.isArray(q.options) && q.options.length
                 ? q.options
                 : ['Option A', 'Option B', 'Option C', 'Option D'];
-            const correctIdx = Math.max(0, opts.findIndex((x) => String(x) === String(q.correctAnswer || '')));
+            const correctIdx = resolveCorrectAnswerIndex(opts, q?.correctAnswer);
             return {
                 question: q.question,
                 options: {
@@ -839,11 +867,13 @@ export function QuizManagement({ user, initialAiDocument, onInitialAiDocumentCon
                 : optionsFromArray.length
                     ? optionsFromArray
                     : optionsFromFlatFields).map((x: any) => String(x));
-            const correctLetter = String(q?.correct_answer || 'A').toUpperCase();
-            const correctAnswerIdx = Math.max(0, LETTERS.indexOf(correctLetter));
             const normalizedOptions = options.length
                 ? options.map((x: any) => String(x))
                 : ['Option A', 'Option B', 'Option C', 'Option D'];
+            const correctAnswerIdx = resolveCorrectAnswerIndex(
+                normalizedOptions,
+                q?.correct_answer ?? q?.correctAnswer
+            );
             const rawPid = q?.id ?? q?.question_id;
             const id = quizSnapshotQuestionId(rawPid, idx, Date.now());
             return {
@@ -1076,42 +1106,22 @@ export function QuizManagement({ user, initialAiDocument, onInitialAiDocumentCon
         }
     };
 
-    handleGenerateAndEditWithAIRef.current = handleGenerateAndEditWithAI;
-
     useEffect(() => {
         const rawKey = initialAiDocument?.s3Key?.trim();
-        const nonce = initialAiDocument?.nonce;
-        if (!rawKey) {
-            return;
-        }
-        if (nonce != null && processedInitialAiDocumentNonces.has(nonce)) {
-            return;
-        }
+        if (!rawKey) return;
+        setActiveTab('all');
+        setHighlightedS3Key(rawKey);
+        const timer = window.setTimeout(() => setHighlightedS3Key(''), 8000);
+        onInitialAiDocumentConsumed?.();
+        return () => window.clearTimeout(timer);
+    }, [initialAiDocument, onInitialAiDocumentConsumed]);
 
-        const match = quizzes.find((q) => String(q.s3Key || '').trim() === rawKey);
-        const fallback: Quiz = {
-            id: -Math.abs((Date.now() % 900000000) + 1000000),
-            title: initialAiDocument!.title || 'Quiz',
-            subject: String(initialAiDocument!.courseCode || 'DOC'),
-            documentTypeLabel: '',
-            documentId: initialAiDocument!.documentId,
-            s3Key: rawKey,
-            status: 'draft',
-            questions: Array.from({ length: 10 }),
-            duration: 10,
-            passPercentage: 70,
-            attemptsAllowed: '1',
-            participants: 0,
-            averageScore: 0,
-            createdDate: new Date().toISOString().slice(0, 10),
-        };
-        const quiz: Quiz = match ?? fallback;
-
-        if (nonce != null) {
-            processedInitialAiDocumentNonces.add(nonce);
-        }
-        void handleGenerateAndEditWithAIRef.current(quiz);
-    }, [initialAiDocument, quizzes]);
+    useEffect(() => {
+        if (!highlightedS3Key || loadingCloudData) return;
+        const target = quizCardRefs.current[highlightedS3Key];
+        if (!target) return;
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, [highlightedS3Key, filteredQuizzes, loadingCloudData]);
 
     const resetQuizForm = () => {
         setQuizForm({
@@ -1818,7 +1828,19 @@ export function QuizManagement({ user, initialAiDocument, onInitialAiDocumentCon
                     </div>
                 ) : (
                     filteredQuizzes.map((quiz) => (
-                        <div key={quiz.id} className="bg-white rounded-lg border border-gray-200 p-6 hover:shadow-md transition-shadow">
+                        <div
+                            key={quiz.id}
+                            ref={(el) => {
+                                const key = String(quiz.s3Key || '').trim();
+                                if (!key) return;
+                                quizCardRefs.current[key] = el;
+                            }}
+                            className={`bg-white rounded-lg border p-6 hover:shadow-md transition-shadow ${
+                                highlightedS3Key && String(quiz.s3Key || '').trim() === highlightedS3Key
+                                    ? 'border-blue-500 ring-2 ring-blue-200'
+                                    : 'border-gray-200'
+                            }`}
+                        >
                             <div className="flex items-start justify-between mb-4">
                                 <div className="flex-1">
                                     <div className="flex items-center gap-3 mb-2">

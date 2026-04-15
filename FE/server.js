@@ -471,6 +471,86 @@ app.get("/api/documents/recent", (req, res) => {
   });
 });
 
+function findRecentUploadByRef(documentIdRaw, s3KeyRaw) {
+  const s3Key = String(s3KeyRaw || "").trim();
+  if (documentIdRaw != null && String(documentIdRaw).trim() !== "") {
+    const id = Number(documentIdRaw);
+    if (Number.isFinite(id)) {
+      const byId = recentUploads.find((d) => Number(d.id) === id);
+      if (byId) return byId;
+    }
+  }
+  if (s3Key) {
+    const base = path.basename(s3Key);
+    const byKey = recentUploads.find(
+      (d) =>
+        String(d.storedFileName || "") === s3Key ||
+        String(d.storedFileName || "") === base
+    );
+    if (byKey) return byKey;
+  }
+  return null;
+}
+
+/**
+ * Preview metadata for FE. `url` is intended for inline rendering.
+ * - pdf: open directly in iframe
+ * - doc/docx: FE should render via Google Docs Viewer wrapper to avoid browser auto-download.
+ */
+app.get("/api/documents/preview", (req, res) => {
+  const documentId = req.query.documentId ?? req.query.document_id;
+  const s3Key = req.query.s3Key ?? req.query.s3_key ?? req.query.key;
+  const doc = findRecentUploadByRef(documentId, s3Key);
+  if (!doc) {
+    return res.status(404).json({ success: false, message: "Document not found." });
+  }
+
+  const safeName = path.basename(String(doc.storedFileName || ""));
+  const filePath = path.join(uploadDir, safeName);
+  if (!safeName || !fs.existsSync(filePath)) {
+    return res.status(404).json({ success: false, message: "File not found on server." });
+  }
+
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  const url = `${baseUrl}/uploads/${encodeURIComponent(safeName)}`;
+  const ext = path.extname(safeName).toLowerCase();
+  const isWord = ext === ".doc" || ext === ".docx";
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      documentId: doc.id,
+      s3Key: doc.storedFileName,
+      originalFileName: doc.originalFileName,
+      mimeType: doc.fileType || null,
+      extension: ext.replace(".", ""),
+      isWord,
+      url,
+      // Keep FE description fallback behavior intact.
+      description: String(doc.description || ""),
+    },
+  });
+});
+
+app.get("/api/documents/download-file", (req, res) => {
+  const documentId = req.query.documentId ?? req.query.document_id;
+  const s3Key = req.query.s3Key ?? req.query.s3_key;
+  const doc = findRecentUploadByRef(documentId, s3Key);
+  if (!doc) {
+    return res.status(404).json({ success: false, message: "Document not found." });
+  }
+
+  const safeName = path.basename(String(doc.storedFileName || ""));
+  const filePath = path.join(uploadDir, safeName);
+  if (!safeName || !fs.existsSync(filePath)) {
+    return res.status(404).json({ success: false, message: "File not found on server." });
+  }
+
+  doc.downloads = toNum(doc.downloads, 0) + 1;
+  const downloadName = String(doc.originalFileName || safeName).trim() || safeName;
+  return res.download(filePath, downloadName);
+});
+
 /**
  * Documents list for the Quiz screen.
  * FE expects `s3Key` and uses it when calling /api/quiz/generate.

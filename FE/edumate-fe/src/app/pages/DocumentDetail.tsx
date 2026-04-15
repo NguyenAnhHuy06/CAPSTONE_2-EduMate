@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Download,
@@ -6,6 +6,9 @@ import {
   Sparkles,
   Send,
   CheckCircle,
+  ExternalLink,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react';
 import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator } from '../pages/FlashcardCreator';
@@ -13,6 +16,10 @@ import { FlashcardViewer } from '../pages/student/FlashcardViewer';
 import { AIChatPanel } from './AIChatPanel';
 import api from '@/services/api';
 import { useNotification } from './NotificationContext';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
 interface DocumentDetailProps {
   document: any;
@@ -89,6 +96,26 @@ export function DocumentDetail({
 
   const [docStatus, setDocStatus] = useState(document?.status || 'pending');
   const [isVerifying, setIsVerifying] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [previewRetry, setPreviewRetry] = useState(0);
+  const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
+  const [pdfPage, setPdfPage] = useState(1);
+  const [pdfTotalPages, setPdfTotalPages] = useState(0);
+  const [pdfRendering, setPdfRendering] = useState(false);
+  const [pdfRenderError, setPdfRenderError] = useState('');
+  const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const fileName = String(document?.s3Key || document?.storedFileName || document?.originalFileName || '');
+  const fileExt = fileName.includes('.') ? fileName.split('.').pop()?.toLowerCase() || '' : '';
+  const isPdfPreview = fileExt === 'pdf';
+  const isWordPreview = ['doc', 'docx', 'docm', 'dotx', 'dotm'].includes(fileExt);
+  const canInlinePreview = isPdfPreview || isWordPreview;
+  const trustedBadgeVisible =
+    !!document.isLecturerUpload ||
+    !!document.highCredibility ||
+    (document.authorRole === 'instructor' && document.highCredibility !== false);
 
   const documentRefKey = useCallback(() => {
     const documentId = document?.documentId ?? document?.id;
@@ -194,6 +221,129 @@ export function DocumentDetail({
       cancelled = true;
     };
   }, [document?.documentId, document?.id, document?.s3Key, document?.uploadDescription]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPreviewUrl = async () => {
+      if (!canInlinePreview) {
+        setPreviewUrl('');
+        setPreviewError('');
+        return;
+      }
+      const did = document?.documentId ?? document?.id;
+      const sk = String(document?.s3Key || '').trim();
+      const num =
+        did != null && did !== '' && Number.isFinite(Number(did)) ? Number(did) : null;
+      const params =
+        num != null ? { documentId: num } : sk ? { s3Key: sk } : {};
+      if (!Object.keys(params).length) {
+        setPreviewUrl('');
+        setPreviewError('Preview is not available for this file.');
+        return;
+      }
+
+      setPreviewLoading(true);
+      setPreviewError('');
+      try {
+        const res: any = await api.get('/documents/preview', { params });
+        if (cancelled) return;
+        const data = res?.data || {};
+        const urlCandidates = [
+          data?.url,
+          data?.previewUrl,
+          data?.previewFileUrl,
+          data?.viewerUrl,
+          data?.fileUrl,
+          data?.sourceFileUrl,
+        ];
+        const url = String(urlCandidates.find((v) => typeof v === 'string' && String(v).trim()) || '').trim();
+        if (!url) {
+          setPreviewUrl('');
+          setPreviewError('Could not load preview. Try downloading the file.');
+          return;
+        }
+        setPreviewUrl(url);
+      } catch {
+        if (!cancelled) {
+          setPreviewUrl('');
+          setPreviewError('Could not load preview right now.');
+        }
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    };
+
+    void loadPreviewUrl();
+    return () => {
+      cancelled = true;
+    };
+  }, [canInlinePreview, document?.documentId, document?.id, document?.s3Key, previewRetry]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPdfDocument = async () => {
+      if (!isPdfPreview || !previewUrl || previewLoading || !!previewError) {
+        setPdfDoc(null);
+        setPdfTotalPages(0);
+        setPdfPage(1);
+        return;
+      }
+      try {
+        const task = pdfjsLib.getDocument(previewUrl);
+        const doc = await task.promise;
+        if (cancelled) return;
+        setPdfDoc(doc);
+        setPdfTotalPages(doc.numPages || 0);
+        setPdfPage(1);
+        setPdfRenderError('');
+      } catch {
+        if (!cancelled) {
+          setPdfDoc(null);
+          setPdfTotalPages(0);
+          setPdfRenderError('Could not render this PDF in browser preview.');
+        }
+      }
+    };
+
+    void loadPdfDocument();
+    return () => {
+      cancelled = true;
+    };
+  }, [isPdfPreview, previewUrl, previewLoading, previewError]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const renderPdfPage = async () => {
+      if (!isPdfPreview || !pdfDoc || !pdfCanvasRef.current) return;
+      setPdfRendering(true);
+      setPdfRenderError('');
+      try {
+        const page = await pdfDoc.getPage(pdfPage);
+        if (cancelled || !pdfCanvasRef.current) return;
+        const viewport = page.getViewport({ scale: 1.25 });
+        const canvas = pdfCanvasRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Canvas context not available');
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        await page.render({ canvasContext: ctx, viewport }).promise;
+      } catch {
+        if (!cancelled) {
+          setPdfRenderError('Could not render this PDF page.');
+        }
+      } finally {
+        if (!cancelled) setPdfRendering(false);
+      }
+    };
+
+    void renderPdfPage();
+    return () => {
+      cancelled = true;
+    };
+  }, [isPdfPreview, pdfDoc, pdfPage]);
 
   const handleOpenQuizFlow = () => {
     if (onCreateQuizWithAi) {
@@ -426,9 +576,7 @@ export function DocumentDetail({
           <div className="flex-1">
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               <h2>{document.title}</h2>
-              {(!!document.isLecturerUpload ||
-                !!document.highCredibility ||
-                (document.authorRole === 'instructor' && document.highCredibility !== false)) && (
+              {trustedBadgeVisible && (
                 <span
                   className="inline-flex items-center gap-1 bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-xs font-medium"
                   title="Uploaded by course staff — marked as reliable"
@@ -437,7 +585,7 @@ export function DocumentDetail({
                   Verified
                 </span>
               )}
-              {docStatus && (
+              {docStatus && !(docStatus === 'verified' && trustedBadgeVisible) && (
                 <span
                   className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold ${
                     docStatus === 'verified'
@@ -448,7 +596,7 @@ export function DocumentDetail({
                   }`}
                 >
                   {docStatus === 'verified'
-                    ? 'Admin verified'
+                    ? 'Verified'
                     : docStatus === 'rejected'
                       ? 'Rejected'
                       : 'Pending verification'}
@@ -578,6 +726,135 @@ export function DocumentDetail({
             </div>
           )}
         </div>
+      </div>
+
+      <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3>Document preview</h3>
+          {previewUrl ? (
+            <a
+              href={previewUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline"
+            >
+              <ExternalLink size={14} />
+              Open in new tab
+            </a>
+          ) : null}
+        </div>
+
+        {!canInlinePreview ? (
+          <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
+            <p className="text-gray-700">Preview is not supported for this file type.</p>
+            <p className="text-gray-500 text-sm mt-1">Use Download to view the file.</p>
+          </div>
+        ) : previewLoading ? (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 h-[560px] flex items-center justify-center">
+            <div className="flex items-center gap-2 text-gray-600">
+              <Loader2 size={18} className="animate-spin" />
+              <span>Loading preview…</span>
+            </div>
+          </div>
+        ) : previewError ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 p-6">
+            <div className="flex items-start gap-2 text-red-700">
+              <AlertCircle size={18} className="mt-0.5" />
+              <div>
+                <p className="font-medium">Preview unavailable</p>
+                <p className="text-sm mt-1">{previewError}</p>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPreviewRetry((x) => x + 1)}
+                className="px-3 py-1.5 text-sm bg-white border border-red-300 text-red-700 rounded hover:bg-red-100"
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDownload()}
+                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              >
+                Download instead
+              </button>
+            </div>
+          </div>
+        ) : previewUrl ? (
+          <div className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50 h-[560px]">
+            {isWordPreview ? (
+              <iframe
+                src={previewUrl || undefined}
+                title={`${document?.title || 'Document'} preview`}
+                className="w-full h-full border-0"
+                loading="lazy"
+              />
+            ) : (
+              <div className="h-full flex flex-col">
+                <div className="px-3 py-2 border-b border-gray-200 bg-white flex items-center justify-between text-sm">
+                  <span className="text-gray-700">
+                    PDF page {pdfTotalPages ? `${pdfPage} / ${pdfTotalPages}` : '—'}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPdfPage((p) => Math.max(1, p - 1))}
+                      disabled={pdfRendering || pdfPage <= 1}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Prev
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPdfPage((p) => Math.min(pdfTotalPages || 1, p + 1))}
+                      disabled={pdfRendering || pdfPage >= (pdfTotalPages || 1)}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-auto p-3 flex items-start justify-center">
+                  {pdfRenderError ? (
+                    <div className="text-red-700 text-sm">{pdfRenderError}</div>
+                  ) : (
+                    <canvas ref={pdfCanvasRef} className="max-w-full h-auto bg-white shadow-sm" />
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-6">
+            <div className="flex items-start gap-2 text-amber-800">
+              <AlertCircle size={18} className="mt-0.5" />
+              <div>
+                <p className="font-medium">Preview is not ready</p>
+                <p className="text-sm mt-1">
+                  The server did not return a valid preview URL yet. Please retry or download the file.
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPreviewRetry((x) => x + 1)}
+                className="px-3 py-1.5 text-sm bg-white border border-amber-300 text-amber-800 rounded hover:bg-amber-100"
+              >
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDownload()}
+                className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+              >
+                Download instead
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {showAIChat && (
