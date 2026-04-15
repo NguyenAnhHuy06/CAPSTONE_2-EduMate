@@ -903,6 +903,7 @@ async function buildDocumentsForQuizList(options = {}) {
       documentType,
       courseId: m?.course_id ?? null,
       documentId: m?.document_id ?? null,
+      uploaderId: m?.uploader_id ?? null,
       uploaderName,
       uploaderRole,
       highCredibility,
