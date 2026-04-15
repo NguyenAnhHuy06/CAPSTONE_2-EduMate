@@ -1,152 +1,139 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle } from 'lucide-react';
-import { DocumentDetail } from '../pages/DocumentDetail';
-import api from '@/services/api';
-import { useNotification } from '../pages/NotificationContext';
+import { useEffect, useMemo, useState } from 'react'
+import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle } from 'lucide-react'
+import { DocumentDetail } from '../pages/DocumentDetail'
+import api from '@/services/api'
+import { useNotification } from '../pages/NotificationContext'
 
 interface DocumentLibraryProps {
-  userRole: 'instructor' | 'student';
-  user: any;
-  /** Instructor: open Quizzes tab and run the same AI generate flow as Quiz Management. */
-  onInstructorCreateQuizWithAi?: (doc: CourseMaterialDoc) => void;
+  userRole: 'instructor' | 'student'
+  user: any
+  onInstructorCreateQuizWithAi?: (doc: CourseMaterialDoc) => void
 }
 
 export type CourseMaterialDoc = {
-  id: string | number;
-  title: string;
-  type: 'general' | 'general-major' | 'specialized';
-  courseCode: string;
-  courseName: string;
-  author: string;
-  authorRole: 'instructor' | 'student';
-  uploadDate: string;
-  /** Successful file downloads (tracked server-side) */
-  downloads: number;
-  comments: number;
-  /** Indexed segments (honest proxy for “visibility” / processing depth) */
-  views: number;
-  /** List card / material status blurb (indexing info). */
-  description: string;
-  /** User-written description from upload form (shown in document detail preview). */
-  uploadDescription?: string;
-  s3Key?: string;
-  fileUrl?: string;
-  documentId?: number | null;
-  chunkCount?: number;
-  attemptsCount?: number;
-  inDatabase?: boolean;
-  estimatedQuestions?: number;
-  /** Lecturer/teacher uploads — shown as credibility badge */
-  highCredibility: boolean;
-  /** Distinct “Lecturer” tag for staff uploads (role lecturer/teacher/instructor/…) */
-  isLecturerUpload: boolean;
-  /** Upload `category` (general / general-major / specialized), for filtering */
-  categoryKey: 'general' | 'general-major' | 'specialized' | 'uncategorized';
-};
+  id: string | number
+  title: string
+  type: 'general' | 'general-major' | 'specialized'
+  courseCode: string
+  courseName: string
+  author: string
+  authorRole: 'instructor' | 'student'
+  uploadDate: string
+  downloads: number
+  comments: number
+  views: number
+  description: string
+  uploadDescription?: string
+  s3Key?: string
+  fileUrl?: string
+  documentId?: number | null
+  chunkCount?: number
+  attemptsCount?: number
+  inDatabase?: boolean
+  estimatedQuestions?: number
+  highCredibility: boolean
+  isLecturerUpload: boolean
+  categoryKey: 'general' | 'general-major' | 'specialized' | 'uncategorized'
+  status?: string
+}
 
 function formatYmd(value: string | Date | undefined | null): string {
-  if (value == null || value === '') return '—';
-  const d = value instanceof Date ? value : new Date(value);
-  if (!Number.isFinite(d.getTime())) return '—';
-  return d.toISOString().slice(0, 10);
+  if (value == null || value === '') return '—'
+  const d = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(d.getTime())) return '—'
+  return d.toISOString().slice(0, 10)
 }
 
 function deriveMaterialType(api: any): 'general' | 'general-major' | 'specialized' {
-  const chunks = Number(api.chunkCount || 0);
-  const inDb = !!api.inDatabase;
-  if (inDb && chunks >= 10) return 'specialized';
-  if (inDb && chunks >= 4) return 'general-major';
-  return 'general';
+  const chunks = Number(api.chunkCount || 0)
+  const inDb = !!api.inDatabase
+  if (inDb && chunks >= 10) return 'specialized'
+  if (inDb && chunks >= 4) return 'general-major'
+  return 'general'
 }
 
-/** Matches upload form `category`: general | general-major | specialized */
 function mapCategoryToDocType(category: unknown): 'general' | 'general-major' | 'specialized' | null {
   const c = String(category ?? '')
     .trim()
     .toLowerCase()
-    .replace(/_/g, '-');
-  if (c === 'general-major') return 'general-major';
-  if (c === 'specialized') return 'specialized';
-  if (c === 'general') return 'general';
-  return null;
+    .replace(/_/g, '-')
+  if (c === 'general-major') return 'general-major'
+  if (c === 'specialized') return 'specialized'
+  if (c === 'general') return 'general'
+  return null
 }
 
-/** Bucket for upload `documents.category` (filter bar). */
 function normalizeMaterialCategoryKeyFromApi(
   raw: unknown
 ): 'general' | 'general-major' | 'specialized' | 'uncategorized' {
   const c = String(raw ?? '')
     .trim()
     .toLowerCase()
-    .replace(/_/g, '-');
-  if (!c) return 'uncategorized';
-  if (c === 'general-major' || c === 'general major') return 'general-major';
-  if (c === 'specialized' || c === 'specialised') return 'specialized';
-  if (c === 'general') return 'general';
-  return 'uncategorized';
+    .replace(/_/g, '-')
+  if (!c) return 'uncategorized'
+  if (c === 'general-major' || c === 'general major') return 'general-major'
+  if (c === 'specialized' || c === 'specialised') return 'specialized'
+  if (c === 'general') return 'general'
+  return 'uncategorized'
 }
 
 function mapUploaderRole(roleRaw: string | undefined): 'instructor' | 'student' {
-  const u = String(roleRaw || '').toUpperCase();
-  if (u.includes('STUDENT')) return 'student';
-  return 'instructor';
+  const u = String(roleRaw || '').toUpperCase()
+  if (u.includes('STUDENT')) return 'student'
+  return 'instructor'
 }
 
-/** Drop synthetic "Course CODE" when it duplicates `courseCode` from `course_id`. */
 function normalizeCourseName(courseCode: string, subjectName: string): string {
-  const code = String(courseCode || '').trim();
-  const raw = String(subjectName || '').trim();
-  if (!raw) return '';
-  const lower = raw.toLowerCase();
-  if (code && (lower === code.toLowerCase() || lower === `course ${code}`.toLowerCase())) return '';
-  return raw;
+  const code = String(courseCode || '').trim()
+  const raw = String(subjectName || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  if (code && (lower === code.toLowerCase() || lower === `course ${code}`.toLowerCase())) return ''
+  return raw
 }
 
-/** Align with backend `LECTURER_ROLES` / `isLecturerRole` (LECTURER, INSTRUCTOR, …). */
 function isLecturerUploaderRole(roleRaw: string | undefined): boolean {
-  const r = String(roleRaw || '').trim().toLowerCase();
-  if (!r || r === 'student') return false;
-  const allowed = new Set(['lecturer', 'teacher', 'instructor', 'faculty', 'admin', 'lecture']);
-  if (allowed.has(r)) return true;
-  if (r.includes('lectur') || r.includes('instruct')) return true;
-  return false;
+  const r = String(roleRaw || '').trim().toLowerCase()
+  if (!r || r === 'student') return false
+  const allowed = new Set(['lecturer', 'teacher', 'instructor', 'faculty', 'admin', 'lecture'])
+  if (allowed.has(r)) return true
+  if (r.includes('lectur') || r.includes('instruct')) return true
+  return false
 }
 
-function mapApiRowToDoc(api: any): CourseMaterialDoc {
-  const courseCode = String(api.courseCode || '').trim();
-  const courseName = normalizeCourseName(courseCode, String(api.subjectName || ''));
-  const chunkCount = Number(api.chunkCount || 0);
-  const attemptsCount = Number(api.attemptsCount || 0);
-  const downloadCount = Number(api.downloadCount ?? 0);
-  const uploaderName = String(api.uploaderName || '').trim();
-  const author = uploaderName || 'Unknown uploader';
-  const authorRole = mapUploaderRole(api.uploaderRole);
-  const lastMod = api.lastModified ?? api.created_at ?? api.uploadedAt;
-  const categoryKey = normalizeMaterialCategoryKeyFromApi(api.category);
-  const type =
-    mapCategoryToDocType(api.category) ?? deriveMaterialType(api);
-  const docId = api.documentId != null ? Number(api.documentId) : null;
-  const id = docId != null && Number.isFinite(docId) ? docId : String(api.s3Key || api.fileName || api.title);
+function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
+  const courseCode = String(apiRow.courseCode || '').trim()
+  const courseName = normalizeCourseName(courseCode, String(apiRow.subjectName || ''))
+  const chunkCount = Number(apiRow.chunkCount || 0)
+  const attemptsCount = Number(apiRow.attemptsCount || 0)
+  const downloadCount = Number(apiRow.downloadCount ?? 0)
+  const uploaderName = String(apiRow.uploaderName || '').trim()
+  const author = uploaderName || 'Unknown uploader'
+  const authorRole = mapUploaderRole(apiRow.uploaderRole)
+  const lastMod = apiRow.lastModified ?? apiRow.created_at ?? apiRow.uploadedAt
+  const categoryKey = normalizeMaterialCategoryKeyFromApi(apiRow.category)
+  const type = mapCategoryToDocType(apiRow.category) ?? deriveMaterialType(apiRow)
+  const docId = apiRow.documentId != null ? Number(apiRow.documentId) : null
+  const id = docId != null && Number.isFinite(docId) ? docId : String(apiRow.s3Key || apiRow.fileName || apiRow.title)
 
   const description =
     chunkCount > 0
       ? `Indexed learning material with ${chunkCount} text segment${chunkCount === 1 ? '' : 's'}. Suitable for AI quizzes and study.`
-      : api.inDatabase
+      : apiRow.inDatabase
         ? 'Registered in the system; indexing may still be running.'
-        : 'File in cloud storage; connect and index this document to enable AI features.';
+        : 'File in cloud storage; connect and index this document to enable AI features.'
 
-  const uploadDescription = String(api.description || '').trim();
-
-  const uploaderRoleStr = String(api.uploaderRole || '').trim();
+  const uploadDescription = String(apiRow.description || '').trim()
+  const uploaderRoleStr = String(apiRow.uploaderRole || '').trim()
   const highCredibility =
-    typeof api.highCredibility === 'boolean'
-      ? api.highCredibility
-      : isLecturerUploaderRole(api.uploaderRole);
-  const isLecturerUpload = isLecturerUploaderRole(uploaderRoleStr) || highCredibility;
+    typeof apiRow.highCredibility === 'boolean'
+      ? apiRow.highCredibility
+      : isLecturerUploaderRole(apiRow.uploaderRole)
+  const isLecturerUpload = isLecturerUploaderRole(uploaderRoleStr) || highCredibility
 
   return {
     id,
-    title: String(api.title || api.fileName || 'Untitled document'),
+    title: String(apiRow.title || apiRow.fileName || 'Untitled document'),
     type,
     courseCode,
     courseName,
@@ -154,79 +141,80 @@ function mapApiRowToDoc(api: any): CourseMaterialDoc {
     authorRole,
     uploadDate: formatYmd(lastMod),
     downloads: downloadCount,
-    comments: Number(api.commentsCount ?? 0),
+    comments: Number(apiRow.commentsCount ?? 0),
     views: chunkCount,
     description,
     uploadDescription: uploadDescription || undefined,
-    s3Key: api.s3Key,
-    fileUrl: api.fileUrl,
+    s3Key: apiRow.s3Key,
+    fileUrl: apiRow.fileUrl,
     documentId: docId,
     chunkCount,
     attemptsCount,
-    inDatabase: !!api.inDatabase,
-    estimatedQuestions: api.estimatedQuestions,
+    inDatabase: !!apiRow.inDatabase,
+    estimatedQuestions: apiRow.estimatedQuestions,
     highCredibility,
     isLecturerUpload,
     categoryKey,
-  };
+    status: apiRow.status,
+  }
 }
 
 export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }: DocumentLibraryProps) {
-  const { showNotification } = useNotification();
-  const [searchQuery, setSearchQuery] = useState('');
+  const { showNotification } = useNotification()
+  const [searchQuery, setSearchQuery] = useState('')
   const [categoryFilter, setCategoryFilter] = useState<
     'all' | 'general' | 'general-major' | 'specialized' | 'uncategorized'
-  >('all');
-  const [selectedDocument, setSelectedDocument] = useState<CourseMaterialDoc | null>(null);
-  const [documents, setDocuments] = useState<CourseMaterialDoc[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadMessage, setLoadMessage] = useState<string | null>(null);
+  >('all')
+  const [selectedDocument, setSelectedDocument] = useState<CourseMaterialDoc | null>(null)
+  const [documents, setDocuments] = useState<CourseMaterialDoc[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadMessage, setLoadMessage] = useState<string | null>(null)
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setLoadMessage(null);
+    let cancelled = false
+    ;(async () => {
+      setLoading(true)
+      setLoadMessage(null)
       try {
-        const res: any = await api.get('/documents/for-quiz');
-        const raw = Array.isArray(res?.data) ? res.data : [];
-        const mapped = raw.map(mapApiRowToDoc);
+        const res: any = await api.get('/documents/for-quiz')
+        const raw = Array.isArray(res?.data) ? res.data : []
+        const mapped = raw.map(mapApiRowToDoc)
         if (!cancelled) {
-          setDocuments(mapped);
-          if (raw.length === 0 && res?.message) setLoadMessage(String(res.message));
+          setDocuments(mapped)
+          if (raw.length === 0 && res?.message) setLoadMessage(String(res.message))
         }
       } catch {
         if (!cancelled) {
-          setDocuments([]);
-          setLoadMessage('Could not load course materials. Please try again later.');
+          setDocuments([])
+          setLoadMessage('Could not load course materials. Please try again later.')
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setLoading(false)
       }
-    })();
+    })()
     return () => {
-      cancelled = true;
-    };
-  }, []);
+      cancelled = true
+    }
+  }, [])
 
   const filteredDocuments = useMemo(() => {
     return documents.filter((doc) => {
-      const q = searchQuery.toLowerCase().trim();
+      const q = searchQuery.toLowerCase().trim()
       const matchesSearch =
         !q ||
-        doc.title.toLowerCase().includes(q) ||
-        doc.courseCode.toLowerCase().includes(q) ||
-        doc.courseName.toLowerCase().includes(q);
+        (doc.title || '').toLowerCase().includes(q) ||
+        (doc.courseCode || '').toLowerCase().includes(q) ||
+        (doc.courseName || '').toLowerCase().includes(q)
 
       const matchesCategory =
         categoryFilter === 'all' ||
         (categoryFilter === 'uncategorized'
           ? doc.categoryKey === 'uncategorized'
-          : doc.categoryKey === categoryFilter);
+          : doc.categoryKey === categoryFilter)
 
-      return matchesSearch && matchesCategory;
-    });
-  }, [documents, searchQuery, categoryFilter]);
+      return matchesSearch && matchesCategory
+    })
+  }, [documents, searchQuery, categoryFilter])
 
   if (selectedDocument) {
     return (
@@ -238,21 +226,21 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
         onCreateQuizWithAi={
           userRole === 'instructor' && onInstructorCreateQuizWithAi
             ? () => {
-                const d = selectedDocument;
+                const d = selectedDocument
                 if (!String(d.s3Key || '').trim()) {
                   showNotification({
                     type: 'warning',
                     title: 'Create Quiz with AI',
                     message: 'This file has no storage key yet. Re-upload or wait for indexing, then try again.',
-                  });
-                  return;
+                  })
+                  return
                 }
-                onInstructorCreateQuizWithAi(d);
+                onInstructorCreateQuizWithAi(d)
               }
             : undefined
         }
       />
-    );
+    )
   }
 
   return (
@@ -261,7 +249,6 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
         <h2>Course Materials</h2>
       </div>
 
-      {/* Search and Filters */}
       <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6">
         <div className="flex flex-col md:flex-row gap-4">
           <div className="flex-1 relative">
@@ -280,11 +267,7 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
             <select
               aria-label="Filter by material category"
               value={categoryFilter}
-              onChange={(e) =>
-                setCategoryFilter(
-                  e.target.value as typeof categoryFilter
-                )
-              }
+              onChange={(e) => setCategoryFilter(e.target.value as typeof categoryFilter)}
               className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             >
               <option value="all">All categories</option>
@@ -309,7 +292,6 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
         </div>
       )}
 
-      {/* Documents List */}
       <div className="space-y-4">
         {filteredDocuments.map((doc) => (
           <div
@@ -355,7 +337,7 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
                     By {doc.author} ({doc.authorRole})
                   </span>
                   <span>•</span>
-                  <span>{doc.uploadDate}</span>
+                  <span>{doc.uploadDate || 'Unknown date'}</span>
                 </div>
               </div>
               <FileText className="text-blue-600 shrink-0" size={32} />
@@ -396,5 +378,5 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
         )}
       </div>
     </div>
-  );
+  )
 }

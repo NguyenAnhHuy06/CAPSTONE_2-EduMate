@@ -7,7 +7,7 @@ interface RegisterProps {
   onBackToLogin: () => void;
 }
 
-export function Register({ onRegister, onBackToLogin }: RegisterProps) {
+export function Register({ onBackToLogin }: RegisterProps) {
   const [role, setRole] = useState<'instructor' | 'student'>('student');
   const [formData, setFormData] = useState({
     fullName: '',
@@ -71,14 +71,11 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
           setErrors({ otpCode: 'OTP verification failed.' });
           return;
         }
-        const user = verifyRes?.data?.user || {
-          user_id: formData.id,
-          full_name: formData.fullName,
-          email: formData.email,
-          role: role === 'instructor' ? 'LECTURER' : 'STUDENT',
-        };
-        const appRole: 'instructor' | 'student' = role;
-        onRegister(appRole, user);
+      setMessage('OTP verified successfully. Please sign in.');
+      setStep('form');
+      setOtpCode('');
+      setErrors({});
+      onBackToLogin();
       } catch (err: any) {
         setErrors({ otpCode: String(err?.response?.data?.message || 'OTP verification failed.') });
       } finally {

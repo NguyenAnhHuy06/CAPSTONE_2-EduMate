@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react';
+import api from '../../../services/api';
 
 interface FlashcardViewerProps {
   document: any;
@@ -15,35 +16,50 @@ interface Flashcard {
 export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
+  const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  // Mock flashcards - in a real app, these would be generated or loaded
-  const flashcards: Flashcard[] = [
-    {
-      id: '1',
-      question: 'What is a Stack?',
-      answer: 'A linear data structure that follows the Last In First Out (LIFO) principle. Elements are added and removed from the same end called the top.',
-    },
-    {
-      id: '2',
-      question: 'Define Binary Search',
-      answer: 'An efficient algorithm for finding an item in a sorted array by repeatedly dividing the search interval in half. Time complexity: O(log n).',
-    },
-    {
-      id: '3',
-      question: 'What is a Hash Table?',
-      answer: 'A data structure that implements an associative array, mapping keys to values using a hash function. Average time complexity for operations: O(1).',
-    },
-    {
-      id: '4',
-      question: 'Explain Linked List',
-      answer: 'A linear data structure where elements (nodes) are connected using pointers. Each node contains data and a reference to the next node.',
-    },
-    {
-      id: '5',
-      question: 'What is Tree Traversal?',
-      answer: 'The process of visiting all nodes in a tree data structure. Common methods include In-order, Pre-order, Post-order, and Level-order traversal.',
-    },
-  ];
+  const documentId =
+  document?.documentId != null && Number.isFinite(Number(document.documentId))
+    ? Number(document.documentId)
+    : null;
+
+  useEffect(() => {
+    const loadFlashcards = async () => {
+      if (!documentId) {
+        setError('Missing document ID.');
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const res: any = await api.get(`/flashcards/document/${documentId}`);
+
+        if (res?.success === false) {
+          setError(res?.message || 'Could not load flashcards.');
+          setLoading(false);
+          return;
+        }
+
+        const rows = Array.isArray(res?.data) ? res.data : [];
+
+        const mapped: Flashcard[] = rows.map((card: any) => ({
+          id: String(card.flashcard_id),
+          question: String(card.front_text || ''),
+          answer: String(card.back_text || ''),
+        }));
+
+        setFlashcards(mapped);
+      } catch (err: any) {
+        setError(err?.response?.data?.message || err?.message || 'Could not load flashcards.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadFlashcards();
+  }, [documentId]);
 
   const handleFlip = () => {
     setIsFlipped(!isFlipped);
@@ -63,6 +79,63 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
     }
   };
 
+  if (loading) {
+    return (
+      <div>
+        <button
+          onClick={onBack}
+          className="flex items-center gap-2 text-blue-600 hover:text-blue-700 mb-6"
+        >
+          <ArrowLeft size={20} />
+          Back to Document
+        </button>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <p className="text-gray-600">Loading flashcards...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div>
+        <button
+          onClick={onBack}
+          className="flex items-center gap-2 text-blue-600 hover:text-blue-700 mb-6"
+        >
+          <ArrowLeft size={20} />
+          Back to Document
+        </button>
+
+        <div className="bg-white rounded-lg border border-red-200 p-6">
+          <p className="text-red-600">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!flashcards.length) {
+    return (
+      <div>
+        <button
+          onClick={onBack}
+          className="flex items-center gap-2 text-blue-600 hover:text-blue-700 mb-6"
+        >
+          <ArrowLeft size={20} />
+          Back to Document
+        </button>
+
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <h2 className="mb-2">Study Flashcards</h2>
+          <p className="text-gray-600">
+              No lecturer flashcards are available for: <span className="text-blue-600">{document?.title}</span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   const currentCard = flashcards[currentIndex];
 
   return (
@@ -79,15 +152,16 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
         <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">
           <h2 className="mb-2">Study Flashcards</h2>
           <p className="text-gray-600">
-            Studying: <span className="text-blue-600">{document.title}</span>
+            Studying: <span className="text-blue-600">{document?.title}</span>
           </p>
         </div>
 
-        {/* Progress Bar */}
         <div className="mb-6">
           <div className="flex items-center justify-between mb-2">
             <span className="text-gray-600">Progress</span>
-            <span className="text-gray-600">{currentIndex + 1} / {flashcards.length}</span>
+            <span className="text-gray-600">
+              {currentIndex + 1} / {flashcards.length}
+            </span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-2">
             <div
@@ -97,7 +171,6 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
           </div>
         </div>
 
-        {/* Flashcard */}
         <div className="bg-white rounded-lg border-2 border-gray-200 p-8 mb-6 min-h-[400px] flex flex-col">
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
@@ -121,7 +194,6 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
           </div>
         </div>
 
-        {/* Navigation */}
         <div className="flex items-center justify-between">
           <button
             onClick={handlePrevious}
@@ -167,10 +239,9 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
           </button>
         </div>
 
-        {/* Info Box */}
         <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
           <p className="text-blue-800 text-sm">
-            <strong>Tip:</strong> Click "Show Answer" to reveal the answer, then use the navigation buttons to move between cards. Take your time to study each card carefully!
+            <strong>Tip:</strong> Click "Show Answer" to reveal the answer, then use the navigation buttons to move between cards.
           </p>
         </div>
       </div>

@@ -17,7 +17,7 @@ export function getApiBaseUrl(): string {
 
 const api = axios.create({
   baseURL: getApiBaseUrl(),
-  timeout: 15000,
+  timeout: 120000,
   headers: { 'Content-Type': 'application/json' },
 })
 
@@ -28,7 +28,7 @@ api.interceptors.request.use((config) => {
     url.includes('/auth/register') ||
     url.includes('/auth/verify-otp') ||
     url.includes('/auth/send-otp')
-  // Do not attach stale JWT to login/register — avoids odd 401s from some proxies/gateways.
+
   if (!isPublicAuth) {
     const token = localStorage.getItem('edumate_token')
     if (token) config.headers.Authorization = `Bearer ${token}`
@@ -38,23 +38,11 @@ api.interceptors.request.use((config) => {
 
 api.interceptors.response.use(
   (res) => res.data,
-  (err) => {
-    const requestUrl = String(err?.config?.url || '')
-    const isAuthEndpoint =
-      requestUrl.includes('/auth/login') ||
-      requestUrl.includes('/auth/register') ||
-      requestUrl.includes('/auth/verify-otp') ||
-      requestUrl.includes('/auth/send-otp')
-    if (err.response?.status === 401 && !isAuthEndpoint) {
-      localStorage.removeItem('edumate_token')
-      window.location.href = '/login'
-    }
-    return Promise.reject(err)
-  }
+  (err) => Promise.reject(err)
 )
 
 /**
- * Read backend `message` from a failed axios call (4xx/5xx). Use in catch blocks so UI matches server errors (e.g. Gemini quota).
+ * Read backend `message` from a failed axios call (4xx/5xx). Use in catch blocks so UI matches server errors.
  */
 export function getApiErrorMessage(err: unknown): string {
   const e = err as {
@@ -62,11 +50,13 @@ export function getApiErrorMessage(err: unknown): string {
     message?: string
   }
   const data = e?.response?.data
+
   if (data != null && typeof data === 'object' && !Array.isArray(data)) {
     const o = data as Record<string, unknown>
     if (typeof o.message === 'string' && o.message.trim()) return o.message.trim()
     if (typeof o.error === 'string' && o.error.trim()) return o.error.trim()
   }
+
   if (typeof data === 'string') {
     const t = data.trim()
     if (t.startsWith('{')) {
@@ -74,11 +64,12 @@ export function getApiErrorMessage(err: unknown): string {
         const p = JSON.parse(t) as { message?: string }
         if (typeof p?.message === 'string' && p.message.trim()) return p.message.trim()
       } catch {
-        /* ignore */
+        // ignore
       }
     }
     if (t.length > 0) return t.length > 800 ? `${t.slice(0, 800)}…` : t
   }
+
   const st = e?.response?.status
   const net = String(e?.message || '').trim()
   if (net && !/^request failed with status code \d+$/i.test(net)) return net

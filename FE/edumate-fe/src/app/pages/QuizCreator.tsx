@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, Sparkles, Edit2, Save, Trash2, Plus, CheckCircle, Play, X, Clock, Award, FileText } from 'lucide-react';
+import { ArrowLeft, Sparkles, Edit2, Save, Trash2, Plus, CheckCircle, Play, Award, FileText } from 'lucide-react';
 import { useNotification } from '../pages/NotificationContext';
 
 interface QuizCreatorProps {
