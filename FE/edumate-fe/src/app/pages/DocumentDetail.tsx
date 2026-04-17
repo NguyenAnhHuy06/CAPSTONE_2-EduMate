@@ -74,25 +74,26 @@ function triggerBrowserDownload(blob: Blob, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-export function DocumentDetail({
+export function DocumentDetail ({
   document,
   userRole,
-  user,
   onBack,
   onCreateQuizWithAi,
   onOpenQuiz,
 }: DocumentDetailProps) {
-  const { showNotification } = useNotification();
-  const [showQuizCreator, setShowQuizCreator] = useState(false);
-  const [showFlashcardCreator, setShowFlashcardCreator] = useState(false);
-  const [showAIChat, setShowAIChat] = useState(false);
-  const [descriptionLoading, setDescriptionLoading] = useState(false);
-  const [displayDescription, setDisplayDescription] = useState('');
-  const [comments, setComments] = useState<DiscussionComment[]>([]);
-  const [commentsLoading, setCommentsLoading] = useState(true);
-  const [commentsPosting, setCommentsPosting] = useState(false);
-  const [newComment, setNewComment] = useState('');
-  const [downloadLoading, setDownloadLoading] = useState(false);
+
+  const { showNotification } = useNotification()
+  const [showQuizCreator, setShowQuizCreator] = useState(false)
+  const [showFlashcardCreator, setShowFlashcardCreator] = useState(false)
+  const [showFlashcardViewer, setShowFlashcardViewer] = useState(false)
+  const [showAIChat, setShowAIChat] = useState(false)
+  const [descriptionLoading, setDescriptionLoading] = useState(false)
+  const [displayDescription, setDisplayDescription] = useState('')
+  const [comments, setComments] = useState<DiscussionComment[]>([])
+  const [commentsLoading, setCommentsLoading] = useState(true)
+  const [commentsPosting, setCommentsPosting] = useState(false)
+  const [newComment, setNewComment] = useState('')
+  const [downloadLoading, setDownloadLoading] = useState(false)
 
   const [docStatus, setDocStatus] = useState(document?.status || 'pending');
   const [isVerifying, setIsVerifying] = useState(false);
@@ -329,7 +330,11 @@ export function DocumentDetail({
         if (!ctx) throw new Error('Canvas context not available');
         canvas.width = Math.floor(viewport.width);
         canvas.height = Math.floor(viewport.height);
-        await page.render({ canvasContext: ctx, viewport }).promise;
+        await page.render({
+          canvas,
+          canvasContext: ctx,
+          viewport,
+        }).promise;
       } catch {
         if (!cancelled) {
           setPdfRenderError('Could not render this PDF page.');
@@ -551,14 +556,11 @@ export function DocumentDetail({
   }
 
   if (showFlashcardCreator) {
-    if (userRole === 'student') {
-      return (
-        <FlashcardViewer document={document} onBack={() => setShowFlashcardCreator(false)} />
-      );
-    }
-    return (
-      <FlashcardCreator document={document} onBack={() => setShowFlashcardCreator(false)} />
-    );
+    return <FlashcardCreator document={document} onBack={() => setShowFlashcardCreator(false)} />
+  }
+
+  if (showFlashcardViewer) {
+    return <FlashcardViewer document={document} onBack={() => setShowFlashcardViewer(false)} />
   }
 
   return (
@@ -679,6 +681,29 @@ export function DocumentDetail({
               <Sparkles size={18} />
               Create Quiz with AI
             </button>
+
+            {userRole === 'student' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowFlashcardCreator(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+                >
+                  <Sparkles size={18} />
+                  Create Flashcards
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowFlashcardViewer(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+                >
+                  <Sparkles size={18} />
+                  Study My Flashcards
+                </button>
+              </>
+            )}
+
             <button
               type="button"
               onClick={() => setShowAIChat((v) => !v)}
@@ -692,16 +717,6 @@ export function DocumentDetail({
               <MessageSquare size={18} />
               {showAIChat ? 'Close Chat' : 'Chat with AI'}
             </button>
-            {userRole === 'student' && (
-              <button
-                type="button"
-                onClick={() => setShowFlashcardCreator(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
-              >
-                <Sparkles size={18} />
-                Create Flashcards with AI
-              </button>
-            )}
           </div>
 
           {userRole === 'instructor' && docStatus === 'pending' && (

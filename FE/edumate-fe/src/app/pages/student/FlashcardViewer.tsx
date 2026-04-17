@@ -128,9 +128,9 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
 
         <div className="bg-white rounded-lg border border-gray-200 p-6">
           <h2 className="mb-2">Study Flashcards</h2>
-          <p className="text-gray-600">
-              No lecturer flashcards are available for: <span className="text-blue-600">{document?.title}</span>
-          </p>
+            <p className="text-gray-600">
+              You have not created any flashcards for: <span className="text-blue-600">{document?.title}</span>
+            </p>
         </div>
       </div>
     );
