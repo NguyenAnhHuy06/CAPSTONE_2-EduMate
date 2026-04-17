@@ -100,7 +100,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
         return;
       }
       setStep('otp');
-      setMessage('OTP has been sent. Check server log (dev mode).');
+      setMessage('OTP has been sent. Please check your email.');
     } catch (err: any) {
       setErrors({ email: String(err?.response?.data?.message || 'Registration failed.') });
     } finally {
