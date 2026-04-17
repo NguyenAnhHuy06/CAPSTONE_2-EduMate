@@ -3,9 +3,23 @@ const router = express.Router();
 const auth = require("../middleware/auth");
 const Flashcard = require("../models/Flashcard");
 
+function requireStudent(req, res) {
+    const role = String(req.user?.role || "").toUpperCase();
+    if (role !== "STUDENT") {
+        res.status(403).json({
+            success: false,
+            message: "Only students can use personal flashcards."
+        });
+        return false;
+    }
+    return true;
+}
+
 // Generate flashcards using AI
 router.post("/generate", auth, async (req, res) => {
     try {
+        if (!requireStudent(req, res)) return;
+
         const { s3Key } = req.body;
         if (!s3Key) {
             return res.status(400).json({ success: false, message: "s3Key required." });
@@ -68,9 +82,11 @@ ${contextText}`;
     }
 });
 
-// Create flashcards (batch) — tạm bỏ auth, dùng user_id mặc định
+// Create flashcards (batch)
 router.post("/", auth, async (req, res) => {
     try {
+        if (!requireStudent(req, res)) return;
+
         const { document_id, flashcards } = req.body;
 
         if (!document_id || !Array.isArray(flashcards) || !flashcards.length) {
@@ -82,14 +98,11 @@ router.post("/", auth, async (req, res) => {
 
         const effectiveUserId = req.user.id;
 
-        const creatorRole = String(req.user.role || '').toUpperCase();
-
         const records = flashcards.map((f) => ({
             user_id: effectiveUserId,
             document_id: Number(document_id),
             front_text: f.front_text || f.front || f.question || "",
             back_text: f.back_text || f.back || f.answer || "",
-            creator_role: creatorRole,
         }));
 
         const created = await Flashcard.bulkCreate(records);
@@ -104,9 +117,11 @@ router.post("/", auth, async (req, res) => {
     }
 });
 
-// List flashcards for a document — lọc theo creator_role
+// List personal flashcards for a document
 router.get("/document/:documentId", auth, async (req, res) => {
     try {
+        if (!requireStudent(req, res)) return;
+
         const documentId = Number(req.params.documentId);
 
         if (!Number.isFinite(documentId)) {
@@ -116,7 +131,7 @@ router.get("/document/:documentId", auth, async (req, res) => {
         const cards = await Flashcard.findAll({
             where: {
                 document_id: documentId,
-                creator_role: ["LECTURER", "ADMIN"],
+                user_id: req.user.id,
             },
             order: [["created_at", "DESC"]],
         });
@@ -127,9 +142,11 @@ router.get("/document/:documentId", auth, async (req, res) => {
     }
 });
 
-// List all flashcards
+// List all personal flashcards
 router.get("/mine", auth, async (req, res) => {
     try {
+        if (!requireStudent(req, res)) return;
+
         const cards = await Flashcard.findAll({
             where: { user_id: req.user.id },
             order: [["created_at", "DESC"]],
@@ -141,9 +158,11 @@ router.get("/mine", auth, async (req, res) => {
     }
 });
 
-// Delete a flashcard — tạm bỏ check owner
+// Delete a personal flashcard
 router.delete("/:id", auth, async (req, res) => {
     try {
+        if (!requireStudent(req, res)) return;
+
         const card = await Flashcard.findByPk(req.params.id);
 
         if (!card) {
@@ -151,7 +170,7 @@ router.delete("/:id", auth, async (req, res) => {
         }
 
         if (card.user_id !== req.user.id) {
-            return res.status(403).json({ success: false, message: "Forbidden. "});
+            return res.status(403).json({ success: false, message: "Forbidden." });
         }
 
         await card.destroy();
