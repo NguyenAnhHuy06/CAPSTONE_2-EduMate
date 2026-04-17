@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight } from 'lucide-react';
 import api from '../../../services/api';
 
 interface FlashcardViewerProps {
@@ -171,26 +171,46 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
           </div>
         </div>
 
-        <div className="bg-white rounded-lg border-2 border-gray-200 p-8 mb-6 min-h-[400px] flex flex-col">
-          <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <p className="text-gray-500 text-sm mb-4">
-                {isFlipped ? 'Answer' : 'Question'}
-              </p>
-              <p className="text-gray-900 text-xl leading-relaxed">
-                {isFlipped ? currentCard.answer : currentCard.question}
-              </p>
-            </div>
-          </div>
-
-          <div className="pt-6 border-t border-gray-200 mt-6">
-            <button
-              onClick={handleFlip}
-              className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+        <div style={{ perspective: '1200px' }} className="mb-6">
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label="Flip flashcard"
+            onClick={handleFlip}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleFlip();
+              }
+            }}
+            className="relative min-h-[400px] cursor-pointer"
+          >
+            <div
+              className="relative w-full h-[400px] transition-transform duration-500"
+              style={{
+                transformStyle: 'preserve-3d',
+                transform: isFlipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
+              }}
             >
-              <RotateCw size={20} />
-              {isFlipped ? 'Show Question' : 'Show Answer'}
-            </button>
+              <div
+                className="absolute inset-0 bg-white rounded-lg border-2 border-gray-200 p-8 flex items-center justify-center"
+                style={{ backfaceVisibility: 'hidden' }}
+              >
+                <div className="text-center">
+                  <p className="text-gray-500 text-sm mb-4">Question</p>
+                  <p className="text-gray-900 text-xl leading-relaxed">{currentCard.question}</p>
+                </div>
+              </div>
+              <div
+                className="absolute inset-0 bg-white rounded-lg border-2 border-gray-200 p-8 flex items-center justify-center"
+                style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
+              >
+                <div className="text-center">
+                  <p className="text-gray-500 text-sm mb-4">Answer</p>
+                  <p className="text-gray-900 text-xl leading-relaxed">{currentCard.answer}</p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -241,7 +261,7 @@ export function FlashcardViewer({ document, onBack }: FlashcardViewerProps) {
 
         <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
           <p className="text-blue-800 text-sm">
-            <strong>Tip:</strong> Click "Show Answer" to reveal the answer, then use the navigation buttons to move between cards.
+            <strong>Tip:</strong> Click the flashcard to flip between question and answer, then use the navigation buttons to move between cards.
           </p>
         </div>
       </div>

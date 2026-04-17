@@ -15,6 +15,15 @@ export function getApiBaseUrl(): string {
   return s.startsWith('/') ? (s === '' ? '/api' : `${s}/api`) : `/${s}/api`
 }
 
+export function getStoredAuthToken(): string | null {
+  const candidates = ['edumate_token', 'accessToken', 'token']
+  for (const key of candidates) {
+    const value = localStorage.getItem(key)
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
 const api = axios.create({
   baseURL: getApiBaseUrl(),
   timeout: 120000,
@@ -30,7 +39,7 @@ api.interceptors.request.use((config) => {
     url.includes('/auth/send-otp')
 
   if (!isPublicAuth) {
-    const token = localStorage.getItem('edumate_token')
+    const token = getStoredAuthToken()
     if (token) config.headers.Authorization = `Bearer ${token}`
   }
   return config

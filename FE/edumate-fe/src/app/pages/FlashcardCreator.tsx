@@ -10,7 +10,7 @@ import {
   RotateCw,
 } from 'lucide-react';
 import { useNotification } from './NotificationContext';
-import api from '../../services/api';
+import api, { getStoredAuthToken } from '../../services/api';
 
 interface FlashcardCreatorProps {
   document: any;
@@ -32,6 +32,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
+  const [authBlocked, setAuthBlocked] = useState(false);
 
   const documentId =
   document?.documentId != null && Number.isFinite(Number(document.documentId))
@@ -41,6 +42,31 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
   const s3Key = document?.s3Key;
 
   const generateFlashcards = async () => {
+    const token = getStoredAuthToken();
+    if (authBlocked && token) {
+      setAuthBlocked(false);
+    }
+    if (!token) {
+      setAuthBlocked(true);
+      showNotification({
+        type: 'warning',
+        title: 'Authentication required',
+        message: 'Please login and try again.',
+        duration: 4000,
+      });
+      return;
+    }
+
+    if (authBlocked && !token) {
+      showNotification({
+        type: 'warning',
+        title: 'Authentication required',
+        message: 'Please login again before generating flashcards.',
+        duration: 4000,
+      });
+      return;
+    }
+
     if (!s3Key) {
       showNotification({
         type: 'error',
@@ -83,6 +109,9 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
         duration: 3000,
       });
     } catch (err: any) {
+      if (err?.response?.status === 401) {
+        setAuthBlocked(true);
+      }
       showNotification({
         type: 'error',
         title: 'Generation failed',
@@ -129,6 +158,21 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
   };
 
   const handleSave = async () => {
+    const token = getStoredAuthToken();
+    if (authBlocked && token) {
+      setAuthBlocked(false);
+    }
+    if (!token || (authBlocked && !token)) {
+      setAuthBlocked(true);
+      showNotification({
+        type: 'warning',
+        title: 'Authentication required',
+        message: 'Please login and try again.',
+        duration: 4000,
+      });
+      return;
+    }
+
     if (!documentId) {
       showNotification({
         type: 'error',
@@ -188,6 +232,9 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
         onBack();
       }, 1500);
     } catch (err: any) {
+      if (err?.response?.status === 401) {
+        setAuthBlocked(true);
+      }
       showNotification({
         type: 'error',
         title: 'Save failed',
@@ -232,7 +279,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
         {flashcards.length === 0 ? (
           <button
             onClick={generateFlashcards}
-            disabled={generating}
+            disabled={generating || authBlocked}
             className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
           >
             {generating ? (
@@ -240,6 +287,8 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
                 <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white" />
                 Generating Flashcards...
               </>
+            ) : authBlocked ? (
+              'Authentication required'
             ) : (
               <>
                 <Sparkles size={20} />
@@ -258,7 +307,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving}
+              disabled={saving || authBlocked}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
             >
               <Save size={18} />
