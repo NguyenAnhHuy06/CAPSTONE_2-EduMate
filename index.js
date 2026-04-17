@@ -292,7 +292,8 @@ app.post("/api/auth/register", async (req, res) => {
     const fullName = String(req.body.name || req.body.full_name || "").trim();
     const email = String(req.body.email ?? "").trim().toLowerCase();
     const password = String(req.body.password ?? "").trim();
-    const role = String(req.body.role ?? "STUDENT").trim().toUpperCase();
+    /** Public registration must not allow role escalation — always STUDENT in MySQL `users.role`. */
+    const role = "STUDENT";
     const userCode = req.body.user_code ?? req.body.userCode ?? null;
 
     if (!fullName || !email || password.length < 8) {
@@ -365,17 +366,32 @@ app.post("/api/auth/send-otp", async (req, res) => {
 app.post("/api/auth/verify-otp", async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
-    const code = String(req.body.otp ?? req.body.code ?? "").trim();
+    const code = String(req.body.otp ?? req.body.otp_code ?? req.body.code ?? "").trim();
     const purposeRaw = String(req.body.purpose || "").trim().toLowerCase();
     if (!email || !code) {
-      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+      return res.status(200).json({
+        success: false,
+        code: "INVALID_OTP_INPUT",
+        message: "OTP is required.",
+      });
     }
     const saved = otpStore.get(email);
     const purposeOk = !purposeRaw || saved?.purpose === purposeRaw;
     if (!saved || !purposeOk || Date.now() > saved.expiresAt || saved.code !== code) {
-      return res.status(400).json({ success: false, message: "Invalid or expired OTP." });
+      return res.status(200).json({
+        success: false,
+        code: "INVALID_OR_EXPIRED_OTP",
+        message: "Invalid or expired OTP.",
+      });
     }
+    const purpose = String(saved.purpose || "").trim().toLowerCase();
     otpStore.delete(email);
+    if (purpose === "register" && db.isConfigured()) {
+      const row = await db.findUserByEmail(email);
+      if (row && row.user_id) {
+        await db.markUserEmailVerified(row.user_id);
+      }
+    }
     return res.status(200).json({
       success: true,
       message: "Verification completed.",
@@ -383,7 +399,11 @@ app.post("/api/auth/verify-otp", async (req, res) => {
     });
   } catch (err) {
     console.error("[api/auth/verify-otp]", err);
-    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    return res.status(200).json({
+      success: false,
+      code: "OTP_VERIFY_FAILED",
+      message: MSG_TRY_AGAIN,
+    });
   }
 });
 
@@ -425,6 +445,13 @@ app.post("/api/auth/login", async (req, res) => {
         success: false,
         code: "WRONG_PASSWORD",
         message: MSG_LOGIN_WRONG_PASSWORD,
+      });
+    }
+    if (userRow.is_verified != null && !Number(userRow.is_verified)) {
+      return res.status(403).json({
+        success: false,
+        code: "EMAIL_NOT_VERIFIED",
+        message: "Please verify your email (OTP) before logging in.",
       });
     }
     const user = mapUserForClient(userRow);

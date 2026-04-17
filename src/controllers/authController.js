@@ -22,14 +22,17 @@ const register = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Invalid email format' });
         }
 
-        if (role === 'LECTURER' || role === 'ADMIN') {
-            if (!email.endsWith('@duytan.edu.vn')) {
-                return res.status(400).json({ success: false, message: 'Lecturer email must end with @duytan.edu.vn' });
-            }
-        } else {
-            if (!email.endsWith('@dtu.edu.vn')) {
-                return res.status(400).json({ success: false, message: 'Student email must end with @dtu.edu.vn' });
-            }
+        /** Match legacy `/api/auth/register` in `index.js`: no privilege escalation via public signup. */
+        if (role && String(role).toUpperCase() !== 'STUDENT') {
+            return res.status(403).json({
+                success: false,
+                message: 'Public registration is only available for student accounts.',
+            });
+        }
+        role = 'STUDENT';
+
+        if (!email.endsWith('@dtu.edu.vn')) {
+            return res.status(400).json({ success: false, message: 'Student email must end with @dtu.edu.vn' });
         }
 
         if (password.length < 8) {

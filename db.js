@@ -1241,11 +1241,12 @@ async function findUserByEmail(email) {
   const em = String(email || "").trim().toLowerCase();
   if (!em) return null;
   const p = getPool();
+  const verifiedSelect = ", COALESCE(is_verified, 0) AS is_verified";
   try {
     const [rows] = await p.execute(
       `SELECT user_id, email, role, user_code,
         COALESCE(NULLIF(name,''), NULLIF(full_name,''), '') AS display_name,
-        password
+        password${verifiedSelect}
        FROM users
        WHERE LOWER(email) = ?
        LIMIT 1`,
@@ -1253,29 +1254,92 @@ async function findUserByEmail(email) {
     );
     return rows.length ? rows[0] : null;
   } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).includes("is_verified")) {
+      try {
+        const [rows] = await p.execute(
+          `SELECT user_id, email, role, user_code,
+            COALESCE(NULLIF(name,''), NULLIF(full_name,''), '') AS display_name,
+            password
+           FROM users
+           WHERE LOWER(email) = ?
+           LIMIT 1`,
+          [em]
+        );
+        return rows.length ? rows[0] : null;
+      } catch (e2) {
+        if (
+          e2.code === "ER_BAD_FIELD_ERROR" &&
+          String(e2.sqlMessage || e2.message).includes("full_name")
+        ) {
+          const [rows] = await p.execute(
+            `SELECT user_id, email, role, user_code,
+              COALESCE(NULLIF(name,''), '') AS display_name,
+              password
+             FROM users
+             WHERE LOWER(email) = ?
+             LIMIT 1`,
+            [em]
+          );
+          return rows.length ? rows[0] : null;
+        }
+        throw e2;
+      }
+    }
     if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).includes("full_name")) {
-      const [rows] = await p.execute(
-        `SELECT user_id, email, role, user_code,
-          COALESCE(NULLIF(name,''), '') AS display_name,
-          password
-         FROM users
-         WHERE LOWER(email) = ?
-         LIMIT 1`,
-        [em]
-      );
-      return rows.length ? rows[0] : null;
+      try {
+        const [rows] = await p.execute(
+          `SELECT user_id, email, role, user_code,
+            COALESCE(NULLIF(name,''), '') AS display_name,
+            password${verifiedSelect}
+           FROM users
+           WHERE LOWER(email) = ?
+           LIMIT 1`,
+          [em]
+        );
+        return rows.length ? rows[0] : null;
+      } catch (e2) {
+        if (e2.code === "ER_BAD_FIELD_ERROR" && String(e2.sqlMessage || e2.message).includes("is_verified")) {
+          const [rows] = await p.execute(
+            `SELECT user_id, email, role, user_code,
+              COALESCE(NULLIF(name,''), '') AS display_name,
+              password
+             FROM users
+             WHERE LOWER(email) = ?
+             LIMIT 1`,
+            [em]
+          );
+          return rows.length ? rows[0] : null;
+        }
+        throw e2;
+      }
     }
     if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).includes("user_code")) {
-      const [rows] = await p.execute(
-        `SELECT user_id, email, role,
-          COALESCE(NULLIF(name,''), NULLIF(full_name,''), '') AS display_name,
-          password
-         FROM users
-         WHERE LOWER(email) = ?
-         LIMIT 1`,
-        [em]
-      );
-      return rows.length ? rows[0] : null;
+      try {
+        const [rows] = await p.execute(
+          `SELECT user_id, email, role,
+            COALESCE(NULLIF(name,''), NULLIF(full_name,''), '') AS display_name,
+            password${verifiedSelect}
+           FROM users
+           WHERE LOWER(email) = ?
+           LIMIT 1`,
+          [em]
+        );
+        return rows.length ? rows[0] : null;
+      } catch (e2) {
+        if (e2.code === "ER_BAD_FIELD_ERROR" && String(e2.sqlMessage || e2.message).includes("is_verified")) {
+          const [rows] = await p.execute(
+            `SELECT user_id, email, role,
+              COALESCE(NULLIF(name,''), NULLIF(full_name,''), '') AS display_name,
+              password
+             FROM users
+             WHERE LOWER(email) = ?
+             LIMIT 1`,
+            [em]
+          );
+          return rows.length ? rows[0] : null;
+        }
+        throw e2;
+      }
     }
     throw e;
   }
@@ -1344,12 +1408,30 @@ async function createUser({ name, fullName, email, password, role, userCode }) {
   let hdr;
   try {
     [hdr] = await p.execute(
-      `INSERT INTO users (email, password, role, full_name, name, user_code)
-       VALUES (?,?,?,?,?,?)`,
+      `INSERT INTO users (email, password, role, full_name, name, user_code, is_verified, email_verified)
+       VALUES (?,?,?,?,?,?,0,0)`,
       [em, String(password || ""), r, fn, nm, code]
     );
   } catch (e) {
-    if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).includes("full_name")) {
+    if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).match(/is_verified|email_verified/)) {
+      try {
+        [hdr] = await p.execute(
+          `INSERT INTO users (email, password, role, full_name, name, user_code)
+           VALUES (?,?,?,?,?,?)`,
+          [em, String(password || ""), r, fn, nm, code]
+        );
+      } catch (e2) {
+        if (e2.code === "ER_BAD_FIELD_ERROR" && String(e2.sqlMessage || e2.message).includes("full_name")) {
+          [hdr] = await p.execute(
+            `INSERT INTO users (email, password, role, name, user_code)
+             VALUES (?,?,?,?,?)`,
+            [em, String(password || ""), r, nm, code]
+          );
+        } else {
+          throw e2;
+        }
+      }
+    } else if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).includes("full_name")) {
       [hdr] = await p.execute(
         `INSERT INTO users (email, password, role, name, user_code)
          VALUES (?,?,?,?,?)`,
@@ -1360,6 +1442,35 @@ async function createUser({ name, fullName, email, password, role, userCode }) {
     }
   }
   return Number(hdr.insertId);
+}
+
+/** After successful email OTP — aligns with Sequelize `users.is_verified` / `email_verified`. */
+async function markUserEmailVerified(userId) {
+  const uid = parseOptionalInt(userId);
+  if (uid == null) return false;
+  const p = getPool();
+  try {
+    await p.execute(
+      `UPDATE users SET is_verified = 1, email_verified = 1 WHERE user_id = ?`,
+      [uid]
+    );
+    return true;
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") {
+      try {
+        await p.execute(`UPDATE users SET is_verified = 1 WHERE user_id = ?`, [uid]);
+        return true;
+      } catch (e2) {
+        try {
+          await p.execute(`UPDATE users SET email_verified = 1 WHERE user_id = ?`, [uid]);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
+    throw e;
+  }
 }
 
 async function updateUserPassword(userId, hashedPassword) {
@@ -2766,6 +2877,7 @@ module.exports = {
   getUserById,
   updateUserProfile,
   createUser,
+  markUserEmailVerified,
   updateUserPassword,
   canUserManageQuiz,
   replaceQuizQuestions,
