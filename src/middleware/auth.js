@@ -1,10 +1,56 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
+function resolveJwtSecret() {
+    const s = process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim();
+    return s || "dev-only-secret-change-me";
+}
+
+function resolveJwtSecrets() {
+    const primary = process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim();
+    const legacy = process.env.JWT_SECRET_LEGACY && String(process.env.JWT_SECRET_LEGACY).trim();
+    const out = [];
+    if (primary) out.push(primary);
+    if (legacy && legacy !== primary) out.push(legacy);
+    if (!out.includes("dev-only-secret-change-me")) out.push("dev-only-secret-change-me");
+    return out;
+}
+
+function normalizeToken(rawToken) {
+    let token = String(rawToken || "").trim();
+    if (!token) return "";
+    if (
+        (token.startsWith('"') && token.endsWith('"')) ||
+        (token.startsWith("'") && token.endsWith("'"))
+    ) {
+        token = token.slice(1, -1).trim();
+    }
+    return token;
+}
+
+function getTokenFromCookieHeader(cookieHeader) {
+    const raw = String(cookieHeader || "").trim();
+    if (!raw) return null;
+
+    const pairs = raw.split(";").map((part) => part.trim()).filter(Boolean);
+    const map = new Map();
+    for (const pair of pairs) {
+        const idx = pair.indexOf("=");
+        if (idx <= 0) continue;
+        const key = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1).trim();
+        map.set(key, value);
+    }
+
+    const cookieToken = map.get("token") || map.get("accessToken") || map.get("access_token");
+    return cookieToken ? decodeURIComponent(cookieToken) : null;
+}
+
 const authMiddleware = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization || req.headers.Authorization;
         const xAccessToken = req.headers['x-access-token'];
+        const cookieToken = getTokenFromCookieHeader(req.headers.cookie);
         const bodyToken = req.body?.token;
         const queryToken = req.query?.token;
 
@@ -14,17 +60,32 @@ const authMiddleware = async (req, res, next) => {
             token = raw.toLowerCase().startsWith('bearer ') ? raw.slice(7).trim() : raw;
         } else if (xAccessToken) {
             token = String(xAccessToken).trim();
+        } else if (cookieToken) {
+            token = String(cookieToken).trim();
         } else if (bodyToken) {
             token = String(bodyToken).trim();
         } else if (queryToken) {
             token = String(queryToken).trim();
         }
+        token = normalizeToken(token);
 
         if (!token) {
             return res.status(401).json({ success: false, message: 'Authentication required. Please login.' });
         }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        let decoded = null;
+        const secrets = resolveJwtSecrets();
+        for (const secret of secrets) {
+            try {
+                decoded = jwt.verify(token, secret);
+                break;
+            } catch (_) {
+                // Try next known secret.
+            }
+        }
+        if (!decoded) {
+            return res.status(401).json({ success: false, message: 'Invalid token.' });
+        }
         const tokenUserId = decoded?.id ?? decoded?.user_id ?? decoded?.sub;
         const normalizedUserId = Number(tokenUserId);
         if (!Number.isFinite(normalizedUserId) || normalizedUserId <= 0) {

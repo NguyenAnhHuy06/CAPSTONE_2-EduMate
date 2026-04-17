@@ -142,13 +142,32 @@ const adminRoutes = require("./src/routes/adminRoutes");
 const notificationRoutes = require("./src/routes/notificationRoutes");
 const quizRoutes = require("./src/routes/quizRoutes"); // For Leaderboard and modular quiz controllers
 const activityLog = require("./src/middleware/activityLog");
+const teamDb = require("./src/config/teamDb");
 
 // Mount modular features
 app.use("/api/chat", chatRoutes);
 app.use("/api/flashcards", flashcardRoutes);
+// Backward-compatible aliases for older frontend paths.
+app.use("/api/ai/flashcard", flashcardRoutes);
+app.use("/api/ai/flashcards", flashcardRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/quiz-v2", quizRoutes); // Modular version alongside legacy
+// Compatibility endpoint used by older frontend builds.
+app.get("/api/leaderboard", async (req, res) => {
+  try {
+    if (!teamDb.isConfigured()) {
+      return res.status(200).json({ success: true, top: [], me: null, total: 0 });
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const requestingUserId = req.query.userId ?? req.query.user_id ?? null;
+    const result = await teamDb.getLeaderboard({ limit, requestingUserId });
+    return res.status(200).json({ success: true, ...result });
+  } catch (err) {
+    console.error("[api/leaderboard]", err);
+    return res.status(200).json({ success: true, top: [], me: null, total: 0 });
+  }
+});
 // --- END MODULAR FEATURES ---
 
 

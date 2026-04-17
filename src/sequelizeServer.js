@@ -38,6 +38,9 @@ app.use('/api/documents', documentRoutes);
 app.use('/api', quizRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/flashcards', flashcardRoutes);
+// Backward-compatible aliases for older frontend paths.
+app.use('/api/ai/flashcard', flashcardRoutes);
+app.use('/api/ai/flashcards', flashcardRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
 
