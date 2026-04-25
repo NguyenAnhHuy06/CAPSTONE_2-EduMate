@@ -95,6 +95,7 @@ const authMiddleware = async (req, res, next) => {
         const user = await User.findByPk(normalizedUserId, {
             attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
         });
+        console.log('[AuthMiddleware] Found user:', user ? user.user_id : 'null');
 
         if (!user) {
             return res.status(401).json({ success: false, message: 'User no longer exists.' });

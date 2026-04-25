@@ -13,10 +13,12 @@ const User = sequelize.define('User', {
         unique: true
     },
     password_hash: {
+        field: 'password',
         type: DataTypes.STRING,
         allowNull: false
     },
     full_name: {
+        field: 'name',
         type: DataTypes.STRING,
         allowNull: true
     },
@@ -51,6 +53,7 @@ const User = sequelize.define('User', {
     },
     email_verified: {
         type: DataTypes.BOOLEAN,
+        field: 'is_verified', // Map to same column if needed, or check DB
         defaultValue: false
     },
     external_uid: {

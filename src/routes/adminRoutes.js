@@ -11,8 +11,8 @@ const ActivityLog = require("../models/ActivityLog");
 router.get("/users", auth, rbac("ADMIN"), async (req, res) => {
     try {
         const users = await User.findAll({
-            attributes: ["id", "email", "full_name", "role", "user_code", "is_verified", "is_active", "createdAt"],
-            order: [["createdAt", "DESC"]],
+            attributes: ["user_id", "email", "full_name", "role", "user_code", "is_verified", "is_active", "created_at"],
+            order: [["created_at", "DESC"]],
         });
         return res.json({ success: true, data: users });
     } catch (err) {
@@ -32,7 +32,7 @@ router.patch("/users/:id/role", auth, rbac("ADMIN"), async (req, res) => {
 
         user.role = role;
         await user.save();
-        return res.json({ success: true, message: `User role updated to ${role}.`, data: { id: user.id, role: user.role } });
+        return res.json({ success: true, message: `User role updated to ${role}.`, data: { user_id: user.user_id, role: user.role } });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
@@ -59,9 +59,9 @@ router.get("/documents/pending", auth, rbac("ADMIN"), async (req, res) => {
         const db = require("../config/teamDb");
         if (!db.isConfigured()) return res.status(503).json({ success: false, message: "Database not configured." });
         const [docs] = await db.getPool().execute(
-            `SELECT doc.*, u.full_name as uploader_name, u.email as uploader_email 
+            `SELECT doc.*, u.name as uploader_name, u.email as uploader_email 
              FROM documents doc 
-             LEFT JOIN users u ON doc.uploader_id = u.id 
+             LEFT JOIN users u ON doc.uploader_id = u.user_id 
              WHERE doc.status = 'pending' 
              ORDER BY doc.created_at DESC LIMIT 100`
         );
