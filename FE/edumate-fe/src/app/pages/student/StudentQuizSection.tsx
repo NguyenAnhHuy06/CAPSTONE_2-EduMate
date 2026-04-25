@@ -153,15 +153,9 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
         if (!opts?.quiet) setLoading(true);
         try {
             const uid = user?.user_id ?? user?.id ?? user?.userId;
-            const [docsRes, historyRes, completedRes, publishedRes] = await Promise.all([
+            const [docsRes, historyRes, publishedRes] = await Promise.all([
                 api.get('/documents/for-quiz'),
                 api.get('/quizzes/history', {
-                    params: {
-                        limit: 200,
-                        ...(uid != null && uid !== '' ? { userId: uid } : {}),
-                    },
-                }),
-                api.get('/quiz/completed', {
                     params: {
                         limit: 200,
                         ...(uid != null && uid !== '' ? { userId: uid } : {}),
@@ -206,27 +200,26 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             }));
             setAvailableQuizzes(mappedAvailable);
 
-            const completedRows = Array.isArray(completedRes?.data) ? completedRes.data : [];
-            const mappedCompleted = completedRows.map((h: any) => ({
-                id: h?.quiz_id || h?.quizId || h?.id,
-                quizId: h?.quiz_id || h?.quizId || h?.id,
+            const mappedCompleted = rows.map((h: any) => ({
+                id: h?.quizId || h?.quiz_id || h?.id,
+                quizId: h?.quizId || h?.quiz_id || h?.id,
                 title: h?.title || 'Quiz',
                 subject: h?.courseCode || h?.subjectCode || 'DOC',
-                instructor: 'AI Generated',
-                questions: Array.from({ length: Number(h?.total_questions || h?.questionCount || 5) }).map((_, i) => ({
+                instructor: h?.creatorName || 'AI Generated',
+                questions: Array.from({ length: Number(h?.questionCount || h?.total_questions || 5) }).map((_, i) => ({
                     id: `h-q-${i}`,
                     question: '',
                     options: [],
                     correctAnswer: 0,
                 })),
                 duration: 10,
-                durationSeconds: Math.max(0, Number(h?.time_taken_seconds || 0)),
-                myScore: Number(h?.score ?? h?.scorePercent ?? 0),
-                attempts: 1,
-                completedDate: h?.created_at || h?.lastAttemptAt || h?.createdAt || '',
+                durationSeconds: Math.max(0, Number(h?.timeTakenSeconds || h?.time_taken_seconds || 0)),
+                myScore: Number(h?.scorePercent ?? h?.score ?? 0),
+                attempts: Number(h?.attemptsCount || 1),
+                completedDate: h?.lastAttemptAt || h?.createdAt || h?.created_at || '',
                 status: 'completed',
                 userAnswers: [],
-                attemptId: h?.id ?? h?.attemptId ?? h?.lastAttemptId ?? null,
+                attemptId: h?.attemptId ?? h?.lastAttemptId ?? h?.id ?? null,
             }));
             setCompletedQuizzes(mappedCompleted);
 
@@ -297,7 +290,14 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
     const recordAttemptStart = async (quizId: string | number | undefined) => {
         const id = Number(quizId);
         if (!Number.isFinite(id) || id <= 0) return;
+        
         try {
+            console.log('[recordAttemptStart] payload =', {
+                quizId: id,
+                userId: user?.user_id ?? user?.id ?? user?.userId,
+                phase: 'start',
+            });
+
             await api.post('/quiz/attempts', {
                 quizId: id,
                 userId: user?.user_id ?? user?.id ?? user?.userId,
@@ -305,11 +305,12 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
             });
             await loadConnectedData({ quiet: true });
         } catch (err: unknown) {
-            showNotification({
-                type: 'warning',
-                title: 'Could not record attempt',
-                message: safeNotificationMessage(err, 'attemptRecord'),
-            });
+        console.error('[recordAttemptStart] failed:', err);
+        showNotification({
+            type: 'warning',
+            title: 'Could not record attempt',
+            message: safeNotificationMessage(err, 'attemptRecord'),
+        });
         }
     };
 
@@ -394,6 +395,11 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 return;
             }
             const quizData = (res as any)?.data || {};
+            
+            console.log('[startQuiz] quizData =', quizData);
+            console.log('[startQuiz] quizData.quizId =', quizData?.quizId);
+            console.log('[startQuiz] fallback quiz.id =', quiz?.id);
+
             const questions = normalizeQuestions(quizData.quiz || []);
             if (!questions.length) {
                 showNotification({
@@ -404,20 +410,19 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 setIsGeneratingQuiz(false);
                 return;
             }
-            const persistedQuizId = quizData.quizId || quiz.id;
-            let finalQuestions = questions;
-            try {
-                if (persistedQuizId != null) {
-                    const detailRes = await api.get(`/quizzes/${persistedQuizId}`, {
-                        params: { userId: user?.user_id ?? user?.id ?? user?.userId },
-                    });
-                    const detail = detailRes?.data || {};
-                    const stored = normalizeStoredQuestions(detail?.questions || []);
-                    if (stored.length) finalQuestions = stored;
-                }
-            } catch {
-                // keep AI questions if DB detail is not available
+            const persistedQuizId = quizData.quizId;
+
+            if (!persistedQuizId) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Generate Quiz',
+                    message: 'Quiz was generated but backend did not return a persisted quizId.',
+                });
+                setIsGeneratingQuiz(false);
+                return;
             }
+
+            const finalQuestions = questions;
 
             const generatedQuiz = {
                 ...quiz,
@@ -572,6 +577,15 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
 
         try {
             const scorePercent = score;
+            console.log('[handleSubmitQuiz] payload =', {
+                quizId: selectedQuiz.id,
+                userId: user?.user_id ?? user?.id ?? user?.userId,
+                score: scorePercent,
+                answers,
+                timeTaken: result.timeTaken,
+                phase: 'complete',
+            });
+            
             await api.post('/quiz/attempts', {
                 quizId: selectedQuiz.id,
                 userId: user?.user_id ?? user?.id ?? user?.userId,
@@ -581,8 +595,13 @@ export function StudentQuizSection({ user }: StudentQuizSectionProps) {
                 phase: 'complete',
             });
             await loadConnectedData();
-        } catch {
-            // keep UI flow even if attempt save fails
+        } catch (err) {
+        console.error('[handleSubmitQuiz] save attempt failed:', err);
+        showNotification({
+            type: 'warning',
+            title: 'Quiz result not saved',
+            message: safeNotificationMessage(err, 'attemptRecord'),
+        });
         }
     };
 
