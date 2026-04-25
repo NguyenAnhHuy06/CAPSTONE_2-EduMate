@@ -2,7 +2,7 @@
  * teamDb.js — Adapter mysql2 raw queries từ codebase team.
  * Đã điều chỉnh để tương thích hoàn toàn với schema eudmate.sql:
  *   - Primary key users: user_id (INT)
- *   - Column: name thay vì full_name
+ *   - Column: full_name thay vì name
  *   - Role: ENUM viết HOA 'STUDENT'/'LECTURER' thay vì 'lecturer'/'teacher'
  */
 const path = require("path");
@@ -271,29 +271,42 @@ async function listQuizHistory(limit = 20, userId = null) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
   const uid = parseOptionalInt(userId);
-  let sql = `SELECT q.quiz_id, q.title, q.created_at, q.is_published, c.course_code,
-    (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
-    (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
-    (SELECT qa.score FROM quiz_attempts qa WHERE qa.quiz_id = q.quiz_id AND qa.completed_at IS NOT NULL ORDER BY qa.completed_at DESC LIMIT 1) AS last_score,
-    (SELECT qa.completed_at FROM quiz_attempts qa WHERE qa.quiz_id = q.quiz_id AND qa.completed_at IS NOT NULL ORDER BY qa.completed_at DESC LIMIT 1) AS last_completed_at
-    FROM quizzes q LEFT JOIN courses c ON c.course_id = q.course_id`;
-  const params = [];
-  if (uid != null) { sql += " WHERE q.created_by = ?"; params.push(uid); }
-  sql += ` ORDER BY COALESCE((SELECT MAX(completed_at) FROM quiz_attempts qa3 WHERE qa3.quiz_id = q.quiz_id), q.created_at) DESC LIMIT ${lim}`;
-  let rows;
-  try { [rows] = await p.execute(sql, params); }
-  catch (e) {
-    if (e.code === "ER_BAD_FIELD_ERROR") {
-      const sqlLegacy = sql.replace("q.created_at, q.is_published,", "q.created_at,");
-      [rows] = await p.execute(sqlLegacy, params);
-    } else throw e;
-  }
+
+  if (uid == null) return [];
+
+  const sql = `
+    SELECT
+      q.quiz_id,
+      q.title,
+      q.created_at,
+      q.is_published,
+      c.course_code,
+      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
+      COUNT(qa.attempt_id) AS attempts_count,
+      MAX(qa.score) AS last_score,
+      MAX(qa.completed_at) AS last_completed_at
+    FROM quiz_attempts qa
+    INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+    LEFT JOIN courses c ON c.course_id = q.course_id
+    WHERE qa.user_id = ?
+      AND qa.completed_at IS NOT NULL
+    GROUP BY q.quiz_id, q.title, q.created_at, q.is_published, c.course_code
+    ORDER BY MAX(qa.completed_at) DESC
+    LIMIT ${lim}
+  `;
+
+  const [rows] = await p.execute(sql, [uid]);
+
   return rows.map(row => ({
-    quizId: row.quiz_id, title: row.title, createdAt: row.created_at,
-    courseCode: row.course_code, questionCount: Number(row.question_count || 0),
+    quizId: row.quiz_id,
+    title: row.title,
+    createdAt: row.created_at,
+    courseCode: row.course_code,
+    questionCount: Number(row.question_count || 0),
     attemptsCount: Number(row.attempts_count || 0),
     scorePercent: scoreToPercent(row.last_score, row.question_count),
-    lastAttemptAt: row.last_completed_at, isPublished: Number(row.is_published ?? 0) === 1,
+    lastAttemptAt: row.last_completed_at,
+    isPublished: Number(row.is_published ?? 0) === 1,
   }));
 }
 
@@ -303,7 +316,7 @@ async function listPublishedQuizzes(limit = 20) {
   const sql = `SELECT q.quiz_id, q.title, q.created_at, q.published_at, c.course_code,
     (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
     (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
-    u.name AS creator_name
+    u.full_name AS creator_name
     FROM quizzes q LEFT JOIN courses c ON c.course_id = q.course_id
     LEFT JOIN users u ON u.user_id = q.created_by
     WHERE q.is_published = 1
@@ -548,7 +561,7 @@ async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
   const sql = `
     SELECT
       u.user_id                                     AS userId,
-      u.name                                        AS name,
+      u.full_name                                        AS name,
       u.email,
       COUNT(qa.attempt_id)                          AS totalAttempts,
       ROUND(AVG(qa.score / qq_count.total * 100))   AS avgScore,
@@ -563,7 +576,7 @@ async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
     WHERE qa.completed_at IS NOT NULL
       AND qa.user_id IS NOT NULL
       AND qq_count.total > 0
-    GROUP BY u.user_id, u.name, u.email
+    GROUP BY u.user_id, u.full_name, u.email
     ORDER BY avgScore DESC, totalAttempts DESC
   `;
 
@@ -595,6 +608,583 @@ async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
   return { total: allRanked.length, data: allRanked.slice(0, lim), myRank };
 }
 
+async function getProgressSummary(userId) {
+  const p = getPool();
+  const uid = Number(userId);
+
+  if (!Number.isFinite(uid) || uid <= 0) {
+    throw new Error('Invalid userId.');
+  }
+
+  // 1) Tổng số tài liệu đã "học" = số document xuất hiện trong quiz history của user
+  const [materialsRows] = await p.execute(
+    `
+    SELECT
+      COUNT(DISTINCT COALESCE(q.document_id, d.document_id)) AS completedMaterials
+    FROM quiz_attempts qa
+    INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+    LEFT JOIN documents d ON d.document_id = q.document_id
+    WHERE qa.user_id = ?
+      AND qa.completed_at IS NOT NULL
+    `,
+    [uid]
+  );
+
+  const completedMaterials = Number(materialsRows?.[0]?.completedMaterials || 0);
+
+  // 2) Tổng tài liệu trong hệ thống (có thể đổi sang verified-only nếu muốn)
+  const [totalRows] = await p.execute(
+    `
+    SELECT COUNT(*) AS totalMaterials
+    FROM documents
+    `
+  );
+
+  const totalMaterials = Number(totalRows?.[0]?.totalMaterials || 0);
+
+  // 3) Điểm trung bình từ quiz_attempts
+  const [avgRows] = await p.execute(
+    `
+    SELECT
+      ROUND(AVG(qa.score / qq.total * 100)) AS averageScorePercent
+    FROM quiz_attempts qa
+    INNER JOIN (
+      SELECT quiz_id, COUNT(*) AS total
+      FROM quiz_questions
+      GROUP BY quiz_id
+    ) qq ON qq.quiz_id = qa.quiz_id
+    WHERE qa.user_id = ?
+      AND qa.completed_at IS NOT NULL
+      AND qq.total > 0
+    `,
+    [uid]
+  );
+
+  const averageScorePercent =
+    avgRows?.[0]?.averageScorePercent != null
+      ? Number(avgRows[0].averageScorePercent)
+      : null;
+
+  // 4) Course progress
+  const [courseRows] = await p.execute(
+    `
+    SELECT
+      COALESCE(c.course_id, 0) AS courseId,
+      COALESCE(c.course_name, 'General') AS name,
+      COALESCE(c.course_code, 'DOC') AS code,
+      COUNT(DISTINCT q.quiz_id) AS totalMaterials,
+      COUNT(DISTINCT CASE WHEN qa.completed_at IS NOT NULL THEN q.quiz_id END) AS completedMaterials,
+      ROUND(AVG(
+        CASE
+          WHEN qa.completed_at IS NOT NULL AND qq.total > 0
+          THEN qa.score / qq.total * 100
+          ELSE NULL
+        END
+      )) AS quizScorePercent,
+      MAX(qa.completed_at) AS lastActivityAt
+    FROM quizzes q
+    LEFT JOIN courses c ON c.course_id = q.course_id
+    LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id AND qa.user_id = ?
+    LEFT JOIN (
+      SELECT quiz_id, COUNT(*) AS total
+      FROM quiz_questions
+      GROUP BY quiz_id
+    ) qq ON qq.quiz_id = q.quiz_id
+    GROUP BY COALESCE(c.course_id, 0), COALESCE(c.course_name, 'General'), COALESCE(c.course_code, 'DOC')
+    ORDER BY lastActivityAt DESC, name ASC
+    `,
+    [uid]
+  );
+
+  const courses = (courseRows || []).map((r) => {
+    const total = Number(r.totalMaterials || 0);
+    const completed = Number(r.completedMaterials || 0);
+    return {
+      courseId: Number(r.courseId || 0),
+      name: r.name || 'General',
+      code: r.code || 'DOC',
+      progressPercent: total > 0 ? Math.round((completed / total) * 100) : 0,
+      totalMaterials: total,
+      completedMaterials: completed,
+      quizScorePercent: r.quizScorePercent != null ? Number(r.quizScorePercent) : null,
+      lastActivityAt: r.lastActivityAt || null,
+    };
+  });
+
+  // 5) Streak đơn giản: đếm số ngày liên tiếp có completed_at
+  const [streakRows] = await p.execute(
+    `
+    SELECT DISTINCT DATE(completed_at) AS activityDate
+    FROM quiz_attempts
+    WHERE user_id = ?
+      AND completed_at IS NOT NULL
+    ORDER BY activityDate DESC
+    `,
+    [uid]
+  );
+
+  const activityDates = (streakRows || [])
+    .map((r) => (r.activityDate ? new Date(r.activityDate) : null))
+    .filter(Boolean)
+    .map((d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime());
+
+  let currentDays = 0;
+  let longestDays = 0;
+
+  if (activityDates.length > 0) {
+    let streak = 1;
+    longestDays = 1;
+
+    for (let i = 0; i < activityDates.length - 1; i++) {
+      const diffDays = Math.round((activityDates[i] - activityDates[i + 1]) / (1000 * 60 * 60 * 24));
+      if (diffDays === 1) {
+        streak += 1;
+      } else {
+        longestDays = Math.max(longestDays, streak);
+        streak = 1;
+      }
+    }
+    longestDays = Math.max(longestDays, streak);
+
+    const today = new Date();
+    const todayOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    const diffFromToday = Math.round((todayOnly - activityDates[0]) / (1000 * 60 * 60 * 24));
+
+    if (diffFromToday === 0) {
+      currentDays = 1;
+      for (let i = 0; i < activityDates.length - 1; i++) {
+        const diffDays = Math.round((activityDates[i] - activityDates[i + 1]) / (1000 * 60 * 60 * 24));
+        if (diffDays === 1) currentDays += 1;
+        else break;
+      }
+    } else if (diffFromToday === 1) {
+      currentDays = 1;
+      for (let i = 0; i < activityDates.length - 1; i++) {
+        const diffDays = Math.round((activityDates[i] - activityDates[i + 1]) / (1000 * 60 * 60 * 24));
+        if (diffDays === 1) currentDays += 1;
+        else break;
+      }
+    }
+  }
+
+  const progressPercent =
+    totalMaterials > 0 ? Math.round((completedMaterials / totalMaterials) * 100) : 0;
+
+  return {
+    overall: {
+      progressPercent,
+      completedMaterials,
+      totalMaterials,
+      averageScorePercent,
+      studyHoursLabel: null,
+    },
+    courses,
+    streak: {
+      currentDays,
+      longestDays,
+    },
+  };
+}
+
+async function ensureQuestionBankForOwner(ownerUserId) {
+  const p = getPool();
+  const uid = Number(ownerUserId);
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("ownerUserId không hợp lệ.");
+
+  const [rows] = await p.execute(
+    "SELECT bank_id FROM question_bank WHERE owner_user_id = ? ORDER BY bank_id ASC LIMIT 1",
+    [uid]
+  );
+  if (rows.length) return rows[0].bank_id;
+
+  const [hdr] = await p.execute(
+    "INSERT INTO question_bank (owner_user_id, title) VALUES (?, ?)",
+    [uid, "Question Bank"]
+  );
+  return hdr.insertId;
+}
+
+async function listQuestionBankItems(ownerUserId) {
+  const p = getPool();
+  const uid = Number(ownerUserId);
+  if (!Number.isFinite(uid) || uid <= 0) return [];
+
+  const sql = `
+    SELECT
+      qbi.item_id,
+      qbi.bank_id,
+      qbi.owner_user_id,
+      qbi.question_text,
+      qbi.option_a,
+      qbi.option_b,
+      qbi.option_c,
+      qbi.option_d,
+      qbi.correct_answer,
+      qbi.question_type,
+      qbi.topic,
+      qbi.category,
+      qbi.difficulty,
+      qbi.version_no,
+      qbi.version,
+      qbi.is_active,
+      qbi.created_at,
+      qbi.updated_at
+    FROM question_bank_items qbi
+    WHERE qbi.owner_user_id = ?
+      AND qbi.is_active = 1
+    ORDER BY qbi.updated_at DESC, qbi.item_id DESC
+  `;
+  const [rows] = await p.execute(sql, [uid]);
+
+  return rows.map((r) => ({
+    id: Number(r.item_id),
+    item_id: Number(r.item_id),
+    bankId: Number(r.bank_id),
+    ownerUserId: Number(r.owner_user_id),
+    question: r.question_text || "",
+    type: r.question_type || "multiple-choice",
+    topic: r.topic || "General",
+    category: r.category || "",
+    difficulty: r.difficulty || "medium",
+    options: [r.option_a, r.option_b, r.option_c, r.option_d].map((x) => String(x ?? "")),
+    correctAnswer: r.correct_answer || "A",
+    versionNo: Number(r.version_no || 1),
+    version: Number(r.version || 1),
+    createdAt: r.created_at || null,
+    updatedAt: r.updated_at || null,
+  }));
+}
+
+async function insertQuestionBankItem({
+  ownerUserId,
+  question,
+  type,
+  topic,
+  category,
+  difficulty,
+  options,
+  correctAnswer,
+}) {
+  const p = getPool();
+  const uid = Number(ownerUserId);
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("ownerUserId không hợp lệ.");
+
+  const bankId = await ensureQuestionBankForOwner(uid);
+  const normalized = normalizeQuestionInput({
+    question,
+    options,
+    correctAnswer,
+  });
+  if (!normalized) throw new Error("Câu hỏi không hợp lệ.");
+
+  const safeType = String(type || "multiple-choice").trim() || "multiple-choice";
+  const safeTopic = trunc255(topic || "General") || "General";
+  const safeCategory = String(category || "").trim() || null;
+  const safeDifficulty = String(difficulty || "medium").trim() || "medium";
+
+  const [hdr] = await p.execute(
+    `INSERT INTO question_bank_items (
+      bank_id, owner_user_id, question_text,
+      option_a, option_b, option_c, option_d,
+      correct_answer, question_type, topic, category, difficulty
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      bankId,
+      uid,
+      normalized.question,
+      trunc255(normalized.options.A),
+      trunc255(normalized.options.B),
+      trunc255(normalized.options.C),
+      trunc255(normalized.options.D),
+      normalized.correct_answer,
+      safeType,
+      safeTopic,
+      safeCategory,
+      safeDifficulty,
+    ]
+  );
+
+  const itemId = hdr.insertId;
+  const [rows] = await p.execute(
+    "SELECT * FROM question_bank_items WHERE item_id = ? LIMIT 1",
+    [itemId]
+  );
+  return rows.length ? rows[0] : null;
+}
+
+async function updateQuestionBankItem(
+  itemId,
+  ownerUserId,
+  { question, type, topic, category, difficulty, options, correctAnswer }
+) {
+  const p = getPool();
+  const id = Number(itemId);
+  const uid = Number(ownerUserId);
+
+  if (!Number.isFinite(id) || id <= 0) throw new Error("itemId không hợp lệ.");
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("ownerUserId không hợp lệ.");
+
+  const [existing] = await p.execute(
+    "SELECT * FROM question_bank_items WHERE item_id = ? AND owner_user_id = ? AND is_active = 1 LIMIT 1",
+    [id, uid]
+  );
+  if (!existing.length) throw new Error("Không tìm thấy câu hỏi trong ngân hàng.");
+
+  const base = existing[0];
+
+  const mergedOptions = Array.isArray(options) && options.length
+    ? options
+    : [base.option_a, base.option_b, base.option_c, base.option_d];
+
+  const normalized = normalizeQuestionInput({
+    question: question ?? base.question_text,
+    options: mergedOptions,
+    correctAnswer: correctAnswer ?? base.correct_answer,
+  });
+  if (!normalized) throw new Error("Câu hỏi không hợp lệ.");
+
+  await p.execute(
+    `UPDATE question_bank_items
+     SET question_text = ?,
+         option_a = ?,
+         option_b = ?,
+         option_c = ?,
+         option_d = ?,
+         correct_answer = ?,
+         question_type = ?,
+         topic = ?,
+         category = ?,
+         difficulty = ?,
+         version_no = version_no + 1,
+         version = version + 1
+     WHERE item_id = ? AND owner_user_id = ?`,
+    [
+      normalized.question,
+      trunc255(normalized.options.A),
+      trunc255(normalized.options.B),
+      trunc255(normalized.options.C),
+      trunc255(normalized.options.D),
+      normalized.correct_answer,
+      String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+      trunc255(topic || base.topic || "General") || "General",
+      String(category ?? base.category ?? "").trim() || null,
+      String(difficulty || base.difficulty || "medium").trim() || "medium",
+      id,
+      uid,
+    ]
+  );
+
+  const [rows] = await p.execute(
+    "SELECT * FROM question_bank_items WHERE item_id = ? LIMIT 1",
+    [id]
+  );
+  return rows.length ? rows[0] : null;
+}
+
+async function deleteQuestionBankItem(itemId, ownerUserId) {
+  const p = getPool();
+  const id = Number(itemId);
+  const uid = Number(ownerUserId);
+
+  if (!Number.isFinite(id) || id <= 0) throw new Error("itemId không hợp lệ.");
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("ownerUserId không hợp lệ.");
+
+  const [result] = await p.execute(
+    `UPDATE question_bank_items
+     SET is_active = 0, version_no = version_no + 1, version = version + 1
+     WHERE item_id = ? AND owner_user_id = ? AND is_active = 1`,
+    [id, uid]
+  );
+
+  return Number(result.affectedRows || 0) > 0;
+}
+
+async function getQuizAnalyticsByOwner(ownerUserId, topQuestions = 5) {
+  const p = getPool();
+  const uid = Number(ownerUserId);
+  const tq = Math.min(Math.max(Number(topQuestions) || 5, 1), 20);
+
+  if (!Number.isFinite(uid) || uid <= 0) {
+    throw new Error("ownerUserId không hợp lệ.");
+  }
+
+  // Summary
+  const [summaryRows] = await p.execute(
+    `
+    SELECT
+      COUNT(DISTINCT q.quiz_id) AS totalQuizzes,
+      COUNT(DISTINCT qa.user_id) AS totalParticipants,
+      ROUND(AVG(
+        CASE
+          WHEN qq.total > 0 AND qa.completed_at IS NOT NULL
+          THEN qa.score / qq.total * 100
+          ELSE NULL
+        END
+      )) AS averageScorePercent,
+      ROUND(
+        100 * COUNT(DISTINCT CASE WHEN qa.completed_at IS NOT NULL THEN qa.attempt_id END)
+        / NULLIF(COUNT(DISTINCT qa.attempt_id), 0)
+      ) AS completionRatePercent
+    FROM quizzes q
+    LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id
+    LEFT JOIN (
+      SELECT quiz_id, COUNT(*) AS total
+      FROM quiz_questions
+      GROUP BY quiz_id
+    ) qq ON qq.quiz_id = q.quiz_id
+    WHERE q.created_by = ?
+    `,
+    [uid]
+  );
+
+  // Performance rows per owned quiz
+  const [performanceRows] = await p.execute(
+    `
+    SELECT
+      q.quiz_id AS quizId,
+      q.title,
+      COUNT(DISTINCT qa.user_id) AS participants,
+      COUNT(qa.attempt_id) AS attempts,
+      ROUND(AVG(
+        CASE
+          WHEN qq.total > 0 AND qa.completed_at IS NOT NULL
+          THEN qa.score / qq.total * 100
+          ELSE NULL
+        END
+      )) AS averageScorePercent,
+      ROUND(AVG(
+        CASE
+          WHEN qq.total > 0 AND qa.completed_at IS NOT NULL
+               AND (qa.score / qq.total * 100) >= 50
+          THEN 100
+          WHEN qq.total > 0 AND qa.completed_at IS NOT NULL
+          THEN 0
+          ELSE NULL
+        END
+      )) AS passRatePercent,
+      'medium' AS difficulty,
+      q.is_published AS isPublished
+    FROM quizzes q
+    LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id
+    LEFT JOIN (
+      SELECT quiz_id, COUNT(*) AS total
+      FROM quiz_questions
+      GROUP BY quiz_id
+    ) qq ON qq.quiz_id = q.quiz_id
+    WHERE q.created_by = ?
+    GROUP BY q.quiz_id, q.title, q.is_published
+    ORDER BY q.created_at DESC
+    `,
+    [uid]
+  );
+
+  // Most challenging questions among owned quizzes
+  const [challengingRows] = await p.execute(
+    `
+    SELECT
+      qq.question_id AS questionId,
+      qq.question_text AS question,
+      COUNT(qa.attempt_id) AS attempts,
+      NULL AS correctRatePercent
+    FROM quizzes q
+    INNER JOIN quiz_questions qq ON qq.quiz_id = q.quiz_id
+    LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id AND qa.completed_at IS NOT NULL
+    WHERE q.created_by = ?
+    GROUP BY qq.question_id, qq.question_text
+    ORDER BY attempts DESC, qq.question_id DESC
+    LIMIT ${tq}
+    `,
+    [uid]
+  );
+
+  const summary = summaryRows?.[0] || {};
+
+  return {
+    summary: {
+      totalQuizzes: Number(summary.totalQuizzes || 0),
+      totalParticipants: Number(summary.totalParticipants || 0),
+      averageScorePercent: Number(summary.averageScorePercent || 0),
+      completionRatePercent: Number(summary.completionRatePercent || 0),
+    },
+    performance: (performanceRows || []).map((r) => ({
+      quizId: Number(r.quizId),
+      title: r.title || "Quiz",
+      participants: Number(r.participants || 0),
+      attempts: Number(r.attempts || 0),
+      averageScorePercent: Number(r.averageScorePercent || 0),
+      passRatePercent: Number(r.passRatePercent || 0),
+      difficulty: r.difficulty || "medium",
+      isPublished: Number(r.isPublished || 0) === 1,
+    })),
+    challengingQuestions: (challengingRows || []).map((r) => ({
+      questionId: Number(r.questionId),
+      question: r.question || "",
+      attempts: Number(r.attempts || 0),
+      correctRatePercent: Number(r.correctRatePercent || 0),
+    })),
+  };
+}
+
+async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
+  const p = getPool();
+  const lim = Math.min(Math.max(Number(limit) || 20, 1), 500);
+  const uid = parseOptionalInt(ownerUserId);
+  if (uid == null) return [];
+
+  const sql = `
+    SELECT
+      q.quiz_id,
+      q.title,
+      q.created_at,
+      q.published_at,
+      q.is_published,
+      q.document_id,
+      q.source_file_url AS s3Key,
+      c.course_code,
+      d.category AS documentCategory,
+      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
+      (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.quiz_id) AS attempts_count,
+      (
+        SELECT ROUND(AVG(
+          CASE
+            WHEN qq2.total > 0 AND qa2.completed_at IS NOT NULL
+            THEN qa2.score / qq2.total * 100
+            ELSE NULL
+          END
+        ))
+        FROM quiz_attempts qa2
+        INNER JOIN (
+          SELECT quiz_id, COUNT(*) AS total
+          FROM quiz_questions
+          GROUP BY quiz_id
+        ) qq2 ON qq2.quiz_id = qa2.quiz_id
+        WHERE qa2.quiz_id = q.quiz_id
+      ) AS score_percent
+    FROM quizzes q
+    LEFT JOIN courses c ON c.course_id = q.course_id
+    LEFT JOIN documents d ON d.document_id = q.document_id
+    WHERE q.created_by = ?
+    ORDER BY q.created_at DESC
+    LIMIT ${lim}
+  `;
+
+  const [rows] = await p.execute(sql, [uid]);
+
+  return rows.map((row) => ({
+    quizId: Number(row.quiz_id),
+    title: row.title || "Quiz",
+    createdAt: row.created_at || null,
+    publishedAt: row.published_at || null,
+    isPublished: Number(row.is_published || 0) === 1,
+    documentId: row.document_id != null ? Number(row.document_id) : null,
+    s3Key: row.s3Key || "",
+    courseCode: row.course_code || "DOC",
+    documentCategory: row.documentCategory || "",
+    questionCount: Number(row.question_count || 0),
+    attemptsCount: Number(row.attempts_count || 0),
+    scorePercent: Number(row.score_percent || 0),
+  }));
+}
 
 module.exports = {
   isConfigured, initDb, getPool,
@@ -609,5 +1199,6 @@ module.exports = {
   startQuizAttempt, finishQuizAttempt, scoreToPercent,
   getUserRole, canUserManageQuiz, replaceQuizQuestions,
   updateQuizTitle, setQuizPublished, quizRowIsPublished, normalizeQuestionInput,
-  findQuizByS3Key, getQuizQuestionsById, getLeaderboard,
+  findQuizByS3Key, getQuizQuestionsById, getLeaderboard, getProgressSummary, 
+  ensureQuestionBankForOwner, listQuestionBankItems, insertQuestionBankItem, updateQuestionBankItem, deleteQuestionBankItem, getQuizAnalyticsByOwner, listOwnedQuizzesHistory,
 };

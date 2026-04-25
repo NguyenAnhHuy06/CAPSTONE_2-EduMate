@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const auth = require("../middleware/auth");
 const rbac = require("../middleware/rbac");
+
 const {
   generateQuiz,
   getQuizHistory,
@@ -11,6 +12,12 @@ const {
   updateQuiz,
   publishQuiz,
   getLeaderboard,
+  createQuiz,
+  getQuizAnalytics,
+  getQuestionBank,
+  createQuestionBankItem,
+  updateQuestionBankItem,
+  deleteQuestionBankItem,
 } = require("../controllers/quizController");
 const { getS3Documents } = require("../controllers/documentController");
 
@@ -51,6 +58,7 @@ router.post("/quiz/generate-direct", auth, async (req, res) => {
 // Quiz CRUD — authenticated
 router.get("/quizzes/history", auth, getQuizHistory);
 router.get("/quizzes/published", auth, getPublishedQuizzes);
+router.get("/quizzes/analytics", auth, rbac("LECTURER", "ADMIN"), getQuizAnalytics);
 router.get("/leaderboard", auth, getLeaderboard);
 router.post("/quiz/attempts", auth, recordQuizAttempt);
 router.get("/quizzes/:id", auth, getQuizById);
@@ -61,5 +69,14 @@ router.post("/quizzes/:id/publish", auth, rbac("LECTURER", "ADMIN"), publishQuiz
 
 // S3 listing — authenticated
 router.get("/s3/documents", auth, getS3Documents);
+
+// Question bank management — Lecturer/Admin only
+router.post("/quizzes", auth, rbac("LECTURER", "ADMIN"), createQuiz);
+
+// Question bank routes
+router.get("/questions/bank", auth, rbac("LECTURER", "ADMIN"), getQuestionBank);
+router.post("/questions/bank", auth, rbac("LECTURER", "ADMIN"), createQuestionBankItem);
+router.patch("/questions/bank/:id", auth, rbac("LECTURER", "ADMIN"), updateQuestionBankItem);
+router.delete("/questions/bank/:id", auth, rbac("LECTURER", "ADMIN"), deleteQuestionBankItem);
 
 module.exports = router;

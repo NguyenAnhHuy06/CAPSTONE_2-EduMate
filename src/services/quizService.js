@@ -160,7 +160,7 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" 
     "- Do NOT use markdown.", "", "Context:", context,
   ].join("\n");
 
-  const useJsonSchema = String(process.env.QUIZ_OPENROUTER_JSON_MODE || "1").trim() !== "0";
+  const useJsonSchema = String(process.env.QUIZ_OPENROUTER_JSON_MODE || "0").trim() !== "0";
   const payload = {
     model: OPENROUTER_MODEL, temperature: 0.2, max_tokens: computeQuizMaxTokens(qCount),
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
@@ -170,6 +170,10 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" 
   const completion = await callOpenRouterWithRetry(payload);
   const choice0 = completion?.choices?.[0];
   const content = getAssistantMessageText(choice0);
+  
+  console.log("[generateQuiz] raw AI content length =", String(content || "").length);
+  console.log("[generateQuiz] raw AI content preview =", String(content || "").slice(0, 500));
+
   const parsed = parseQuizResponse(content);
   const questions = parsed.length > qCount ? parsed.slice(0, qCount) : parsed;
   return { questions, targetCount: qCount };
@@ -202,26 +206,26 @@ If the document has insufficient content, generate as many questions as you can.
 Return ONLY valid JSON, no markdown, no extra text.`;
 
   const user = [
-    `Generate ${qCount} multiple-choice questions. All content must be in the same language as the context provided.`,
-    "",
-    "Required JSON format:",
+    `Generate exactly ${qCount} questions in the same language as the context.`,
+    "Return STRICT JSON only with this format:",
     "{",
     '  "questions": [',
     "    {",
-    '      "question": "Question text here",',
-    '      "options": ["Option A text", "Option B text", "Option C text", "Option D text"],',
+    '      "question": "string",',
+    '      "options": ["Option text 1", "Option text 2", "Option text 3", "Option text 4"],',
     '      "correctAnswer": "A"',
     "    }",
     "  ]",
     "}",
+    "- Do NOT include explanations.",
+    "- Do NOT include text outside JSON.",
+    "- Do NOT use markdown.",
+    "- options must contain full answer text, not just letters.",
+    "- Do NOT return options like ['A','B','C','D'].",
+    "- Each option must be meaningful and based only on the context.",
+    "- Wrong answers should be plausible distractors.",
     "",
-    "Rules:",
-    "- options: array of 4 strings (plain text only, no A. B. C. D. prefix)",
-    "- correctAnswer: one of 'A', 'B', 'C', or 'D'",
-    "- Output ONLY the JSON object, nothing else",
-    "- No markdown code blocks",
-    "",
-    "CONTEXT:",
+    "Context:",
     context,
   ].join("\n");
 
