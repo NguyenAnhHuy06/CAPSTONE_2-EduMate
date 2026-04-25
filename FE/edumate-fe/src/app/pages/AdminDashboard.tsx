@@ -71,7 +71,7 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
   const handleUpdateRole = async (userId: string, newRole: string) => {
     try {
       await api.patch(`/admin/users/${userId}/role`, { role: newRole });
-      setUsers(users.map(u => u.id === userId ? { ...u, role: newRole } : u));
+      setUsers(users.map(u => u.user_id === userId ? { ...u, role: newRole } : u));
     } catch (err) {
       alert('Failed to update role');
     }
@@ -80,7 +80,7 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
   const handleToggleUserStatus = async (userId: string, currentStatus: boolean) => {
     try {
       await api.patch(`/admin/users/${userId}/status`, { is_active: !currentStatus });
-      setUsers(users.map(u => u.id === userId ? { ...u, is_active: !currentStatus } : u));
+      setUsers(users.map(u => u.user_id === userId ? { ...u, is_active: !currentStatus } : u));
     } catch (err) {
       alert('Failed to toggle status');
     }
@@ -198,7 +198,7 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
                   </thead>
                   <tbody>
                     {users.map((u) => (
-                      <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                      <tr key={u.user_id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                         <td className="p-4">
                           <p className="text-sm font-medium text-gray-900">{u.email}</p>
                           <p className="text-xs text-gray-500">{u.user_code || 'No code'}</p>
@@ -207,7 +207,7 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
                         <td className="p-4">
                           <select 
                             value={u.role} 
-                            onChange={(e) => handleUpdateRole(u.id, e.target.value)}
+                            onChange={(e) => handleUpdateRole(u.user_id, e.target.value)}
                             className="text-xs border border-gray-200 rounded p-1 bg-white focus:ring-2 focus:ring-blue-500 outline-none"
                           >
                             <option value="STUDENT">Student</option>
@@ -222,7 +222,7 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
                         </td>
                         <td className="p-4 text-right">
                           <button 
-                            onClick={() => handleToggleUserStatus(u.id, u.is_active)}
+                            onClick={() => handleToggleUserStatus(u.user_id, u.is_active)}
                             className={`p-2 rounded-lg transition-colors ${u.is_active ? 'text-red-600 hover:bg-red-50' : 'text-green-600 hover:bg-green-50'}`}
                             title={u.is_active ? 'Deactivate' : 'Activate'}
                           >
@@ -263,25 +263,31 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
                       </tr>
                     ) : pendingDocs.map((doc) => (
                       <tr key={doc.document_id} className="border-b border-gray-50 hover:bg-gray-50">
-                        <td className="p-4 font-medium text-sm">
-                          {doc.title}
-                          <div className="text-xs text-gray-400 font-normal">{doc.course_code} - {doc.course_name}</div>
+                        <td className="py-3 px-4 font-medium text-sm">
+                          <div className="text-gray-900">{doc.title}</div>
+                          {(doc.course_code || doc.course_name) && (
+                            <div className="text-[11px] text-gray-400 font-normal mt-0.5">
+                              {doc.course_code || ''} {doc.course_code && doc.course_name ? '•' : ''} {doc.course_name || ''}
+                            </div>
+                          )}
                         </td>
-                        <td className="p-4 text-sm">{doc.uploader_name || 'System'}</td>
-                        <td className="p-4 text-sm text-gray-500">{new Date(doc.created_at).toLocaleDateString()}</td>
-                        <td className="p-4 text-right flex justify-end gap-2">
-                          <button 
-                            onClick={() => handleModerateDoc(doc.document_id, 'verify')}
-                            className="flex items-center gap-1 px-3 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 transition-colors"
-                          >
-                            <CheckCircle size={14} /> Verify
-                          </button>
-                          <button 
-                            onClick={() => handleModerateDoc(doc.document_id, 'reject')}
-                            className="flex items-center gap-1 px-3 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700 transition-colors"
-                          >
-                            <XCircle size={14} /> Reject
-                          </button>
+                        <td className="py-3 px-4 text-sm">{doc.uploader_name || 'System'}</td>
+                        <td className="py-3 px-4 text-sm text-gray-400">{new Date(doc.created_at).toLocaleDateString()}</td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex justify-end gap-2">
+                            <button 
+                              onClick={() => handleModerateDoc(doc.document_id, 'verify')}
+                              className="flex items-center gap-1 px-2.5 py-1 bg-green-600 text-white rounded text-[11px] font-medium hover:bg-green-700 transition-colors"
+                            >
+                              <CheckCircle size={13} /> Verify
+                            </button>
+                            <button 
+                              onClick={() => handleModerateDoc(doc.document_id, 'reject')}
+                              className="flex items-center gap-1 px-2.5 py-1 bg-red-600 text-white rounded text-[11px] font-medium hover:bg-red-700 transition-colors"
+                            >
+                              <XCircle size={13} /> Reject
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
