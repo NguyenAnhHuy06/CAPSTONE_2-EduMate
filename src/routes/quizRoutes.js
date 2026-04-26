@@ -18,6 +18,7 @@ const {
   createQuestionBankItem,
   updateQuestionBankItem,
   deleteQuestionBankItem,
+  getQuizResult,
 } = require("../controllers/quizController");
 const { getS3Documents } = require("../controllers/documentController");
 
@@ -61,6 +62,7 @@ router.get("/quizzes/published", auth, getPublishedQuizzes);
 router.get("/quizzes/analytics", auth, rbac("LECTURER", "ADMIN"), getQuizAnalytics);
 router.get("/leaderboard", auth, getLeaderboard);
 router.post("/quiz/attempts", auth, recordQuizAttempt);
+router.get("/quiz/result/:attemptId", auth, getQuizResult);
 router.get("/quizzes/:id", auth, getQuizById);
 
 // Quiz management — Lecturer/Admin only (Design: UC03 Lecturer Flow)

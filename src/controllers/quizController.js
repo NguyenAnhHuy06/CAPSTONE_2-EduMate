@@ -190,12 +190,31 @@ const recordQuizAttempt = async (req, res) => {
       userId,
       score,
       completedAt: req.body.completedAt,
+      answers: req.body.answers,
+      timeTaken: req.body.timeTaken,
     });
 
     return res.status(201).json({ success: true, message: "Đã lưu kết quả lượt làm bài." });
   } catch (err) {
     console.error(err);
     return res.status(400).json({ success: false, message: err.message || "Không lưu được kết quả." });
+  }
+};
+
+const getQuizResult = async (req, res) => {
+  try {
+    if (!db.isConfigured()) return res.status(503).json({ success: false, message: "MySQL chưa cấu hình." });
+    
+    const attemptId = req.params.attemptId || req.params.id;
+    const userId = req.user?.id ?? req.user?.user_id ?? req.query.userId;
+    
+    const data = await db.getAttemptResult(attemptId, userId);
+    if (!data) return res.status(404).json({ success: false, message: "Không tìm thấy kết quả làm bài." });
+    
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ success: false, message: err.message || "Lỗi đọc kết quả." });
   }
 };
 
@@ -404,6 +423,7 @@ module.exports = {
   getQuizHistory,
   getPublishedQuizzes,
   recordQuizAttempt,
+  getQuizResult,
   getQuizById,
   updateQuiz,
   publishQuiz,

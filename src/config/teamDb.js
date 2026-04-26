@@ -316,7 +316,7 @@ async function listPublishedQuizzes(limit = 20) {
   const sql = `SELECT q.quiz_id, q.title, q.created_at, q.published_at, c.course_code,
     (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
     (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
-    u.full_name AS creator_name
+    u.name AS creator_name
     FROM quizzes q LEFT JOIN courses c ON c.course_id = q.course_id
     LEFT JOIN users u ON u.user_id = q.created_by
     WHERE q.is_published = 1
@@ -459,7 +459,7 @@ async function startQuizAttempt({ quizId, userId }) {
   await p.execute("INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,0,NULL)", [qid, userId || null]);
 }
 
-async function finishQuizAttempt({ quizId, userId, score, completedAt = null }) {
+async function finishQuizAttempt({ quizId, userId, score, completedAt = null, answers = [], timeTaken = null }) {
   const p = getPool();
   const qid = Number(quizId);
   if (!Number.isFinite(qid)) throw new Error("quizId không hợp lệ.");
@@ -467,15 +467,103 @@ async function finishQuizAttempt({ quizId, userId, score, completedAt = null }) 
   if (!Number.isFinite(sc) || sc < 0) throw new Error("score không hợp lệ.");
   const when = completedAt ? new Date(completedAt) : new Date();
   await assertQuizExists(qid, p);
+  
+  const answersJson = Array.isArray(answers) ? JSON.stringify(answers) : "[]";
+  const timeTakenSecs = Number(timeTaken) || null;
+  const totalQuestions = Array.isArray(answers) ? answers.length : 0;
+  let correctCount = 0;
+  
+  // Calculate correct count if possible
+  if (Array.isArray(answers) && answers.length > 0) {
+    try {
+      const [qRows] = await p.execute("SELECT question_id, correct_answer FROM quiz_questions WHERE quiz_id = ?", [qid]);
+      const qMap = new Map();
+      qRows.forEach(r => qMap.set(String(r.question_id), String(r.correct_answer || 'A').toUpperCase()));
+      const LETTERS = ['A', 'B', 'C', 'D'];
+      for (const a of answers) {
+        const cor = qMap.get(String(a.questionId));
+        if (cor) {
+          const corIdx = LETTERS.indexOf(cor);
+          if (corIdx >= 0 && corIdx === Number(a.selectedAnswer)) correctCount++;
+        }
+      }
+    } catch(e) {}
+  }
+
   const [openRows] = await p.execute(
     "SELECT attempt_id FROM quiz_attempts WHERE quiz_id = ? AND (user_id <=> ?) AND completed_at IS NULL ORDER BY attempt_id DESC LIMIT 1",
     [qid, userId || null]
   );
   if (openRows.length) {
-    await p.execute("UPDATE quiz_attempts SET score = ?, completed_at = ? WHERE attempt_id = ?", [Math.round(sc), when, openRows[0].attempt_id]);
+    await p.execute("UPDATE quiz_attempts SET score = ?, completed_at = ?, answers_json = ?, time_taken_seconds = ?, correct_count = ?, total_questions = ? WHERE attempt_id = ?", 
+      [Math.round(sc), when, answersJson, timeTakenSecs, correctCount, totalQuestions, openRows[0].attempt_id]);
     return;
   }
-  await p.execute("INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,?,?)", [qid, userId || null, Math.round(sc), when]);
+  await p.execute("INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at, answers_json, time_taken_seconds, correct_count, total_questions) VALUES (?,?,?,?,?,?,?,?)", 
+    [qid, userId || null, Math.round(sc), when, answersJson, timeTakenSecs, correctCount, totalQuestions]);
+}
+
+async function getAttemptResult(attemptId, userId) {
+  const p = getPool();
+  const aid = Number(attemptId);
+  if (!Number.isFinite(aid)) return null;
+  
+  const sql = `
+    SELECT qa.*, q.title FROM quiz_attempts qa
+    INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+    WHERE qa.attempt_id = ? ${userId ? "AND (qa.user_id = ? OR qa.user_id IS NULL)" : ""}
+    LIMIT 1
+  `;
+  const params = userId ? [aid, userId] : [aid];
+  const [rows] = await p.execute(sql, params);
+  
+  if (!rows.length) return null;
+  const row = rows[0];
+  
+  let answers = [];
+  try {
+    if (row.answers_json) answers = JSON.parse(row.answers_json);
+  } catch(e) {}
+
+  if (answers.length > 0) {
+    try {
+      const qIds = answers.map(a => a.questionId || a.question_id).filter(Boolean).map(id => String(id).replace(/[^0-9a-zA-Z_-]/g, ''));
+      if (qIds.length > 0) {
+         const qIdStr = qIds.map(id => `'${id}'`).join(',');
+         const [qRows] = await p.execute(`SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer FROM quiz_questions WHERE question_id IN (${qIdStr})`);
+         const qMap = new Map();
+         qRows.forEach(r => qMap.set(String(r.question_id), r));
+         
+         const LETTERS = ['A', 'B', 'C', 'D'];
+         answers = answers.map(a => {
+           const qData = qMap.get(String(a.questionId || a.question_id));
+           if (qData) {
+             return {
+               ...a,
+               question_text: qData.question_text,
+               options: [qData.option_a, qData.option_b, qData.option_c, qData.option_d],
+               correctAnswer: Math.max(0, LETTERS.indexOf(String(qData.correct_answer || 'A').toUpperCase()))
+             };
+           }
+           return a;
+         });
+      }
+    } catch(e) {
+       console.error("Error fetching detail for answers:", e);
+    }
+  }
+
+  return {
+    attemptId: row.attempt_id,
+    quizId: row.quiz_id,
+    title: row.title,
+    score: row.score,
+    completedAt: row.completed_at,
+    time_taken_seconds: row.time_taken_seconds,
+    correct_count: row.correct_count,
+    total_questions: row.total_questions,
+    answers: answers
+  };
 }
 
 async function replaceQuizQuestions(quizId, questions) {
@@ -561,22 +649,16 @@ async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
   const sql = `
     SELECT
       u.user_id                                     AS userId,
-      u.full_name                                        AS name,
+      u.name                                        AS name,
       u.email,
       COUNT(qa.attempt_id)                          AS totalAttempts,
-      ROUND(AVG(qa.score / qq_count.total * 100))   AS avgScore,
-      ROUND(MAX(qa.score / qq_count.total * 100))   AS bestScore
+      ROUND(AVG(IF(qa.total_questions > 0, (qa.correct_count / qa.total_questions) * 100, qa.score)))   AS avgScore,
+      ROUND(MAX(IF(qa.total_questions > 0, (qa.correct_count / qa.total_questions) * 100, qa.score)))   AS bestScore
     FROM quiz_attempts qa
     INNER JOIN users u ON u.user_id = qa.user_id
-    INNER JOIN (
-      SELECT quiz_id, COUNT(*) AS total
-      FROM quiz_questions
-      GROUP BY quiz_id
-    ) qq_count ON qq_count.quiz_id = qa.quiz_id
     WHERE qa.completed_at IS NOT NULL
       AND qa.user_id IS NOT NULL
-      AND qq_count.total > 0
-    GROUP BY u.user_id, u.full_name, u.email
+    GROUP BY u.user_id, u.name, u.email
     ORDER BY avgScore DESC, totalAttempts DESC
   `;
 
@@ -1200,5 +1282,5 @@ module.exports = {
   getUserRole, canUserManageQuiz, replaceQuizQuestions,
   updateQuizTitle, setQuizPublished, quizRowIsPublished, normalizeQuestionInput,
   findQuizByS3Key, getQuizQuestionsById, getLeaderboard, getProgressSummary, 
-  ensureQuestionBankForOwner, listQuestionBankItems, insertQuestionBankItem, updateQuestionBankItem, deleteQuestionBankItem, getQuizAnalyticsByOwner, listOwnedQuizzesHistory,
+  ensureQuestionBankForOwner, listQuestionBankItems, insertQuestionBankItem, updateQuestionBankItem, deleteQuestionBankItem, getQuizAnalyticsByOwner, listOwnedQuizzesHistory, getAttemptResult
 };
