@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, Upload, FileText, CheckCircle, TrendingUp, User, Home, ClipboardList } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { BookOpen, Upload, FileText, CheckCircle, TrendingUp, User, Home, ClipboardList, Loader2, XCircle } from 'lucide-react';
 import { Sidebar } from '../Sidebar';
 import { DocumentLibrary } from '../DocumentLibrary';
 import { UploadDocument } from '../UploadDocument';
@@ -7,17 +8,57 @@ import { Profile } from '../Profile';
 import { QuizManagement, type InitialAiDocumentPayload } from '../lecturer/QuizManagement';
 import api from '@/services/api';
 
+const LECTURER_QUIZ_GENERATING_KEY = 'edumate_lecturer_quiz_generating';
+const LECTURER_QUIZ_AUTOSTART_KEY = 'edumate_lecturer_quiz_autostart';
+const LECTURER_QUIZ_AUTOSTART_EVENT = 'edumate:lecturer-quiz-autostart';
+type LecturerQuizJobState = {
+    running: boolean;
+    status?: 'idle' | 'running' | 'completed' | 'failed';
+    title?: string;
+    error?: string;
+    quizId?: number | null;
+    autoOpen?: boolean;
+    navigateTo?: string;
+    navigateReplace?: boolean;
+    startedAt?: number;
+    updatedAt?: number;
+};
+
+type InstructorMainTab = 'overview' | 'documents' | 'upload' | 'quizzes' | 'profile';
+
 interface InstructorDashboardProps {
   user: any;
   onLogout: () => void;
   onUserUpdate?: (user: any) => void;
+  /** When set (e.g. `/quiz/:id` or `/lecturer/quiz/:id` deep link), open Quizzes and focus this quiz in the editor. */
+  focusQuizId?: number | null;
+  initialMainTab?: InstructorMainTab;
 }
 
-export function InstructorDashboard({ user, onLogout, onUserUpdate }: InstructorDashboardProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'documents' | 'upload' | 'quizzes' | 'profile'>('overview');
+export function InstructorDashboard({
+  user,
+  onLogout,
+  onUserUpdate,
+  focusQuizId = null,
+  initialMainTab,
+}: InstructorDashboardProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [activeTab, setActiveTab] = useState<InstructorMainTab>(() => {
+    const fromNav = (location.state as { instructorMainTab?: InstructorMainTab } | null)?.instructorMainTab;
+    const valid: InstructorMainTab[] = ['overview', 'documents', 'upload', 'quizzes', 'profile'];
+    if (fromNav && valid.includes(fromNav)) return fromNav;
+    return initialMainTab ?? 'overview';
+  });
   const [pendingAiDocument, setPendingAiDocument] = useState<InitialAiDocumentPayload | null>(null);
   const clearPendingAiDocument = useCallback(() => setPendingAiDocument(null), []);
+  const [fileHighlightRequest, setFileHighlightRequest] = useState<{
+    s3Key: string;
+    nonce: number;
+  } | null>(null);
+  const clearFileHighlightRequest = useCallback(() => setFileHighlightRequest(null), []);
   const [overviewLoading, setOverviewLoading] = useState(false);
+  const [quizJobState, setQuizJobState] = useState<LecturerQuizJobState | null>(null);
   const [overview, setOverview] = useState({
     materialsUploaded: 0,
     totalAttempts: 0,
@@ -128,6 +169,98 @@ export function InstructorDashboard({ user, onLogout, onUserUpdate }: Instructor
     loadOverview();
   }, [lecturerUserId]);
 
+  useEffect(() => {
+    const readJob = () => {
+      try {
+        const raw = localStorage.getItem(LECTURER_QUIZ_GENERATING_KEY);
+        setQuizJobState(raw ? (JSON.parse(raw) as LecturerQuizJobState) : null);
+      } catch {
+        setQuizJobState(null);
+      }
+    };
+    readJob();
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === LECTURER_QUIZ_GENERATING_KEY) readJob();
+    };
+    const onCustom = () => readJob();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('edumate:lecturer-quiz-generating', onCustom);
+    const timer = window.setInterval(readJob, 1200);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('edumate:lecturer-quiz-generating', onCustom);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (quizJobState?.status !== 'completed') return;
+    const navTo = String(quizJobState?.navigateTo || '').trim();
+    const navReplace = quizJobState?.navigateReplace !== false;
+    if (navTo) {
+      navigate(navTo, { replace: navReplace });
+      try {
+        const raw = localStorage.getItem(LECTURER_QUIZ_GENERATING_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        if (parsed && typeof parsed === 'object') {
+          parsed.navigateTo = '';
+          localStorage.setItem(LECTURER_QUIZ_GENERATING_KEY, JSON.stringify(parsed));
+        }
+      } catch {
+        // ignore storage failures
+      }
+      setQuizJobState((prev) => (prev ? { ...prev, navigateTo: '' } : null));
+      return;
+    }
+    try {
+      localStorage.setItem(
+        LECTURER_QUIZ_AUTOSTART_KEY,
+        JSON.stringify({
+          quizId: Number(quizJobState?.quizId ?? 0) || null,
+          title: String(quizJobState?.title || 'AI Quiz'),
+          updatedAt: Date.now(),
+        })
+      );
+      window.dispatchEvent(new Event(LECTURER_QUIZ_AUTOSTART_EVENT));
+    } catch {
+      // ignore storage failures
+    }
+    setActiveTab('quizzes');
+  }, [
+    quizJobState?.status,
+    quizJobState?.quizId,
+    quizJobState?.title,
+    quizJobState?.navigateTo,
+    quizJobState?.navigateReplace,
+    navigate,
+  ]);
+
+  useEffect(() => {
+    const onReady = (e: Event) => {
+      const d = (e as CustomEvent<{ navigateTo?: string; autoOpen?: boolean; navigateReplace?: boolean }>).detail;
+      const to = String(d?.navigateTo || '').trim();
+      if (d?.autoOpen && to) {
+        navigate(to, { replace: d?.navigateReplace !== false });
+      }
+    };
+    window.addEventListener('quiz:ready', onReady as EventListener);
+    return () => window.removeEventListener('quiz:ready', onReady as EventListener);
+  }, [navigate]);
+
+  useEffect(() => {
+    if (!quizJobState?.status) return;
+    if (quizJobState.status === 'running' || quizJobState.status === 'idle') return;
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.removeItem(LECTURER_QUIZ_GENERATING_KEY);
+      } catch {
+        // ignore storage failures
+      }
+      setQuizJobState(null);
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [quizJobState?.status]);
+
   const stats = useMemo(() => ([
     { label: 'Materials Uploaded', value: String(overview.materialsUploaded), icon: FileText, color: 'bg-blue-100 text-blue-600' },
     { label: 'Total Attempts', value: String(overview.totalAttempts), icon: TrendingUp, color: 'bg-green-100 text-green-600' },
@@ -206,16 +339,10 @@ export function InstructorDashboard({ user, onLogout, onUserUpdate }: Instructor
             <DocumentLibrary
               userRole="instructor"
               user={user}
-              onInstructorCreateQuizWithAi={(doc) => {
+              onInstructorMoveToQuizFile={(doc) => {
                 const s3Key = String(doc.s3Key || '').trim();
                 if (!s3Key) return;
-                setPendingAiDocument({
-                  s3Key,
-                  documentId: doc.documentId ?? undefined,
-                  title: doc.title,
-                  courseCode: String(doc.courseCode || '').trim() || undefined,
-                  nonce: Date.now(),
-                });
+                setFileHighlightRequest({ s3Key, nonce: Date.now() });
                 setActiveTab('quizzes');
               }}
             />
@@ -228,8 +355,11 @@ export function InstructorDashboard({ user, onLogout, onUserUpdate }: Instructor
           {activeTab === 'quizzes' && (
             <QuizManagement
               user={user}
+              focusQuizId={focusQuizId}
               initialAiDocument={pendingAiDocument}
               onInitialAiDocumentConsumed={clearPendingAiDocument}
+              fileHighlightRequest={fileHighlightRequest}
+              onFileHighlightConsumed={clearFileHighlightRequest}
             />
           )}
 
@@ -237,6 +367,41 @@ export function InstructorDashboard({ user, onLogout, onUserUpdate }: Instructor
             <Profile user={user} onUserUpdate={onUserUpdate} />
           )}
         </div>
+        {quizJobState?.status && quizJobState.status !== 'idle' && (
+          <div className="fixed bottom-5 right-5 z-[80] w-[380px] max-w-[calc(100vw-24px)] bg-white rounded-xl shadow-xl border border-gray-200 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-gray-900 font-semibold text-sm">
+                  {quizJobState.status === 'running'
+                    ? 'Generating quiz in background'
+                    : quizJobState.status === 'completed'
+                      ? 'Quiz generation completed'
+                      : 'Quiz generation failed'}
+                </h3>
+                <p className="text-xs text-gray-600 mt-0.5">{quizJobState.title || 'AI Quiz'}</p>
+              </div>
+              {quizJobState.status === 'running' ? (
+                <Loader2 size={18} className="text-blue-600 animate-spin shrink-0" />
+              ) : quizJobState.status === 'completed' ? (
+                <CheckCircle size={18} className="text-green-600 shrink-0" />
+              ) : (
+                <XCircle size={18} className="text-red-600 shrink-0" />
+              )}
+            </div>
+            <p className="mt-2 text-xs text-gray-700">
+              {quizJobState.status === 'running'
+                ? 'Please wait. You can continue using other tabs while AI generates questions.'
+                : quizJobState.status === 'completed'
+                  ? 'Generation finished successfully.'
+                  : (quizJobState.error || 'Could not generate quiz. Please try again.')}
+            </p>
+            <div className="mt-3 flex items-center justify-between">
+              <span className="text-[11px] text-gray-500">
+                {quizJobState.updatedAt ? new Date(quizJobState.updatedAt).toLocaleTimeString() : 'Processing...'}
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

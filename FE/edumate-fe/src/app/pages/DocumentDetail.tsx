@@ -4,6 +4,7 @@ import {
   Download,
   MessageSquare,
   Sparkles,
+  FolderOpen,
   Send,
   CheckCircle,
   ExternalLink,
@@ -28,8 +29,13 @@ interface DocumentDetailProps {
   onBack: () => void;
   /** Instructor dashboard: run real AI quiz flow (e.g. Quiz Management). */
   onCreateQuizWithAi?: () => void;
+  /** Instructor: jump to Quizzes tab and highlight the quiz row for this file (same storage key). */
+  onMoveToQuizFile?: () => void;
   /** Alternative: parent handles navigation to quiz (optional). */
   onOpenQuiz?: (document: any) => void;
+  /** Student flow: auto-open flashcard screen once detail loads. */
+  autoOpenFlashcardMode?: 'creator' | 'viewer' | null;
+  onAutoOpenFlashcardHandled?: () => void;
 }
 
 type DiscussionComment = {
@@ -79,7 +85,10 @@ export function DocumentDetail ({
   userRole,
   onBack,
   onCreateQuizWithAi,
+  onMoveToQuizFile,
   onOpenQuiz,
+  autoOpenFlashcardMode,
+  onAutoOpenFlashcardHandled,
 }: DocumentDetailProps) {
 
   const { showNotification } = useNotification()
@@ -107,6 +116,18 @@ export function DocumentDetail ({
   const [pdfRendering, setPdfRendering] = useState(false);
   const [pdfRenderError, setPdfRenderError] = useState('');
   const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [didAutoOpenFlashcard, setDidAutoOpenFlashcard] = useState(false);
+
+  useEffect(() => {
+    if (!autoOpenFlashcardMode || didAutoOpenFlashcard) return;
+    if (autoOpenFlashcardMode === 'viewer') {
+      setShowFlashcardViewer(true);
+    } else {
+      setShowFlashcardCreator(true);
+    }
+    setDidAutoOpenFlashcard(true);
+    onAutoOpenFlashcardHandled?.();
+  }, [autoOpenFlashcardMode, didAutoOpenFlashcard, onAutoOpenFlashcardHandled]);
 
   const fileName = String(document?.s3Key || document?.storedFileName || document?.originalFileName || '');
   const fileExt = fileName.includes('.') ? fileName.split('.').pop()?.toLowerCase() || '' : '';
@@ -673,14 +694,25 @@ export function DocumentDetail ({
                 </button>
               );
             })()}
-            <button
-              type="button"
-              onClick={handleOpenQuizFlow}
-              className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
-            >
-              <Sparkles size={18} />
-              Create Quiz with AI
-            </button>
+            {onMoveToQuizFile ? (
+              <button
+                type="button"
+                onClick={() => onMoveToQuizFile()}
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+              >
+                <FolderOpen size={18} />
+                Open in Quizzes
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleOpenQuizFlow}
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+              >
+                <FolderOpen size={18} />
+                Open in Quizzes
+              </button>
+            )}
 
             {userRole === 'student' && (
               <>
@@ -877,6 +909,8 @@ export function DocumentDetail ({
           <AIChatPanel
             documentId={document.documentId}
             s3Key={document.s3Key}
+            pdfPage={pdfTotalPages > 0 ? pdfPage : undefined}
+            pdfTotalPages={pdfTotalPages > 0 ? pdfTotalPages : undefined}
             onClose={() => setShowAIChat(false)}
           />
         </div>

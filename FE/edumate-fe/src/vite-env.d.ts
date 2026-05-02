@@ -7,6 +7,11 @@ declare global {
     readonly VITE_PROXY_TARGET: string
     /** Vite dev server port */
     readonly VITE_DEV_PORT: string
+    /**
+     * Khi BE chỉ dùng JWT, không cần `?userId=` trên GET lecturer-review / PATCH grade.
+     * Đặt `true` khi nối API production. Mock local thường cần userId → để trống hoặc `false`.
+     */
+    readonly VITE_QUIZ_GRADING_SKIP_USER_QUERY?: string
   }
 
   interface ImportMeta {

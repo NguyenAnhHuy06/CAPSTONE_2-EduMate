@@ -1,10 +1,34 @@
 import { useEffect, useState } from 'react';
+import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { Login } from '../app/pages/Login';
 import { Register } from '../app/pages/Register';
 import { InstructorDashboard } from '../app/pages/lecturer/InstructorDashboard';
 import { StudentDashboard } from '../app/pages/student/StudentDashboard';
 import { AdminDashboard } from '../app/pages/AdminDashboard';
 import { NotificationProvider } from '../app/pages/NotificationContext';
+
+function LecturerQuizDeepLink({
+  user,
+  onLogout,
+  onUserUpdate,
+}: {
+  user: any;
+  onLogout: () => void;
+  onUserUpdate?: (u: any) => void;
+}) {
+  const { quizId } = useParams();
+  const id = Number(quizId);
+  const focusId = Number.isFinite(id) && id > 0 ? id : null;
+  return (
+    <InstructorDashboard
+      user={user}
+      onLogout={onLogout}
+      onUserUpdate={onUserUpdate}
+      initialMainTab="quizzes"
+      focusQuizId={focusId}
+    />
+  );
+}
 
 export default function App() {
   useEffect(() => {
@@ -61,33 +85,68 @@ export default function App() {
 
   return (
     <NotificationProvider>
-      {!isLoggedIn ? (
-        showRegister ? (
-          <Register
-            onRegister={handleRegister}
-            onBackToLogin={() => setShowRegister(false)}
-          />
-        ) : (
-          <Login
-            onLogin={handleLogin}
-            onGoToRegister={() => setShowRegister(true)}
-          />
-        )
-      ) : userRole === 'admin' ? (
-        <AdminDashboard user={userData} onLogout={handleLogout} />
-      ) : userRole === 'instructor' ? (
-        <InstructorDashboard
-          user={userData}
-          onLogout={handleLogout}
-          onUserUpdate={(u) => setUserData(u)}
+      <Routes>
+        <Route
+          path="/quiz/:quizId"
+          element={
+            isLoggedIn && userRole === 'instructor' ? (
+              <LecturerQuizDeepLink
+                user={userData}
+                onLogout={handleLogout}
+                onUserUpdate={(u) => setUserData(u)}
+              />
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
         />
-      ) : (
-        <StudentDashboard
-          user={userData}
-          onLogout={handleLogout}
-          onUserUpdate={(u) => setUserData(u)}
+        <Route
+          path="/lecturer/quiz/:quizId"
+          element={
+            isLoggedIn && userRole === 'instructor' ? (
+              <LecturerQuizDeepLink
+                user={userData}
+                onLogout={handleLogout}
+                onUserUpdate={(u) => setUserData(u)}
+              />
+            ) : (
+              <Navigate to="/" replace />
+            )
+          }
         />
-      )}
+        <Route
+          path="*"
+          element={
+            !isLoggedIn ? (
+              showRegister ? (
+                <Register
+                  onRegister={handleRegister}
+                  onBackToLogin={() => setShowRegister(false)}
+                />
+              ) : (
+                <Login
+                  onLogin={handleLogin}
+                  onGoToRegister={() => setShowRegister(true)}
+                />
+              )
+            ) : userRole === 'admin' ? (
+              <AdminDashboard user={userData} onLogout={handleLogout} />
+            ) : userRole === 'instructor' ? (
+              <InstructorDashboard
+                user={userData}
+                onLogout={handleLogout}
+                onUserUpdate={(u) => setUserData(u)}
+              />
+            ) : (
+              <StudentDashboard
+                user={userData}
+                onLogout={handleLogout}
+                onUserUpdate={(u) => setUserData(u)}
+              />
+            )
+          }
+        />
+      </Routes>
     </NotificationProvider>
   );
 }

@@ -8,6 +8,10 @@ interface DocumentLibraryProps {
   userRole: 'instructor' | 'student'
   user: any
   onInstructorCreateQuizWithAi?: (doc: CourseMaterialDoc) => void
+  /** Switch to Quizzes tab and highlight the quiz row for this document’s file. */
+  onInstructorMoveToQuizFile?: (doc: CourseMaterialDoc) => void
+  /** Student: leave document detail and jump to Quizzes tab with that source file highlighted (not Documents list). */
+  onStudentOpenInQuizzes?: (doc: CourseMaterialDoc) => void
 }
 
 export type CourseMaterialDoc = {
@@ -35,6 +39,17 @@ export type CourseMaterialDoc = {
   isLecturerUpload: boolean
   categoryKey: 'general' | 'general-major' | 'specialized' | 'uncategorized'
   status?: string
+}
+const STUDENT_FLASHCARD_NAVIGATE_KEY = 'edumate_student_flashcard_navigate'
+
+function buildDocFocusKey(doc: Partial<CourseMaterialDoc> | null | undefined): string {
+  const rawId = doc?.documentId ?? doc?.id
+  if (rawId != null && rawId !== '' && Number.isFinite(Number(rawId))) {
+    return `docid:${Number(rawId)}`
+  }
+  const s3 = String(doc?.s3Key || '').trim()
+  if (s3) return `s3:${s3}`
+  return `title:${String(doc?.title || '').trim().toLowerCase()}`
 }
 
 function formatYmd(value: string | Date | undefined | null): string {
@@ -159,7 +174,13 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
   }
 }
 
-export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }: DocumentLibraryProps) {
+export function DocumentLibrary({
+  userRole,
+  user,
+  onInstructorCreateQuizWithAi,
+  onInstructorMoveToQuizFile,
+  onStudentOpenInQuizzes,
+}: DocumentLibraryProps) {
   const { showNotification } = useNotification()
   const [searchQuery, setSearchQuery] = useState('')
   const [categoryFilter, setCategoryFilter] = useState<
@@ -169,6 +190,11 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
   const [documents, setDocuments] = useState<CourseMaterialDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [loadMessage, setLoadMessage] = useState<string | null>(null)
+  const [pendingFocusKey, setPendingFocusKey] = useState<string | null>(null)
+  const [highlightedDocKey, setHighlightedDocKey] = useState<string | null>(null)
+  const [pendingFlashcardTarget, setPendingFlashcardTarget] = useState<any>(null)
+  const [autoOpenFlashcardDocKey, setAutoOpenFlashcardDocKey] = useState<string | null>(null)
+  const [autoOpenFlashcardMode, setAutoOpenFlashcardMode] = useState<'creator' | 'viewer' | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -176,7 +202,12 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
       setLoading(true)
       setLoadMessage(null)
       try {
-        const res: any = await api.get('/documents/for-quiz')
+        const res: any = await api.get('/documents/for-quiz', {
+          params: {
+            includeVerified: true,
+            audience: userRole === 'student' ? 'student' : 'instructor',
+          },
+        })
         const raw = Array.isArray(res?.data) ? res.data : []
         const mapped = raw.map(mapApiRowToDoc)
         if (!cancelled) {
@@ -195,7 +226,7 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [userRole])
 
   const filteredDocuments = useMemo(() => {
     return documents.filter((doc) => {
@@ -216,6 +247,84 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
     })
   }, [documents, searchQuery, categoryFilter])
 
+  useEffect(() => {
+    if (!pendingFocusKey || loading) return
+    const foundInAll = documents.some((d) => buildDocFocusKey(d) === pendingFocusKey)
+    if (!foundInAll) return
+
+    const foundInFiltered = filteredDocuments.some((d) => buildDocFocusKey(d) === pendingFocusKey)
+    if (!foundInFiltered) {
+      if (searchQuery.trim()) setSearchQuery('')
+      if (categoryFilter !== 'all') setCategoryFilter('all')
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      const selector = `[data-doc-focus-key="${pendingFocusKey.replace(/"/g, '\\"')}"]`
+      const target = document.querySelector(selector) as HTMLElement | null
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+      setHighlightedDocKey(pendingFocusKey)
+      setPendingFocusKey(null)
+    }, 80)
+
+    return () => window.clearTimeout(timer)
+  }, [pendingFocusKey, loading, documents, filteredDocuments, searchQuery, categoryFilter])
+
+  useEffect(() => {
+    if (!highlightedDocKey) return
+    const timer = window.setTimeout(() => setHighlightedDocKey(null), 2600)
+    return () => window.clearTimeout(timer)
+  }, [highlightedDocKey])
+
+  useEffect(() => {
+    const readTarget = () => {
+      try {
+        const raw = localStorage.getItem(STUDENT_FLASHCARD_NAVIGATE_KEY)
+        if (!raw) return
+        const parsed = JSON.parse(raw)
+        setPendingFlashcardTarget(parsed)
+      } catch {
+        // ignore invalid payload
+      }
+    }
+    readTarget()
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STUDENT_FLASHCARD_NAVIGATE_KEY) readTarget()
+    }
+    const onCustom = () => readTarget()
+    window.addEventListener('storage', onStorage)
+    window.addEventListener('edumate:student-flashcard-navigate', onCustom)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('edumate:student-flashcard-navigate', onCustom)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!pendingFlashcardTarget || loading) return
+    const targetDocId = Number(pendingFlashcardTarget?.documentId)
+    const targetS3 = String(pendingFlashcardTarget?.s3Key || '').trim()
+    const targetTitle = String(pendingFlashcardTarget?.title || '').trim().toLowerCase()
+    const targetMode: 'creator' | 'viewer' =
+      pendingFlashcardTarget?.mode === 'viewer' ? 'viewer' : 'creator'
+    const found = documents.find((d) => {
+      const docId = Number(d?.documentId ?? d?.id)
+      if (Number.isFinite(targetDocId) && Number.isFinite(docId) && docId === targetDocId) return true
+      if (targetS3 && String(d?.s3Key || '').trim() === targetS3) return true
+      if (targetTitle && String(d?.title || '').trim().toLowerCase() === targetTitle) return true
+      return false
+    })
+    if (!found) return
+    const docKey = buildDocFocusKey(found)
+    setAutoOpenFlashcardDocKey(docKey)
+    setAutoOpenFlashcardMode(targetMode)
+    setSelectedDocument(found)
+    setPendingFlashcardTarget(null)
+    localStorage.removeItem(STUDENT_FLASHCARD_NAVIGATE_KEY)
+  }, [pendingFlashcardTarget, loading, documents])
+
   if (selectedDocument) {
     return (
       <DocumentDetail
@@ -223,14 +332,64 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
         userRole={userRole}
         user={user}
         onBack={() => setSelectedDocument(null)}
-        onCreateQuizWithAi={
-          userRole === 'instructor' && onInstructorCreateQuizWithAi
+        autoOpenFlashcardMode={
+          userRole === 'student' &&
+          autoOpenFlashcardDocKey != null &&
+          autoOpenFlashcardDocKey === buildDocFocusKey(selectedDocument)
+            ? autoOpenFlashcardMode
+            : null
+        }
+        onAutoOpenFlashcardHandled={() => {
+          setAutoOpenFlashcardDocKey(null)
+          setAutoOpenFlashcardMode(null)
+        }}
+        onOpenQuiz={
+          userRole === 'student'
+            ? (doc: CourseMaterialDoc) => {
+                if (onStudentOpenInQuizzes) {
+                  if (!String(doc?.s3Key || '').trim()) {
+                    showNotification({
+                      type: 'warning',
+                      title: 'Open in Quizzes',
+                      message:
+                        'This material has no storage key yet. Open Quizzes from the sidebar after it is indexed.',
+                    })
+                    return
+                  }
+                  setSelectedDocument(null)
+                  onStudentOpenInQuizzes(doc)
+                  return
+                }
+                setSelectedDocument(null)
+                setPendingFocusKey(buildDocFocusKey(doc))
+              }
+            : undefined
+        }
+        onMoveToQuizFile={
+          userRole === 'instructor' && onInstructorMoveToQuizFile
             ? () => {
                 const d = selectedDocument
                 if (!String(d.s3Key || '').trim()) {
                   showNotification({
                     type: 'warning',
-                    title: 'Create Quiz with AI',
+                    title: 'Open in Quizzes',
+                    message:
+                      'This material has no storage key yet. Re-upload or wait for indexing, then try again.',
+                  })
+                  return
+                }
+                onInstructorMoveToQuizFile(d)
+              }
+            : undefined
+        }
+        onCreateQuizWithAi={
+          userRole === 'instructor' && onInstructorCreateQuizWithAi && !onInstructorMoveToQuizFile
+            ? () => {
+                const d = selectedDocument
+                if (!String(d.s3Key || '').trim()) {
+                  showNotification({
+                    type: 'warning',
+                    title: 'Open in Quizzes',
                     message: 'This file has no storage key yet. Re-upload or wait for indexing, then try again.',
                   })
                   return
@@ -296,7 +455,12 @@ export function DocumentLibrary({ userRole, user, onInstructorCreateQuizWithAi }
         {filteredDocuments.map((doc) => (
           <div
             key={String(doc.id)}
-            className="bg-white rounded-lg border border-gray-200 p-6 hover:shadow-md transition-shadow cursor-pointer"
+            data-doc-focus-key={buildDocFocusKey(doc)}
+            className={`bg-white rounded-lg border p-6 hover:shadow-md transition-shadow cursor-pointer ${
+              highlightedDocKey === buildDocFocusKey(doc)
+                ? 'border-blue-500 ring-2 ring-blue-200 shadow-sm'
+                : 'border-gray-200'
+            }`}
             onClick={() => setSelectedDocument(doc)}
           >
             <div className="flex items-start justify-between mb-3">

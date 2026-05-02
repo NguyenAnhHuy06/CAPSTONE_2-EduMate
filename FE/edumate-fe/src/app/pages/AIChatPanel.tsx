@@ -19,10 +19,19 @@ interface Message {
 interface AIChatPanelProps {
   documentId?: number;
   s3Key?: string;
+  /** PDF page the user is viewing (1-based). Sent so the backend can bias retrieval to this section. */
+  pdfPage?: number;
+  pdfTotalPages?: number;
   onClose?: () => void;
 }
 
-export function AIChatPanel({ documentId, s3Key, onClose }: AIChatPanelProps) {
+export function AIChatPanel({
+  documentId,
+  s3Key,
+  pdfPage,
+  pdfTotalPages,
+  onClose,
+}: AIChatPanelProps) {
   const [messages, setMessages] = useState<Message[]>([
     {
       message_id: 0,
@@ -54,11 +63,25 @@ export function AIChatPanel({ documentId, s3Key, onClose }: AIChatPanelProps) {
     setIsLoading(true);
 
     try {
-      const res: any = await api.post('/chat/ask', {
+      const payload: Record<string, unknown> = {
         question,
-        s3Key,
-        sessionId
-      });
+        sessionId,
+      };
+      if (s3Key != null && String(s3Key).trim() !== '') payload.s3Key = s3Key;
+      if (documentId != null && Number.isFinite(Number(documentId)))
+        payload.documentId = Number(documentId);
+      if (
+        pdfPage != null &&
+        pdfTotalPages != null &&
+        pdfTotalPages > 0 &&
+        pdfPage >= 1 &&
+        pdfPage <= pdfTotalPages
+      ) {
+        payload.pdfPage = pdfPage;
+        payload.pdfTotalPages = pdfTotalPages;
+      }
+
+      const res: any = await api.post('/chat/ask', payload);
 
       if (res.success && res.data) {
         if (!sessionId && res.data.sessionId) setSessionId(res.data.sessionId);

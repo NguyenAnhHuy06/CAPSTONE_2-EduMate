@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BookOpen, User, GraduationCap } from 'lucide-react';
 import api from '../../services/api';
 
@@ -20,7 +20,18 @@ export function Register({ onBackToLogin }: RegisterProps) {
   const [step, setStep] = useState<'form' | 'otp'>('form');
   const [otpCode, setOtpCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [resendingOtp, setResendingOtp] = useState(false);
+  const [resendAvailableAtMs, setResendAvailableAtMs] = useState<number>(0);
+  const [nowMs, setNowMs] = useState<number>(Date.now());
   const [message, setMessage] = useState('');
+  const RESEND_COOLDOWN_MS = 5 * 60 * 1000;
+  const resendRemainSec = Math.max(0, Math.ceil((resendAvailableAtMs - nowMs) / 1000));
+  const canResendOtp = resendRemainSec <= 0 && !submitting && !resendingOtp;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
@@ -101,6 +112,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
       }
       setStep('otp');
       setMessage('OTP has been sent. Please check your email.');
+      setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
     } catch (err: any) {
       setErrors({ email: String(err?.response?.data?.message || 'Registration failed.') });
     } finally {
@@ -113,6 +125,35 @@ export function Register({ onBackToLogin }: RegisterProps) {
     // Clear error when user starts typing
     if (errors[field]) {
       setErrors({ ...errors, [field]: '' });
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!canResendOtp) return;
+    setMessage('');
+    setErrors((prev) => ({ ...prev, otpCode: '' }));
+    setResendingOtp(true);
+    try {
+      const resendRes: any = await api.post('/auth/register', {
+        full_name: formData.fullName,
+        email: formData.email,
+        password: formData.password,
+        role: role === 'instructor' ? 'LECTURER' : 'STUDENT',
+        user_code: formData.id,
+      });
+      if (!resendRes?.success) {
+        setErrors((prev) => ({ ...prev, otpCode: 'Failed to resend OTP.' }));
+        return;
+      }
+      setMessage('OTP has been resent. Please check your email.');
+      setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
+    } catch (err: any) {
+      setErrors((prev) => ({
+        ...prev,
+        otpCode: String(err?.response?.data?.message || 'Failed to resend OTP.'),
+      }));
+    } finally {
+      setResendingOtp(false);
     }
   };
 
@@ -293,6 +334,18 @@ export function Register({ onBackToLogin }: RegisterProps) {
                   className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
                 >
                   {submitting ? 'Verifying...' : 'Verify OTP & Complete Registration'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={!canResendOtp}
+                  className="w-full mt-3 border border-blue-600 text-blue-600 py-3 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {resendingOtp
+                    ? 'Resending OTP...'
+                    : resendRemainSec > 0
+                      ? `Resend OTP in ${Math.floor(resendRemainSec / 60)}:${String(resendRemainSec % 60).padStart(2, '0')}`
+                      : 'Resend OTP'}
                 </button>
               </>
             )}

@@ -11,6 +11,8 @@ import {
 } from 'lucide-react';
 import { useNotification } from './NotificationContext';
 import api, { getStoredAuthToken } from '../../services/api';
+const STUDENT_FLASHCARD_GENERATING_KEY = 'edumate_student_flashcard_generating';
+type StudentFlashcardJobStatus = 'idle' | 'running' | 'completed' | 'failed';
 
 interface FlashcardCreatorProps {
   document: any;
@@ -33,6 +35,38 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
   const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
   const [authBlocked, setAuthBlocked] = useState(false);
+  const setFlashcardGeneratingStatus = (
+    status: StudentFlashcardJobStatus,
+    extra?: { jobId?: string; title?: string; error?: string; documentId?: number | null; s3Key?: string }
+  ) => {
+    const prevRaw = localStorage.getItem(STUDENT_FLASHCARD_GENERATING_KEY);
+    let prev: any = null;
+    try {
+      prev = prevRaw ? JSON.parse(prevRaw) : null;
+    } catch {
+      prev = null;
+    }
+    const jobId = extra?.jobId || prev?.jobId || `job-${Date.now()}`;
+    try {
+      localStorage.setItem(
+        STUDENT_FLASHCARD_GENERATING_KEY,
+        JSON.stringify({
+          running: status === 'running',
+          status,
+          jobId,
+          title: extra?.title ?? prev?.title ?? '',
+          error: extra?.error ?? '',
+          documentId: extra?.documentId ?? prev?.documentId ?? null,
+          s3Key: extra?.s3Key ?? prev?.s3Key ?? '',
+          startedAt: prev?.startedAt ?? Date.now(),
+          updatedAt: Date.now(),
+        })
+      );
+    } catch {
+      // ignore storage failures
+    }
+    window.dispatchEvent(new Event('edumate:student-flashcard-generating'));
+  };
 
   const documentId =
   document?.documentId != null && Number.isFinite(Number(document.documentId))
@@ -41,7 +75,31 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     
   const s3Key = document?.s3Key;
 
+  const persistFlashcards = async (cards: Flashcard[]) => {
+    if (!documentId) {
+      return { ok: false, message: 'Missing document ID, so flashcards could not be saved automatically.' };
+    }
+    const validFlashcards = cards.filter((card) => card.front.trim() && card.back.trim());
+    if (!validFlashcards.length) {
+      return { ok: false, message: 'No valid flashcards to save.' };
+    }
+    const payload = {
+      document_id: documentId,
+      flashcards: validFlashcards.map((card) => ({
+        front_text: card.front,
+        back_text: card.back,
+      })),
+    };
+    const res: any = await api.post('/flashcards', payload);
+    if (res?.success === false) {
+      return { ok: false, message: res?.message || 'Could not save flashcards.' };
+    }
+    return { ok: true, message: '' };
+  };
+
   const generateFlashcards = async () => {
+    const newJobId = `flashcard-gen-${Date.now()}`;
+    const jobTitle = String(document?.title || 'AI Flashcards');
     const token = getStoredAuthToken();
     if (authBlocked && token) {
       setAuthBlocked(false);
@@ -78,11 +136,22 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     }
 
     setGenerating(true);
+    setFlashcardGeneratingStatus('running', {
+      jobId: newJobId,
+      title: jobTitle,
+      documentId,
+      s3Key: String(s3Key || ''),
+    });
 
     try {
       const res: any = await api.post('/flashcards/generate', { s3Key });
 
       if (res?.success === false) {
+        setFlashcardGeneratingStatus('failed', {
+          jobId: newJobId,
+          title: jobTitle,
+          error: res?.message || 'Could not generate flashcards.',
+        });
         showNotification({
           type: 'error',
           title: 'Generation failed',
@@ -102,13 +171,41 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
 
       setFlashcards(mapped);
 
-      showNotification({
-        type: 'success',
-        title: 'Flashcards generated',
-        message: `Generated ${mapped.length} flashcards successfully.`,
-        duration: 3000,
-      });
+      // Auto-save right after generation so cards appear in "Study My Flashcards".
+      setSaving(true);
+      const saveResult = await persistFlashcards(mapped);
+      setSaving(false);
+
+      if (saveResult.ok) {
+        setFlashcardGeneratingStatus('completed', {
+          jobId: newJobId,
+          title: jobTitle,
+        });
+        showNotification({
+          type: 'success',
+          title: 'Flashcards generated',
+          message: `Generated and saved ${mapped.length} flashcards to Study My Flashcards.`,
+          duration: 3000,
+        });
+      } else {
+        setFlashcardGeneratingStatus('failed', {
+          jobId: newJobId,
+          title: jobTitle,
+          error: saveResult.message || 'Generated flashcards but failed to save.',
+        });
+        showNotification({
+          type: 'warning',
+          title: 'Generated but not saved',
+          message: saveResult.message || 'Generated flashcards, but auto-save failed.',
+          duration: 4000,
+        });
+      }
     } catch (err: any) {
+      setFlashcardGeneratingStatus('failed', {
+        jobId: newJobId,
+        title: jobTitle,
+        error: err?.response?.data?.message || err?.message || 'Could not generate flashcards.',
+      });
       if (err?.response?.status === 401) {
         setAuthBlocked(true);
       }
@@ -183,38 +280,15 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
       return;
     }
 
-    const validFlashcards = flashcards.filter(
-      (card) => card.front.trim() && card.back.trim()
-    );
-
-    if (!validFlashcards.length) {
-      showNotification({
-        type: 'warning',
-        title: 'Nothing to save',
-        message: 'Please add at least one valid flashcard.',
-        duration: 3000,
-      });
-      return;
-    }
-
     setSaving(true);
 
     try {
-      const payload = {
-        document_id: documentId,
-        flashcards: validFlashcards.map((card) => ({
-          front_text: card.front,
-          back_text: card.back,
-        })),
-      };
-
-      const res: any = await api.post('/flashcards', payload);
-
-      if (res?.success === false) {
+      const saveResult = await persistFlashcards(flashcards);
+      if (!saveResult.ok) {
         showNotification({
-          type: 'error',
+          type: 'warning',
           title: 'Save failed',
-          message: res?.message || 'Could not save flashcards.',
+          message: saveResult.message || 'Could not save flashcards.',
           duration: 4000,
         });
         return;
