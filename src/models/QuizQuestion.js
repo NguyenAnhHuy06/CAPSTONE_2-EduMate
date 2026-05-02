@@ -23,7 +23,12 @@ const QuizQuestion = sequelize.define('QuizQuestion', {
         type: DataTypes.STRING(1),
         allowNull: false,
         defaultValue: 'A'
-    }
+    },
+    explanation: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        field: 'explanation',
+    },
 }, {
     tableName: 'quiz_questions',
     timestamps: false

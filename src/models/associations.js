@@ -1,6 +1,7 @@
 const User = require('./User');
 const ActivityLog = require('./ActivityLog');
 const Flashcard = require('./Flashcard');
+const FlashcardContent = require('./FlashcardContent');
 const ChatSession = require('./ChatSession');
 const ChatMessage = require('./ChatMessage');
 const Citation = require('./Citation');
@@ -35,10 +36,15 @@ Citation.belongsTo(ChatMessage, { foreignKey: 'message_id' });
 Document.hasMany(Flashcard, { foreignKey: 'document_id' });
 Flashcard.belongsTo(Document, {foreignKey: 'document_id' });
 
+// Flashcard -> FlashcardContent
+Flashcard.hasMany(FlashcardContent, { foreignKey: 'flashcard_id' });
+FlashcardContent.belongsTo(Flashcard, { foreignKey: 'flashcard_id' });
+
 module.exports = {
     User,
     ActivityLog,
     Flashcard,
+    FlashcardContent,
     ChatSession,
     ChatMessage,
     Citation

@@ -1,30 +1,52 @@
 const express = require("express");
 const router = express.Router();
 const auth = require("../middleware/auth");
+const optionalAuth = auth.optionalAuth;
 const rbac = require("../middleware/rbac");
+
+/** Lecturer-facing quiz APIs (includes TEACHER — some DBs use TEACHER instead of LECTURER). */
+const staffRoles = ["LECTURER", "TEACHER", "ADMIN"];
 
 const {
   generateQuiz,
   getQuizHistory,
+  getEditedSharedQuizzes,
   getPublishedQuizzes,
   recordQuizAttempt,
+  getQuizAttemptResult,
+  getQuizAttemptResultLecturer,
+  manualRegradeAttempt,
+  getLatestQuizAttemptResult,
+  getSharedQuizStudentResult,
   getQuizById,
   updateQuiz,
   publishQuiz,
+  deleteQuiz,
   getLeaderboard,
   createQuiz,
   getQuizAnalytics,
+  listQuizAttemptsForStaff,
+  shareQuizForReview,
   getQuestionBank,
   createQuestionBankItem,
   updateQuestionBankItem,
   deleteQuestionBankItem,
-  getQuizResult,
+  generateQuizAsyncStart,
+  getGenerateQuizAsyncStatus,
 } = require("../controllers/quizController");
 const { getS3Documents } = require("../controllers/documentController");
 
 // Quiz generation — any authenticated user (Design: UC03)
-router.post("/quizzes/generate", auth, generateQuiz);
-router.post("/quiz/generate", auth, generateQuiz);
+// Default to async generation so FE can run in background.
+router.post("/quizzes/generate", auth, generateQuizAsyncStart);
+router.post("/quiz/generate", auth, generateQuizAsyncStart);
+router.post("/quizzes/generate-async", auth, generateQuizAsyncStart);
+router.post("/quiz/generate-async", auth, generateQuizAsyncStart);
+// Keep a sync fallback endpoint for backward compatibility.
+router.post("/quizzes/generate-sync", auth, generateQuiz);
+router.post("/quiz/generate-sync", auth, generateQuiz);
+router.get("/quizzes/generate-status/:jobId", auth, getGenerateQuizAsyncStatus);
+router.get("/quiz/generate-status/:jobId", auth, getGenerateQuizAsyncStatus);
 
 // Direct quiz route (fallback, no embedding) — authenticated
 router.post("/quiz/generate-direct", auth, async (req, res) => {
@@ -58,27 +80,38 @@ router.post("/quiz/generate-direct", auth, async (req, res) => {
 
 // Quiz CRUD — authenticated
 router.get("/quizzes/history", auth, getQuizHistory);
+router.get("/quizzes/edited-by-lecturer", auth, getEditedSharedQuizzes);
+// FE compatibility alias for lecturer tab "Shared by Students".
+router.get("/quizzes/shared-by-students", auth, getEditedSharedQuizzes);
 router.get("/quizzes/published", auth, getPublishedQuizzes);
-router.get("/quizzes/analytics", auth, rbac("LECTURER", "ADMIN"), getQuizAnalytics);
+router.get("/quizzes/analytics", auth, rbac(...staffRoles), getQuizAnalytics);
+/** Instructor portal — student attempts list per quiz (must be before /quizzes/:id) */
+router.get("/quizzes/:quizId/attempts", auth, rbac(...staffRoles), listQuizAttemptsForStaff);
 router.get("/leaderboard", auth, getLeaderboard);
 router.post("/quiz/attempts", auth, recordQuizAttempt);
-router.get("/quiz/result/:attemptId", auth, getQuizResult);
-router.get("/quizzes/:id", auth, getQuizById);
+router.get("/quiz/result/:attemptId", auth, getQuizAttemptResult);
+router.get("/quiz/attempts/:attemptId/lecturer", auth, rbac(...staffRoles), getQuizAttemptResultLecturer);
+router.patch("/quiz/attempts/:attemptId/grade", auth, rbac(...staffRoles), manualRegradeAttempt);
+router.get("/quiz/result/latest/:quizId", auth, getLatestQuizAttemptResult);
+router.get("/quizzes/:id/shared-student-result", auth, rbac(...staffRoles), getSharedQuizStudentResult);
+router.get("/quizzes/:id", optionalAuth, getQuizById);
+router.post("/quizzes/:id/share", auth, shareQuizForReview);
 
 // Quiz management — Lecturer/Admin only (Design: UC03 Lecturer Flow)
-router.patch("/quizzes/:id", auth, rbac("LECTURER", "ADMIN"), updateQuiz);
-router.post("/quizzes/:id/publish", auth, rbac("LECTURER", "ADMIN"), publishQuiz);
+router.patch("/quizzes/:id", auth, rbac(...staffRoles), updateQuiz);
+router.post("/quizzes/:id/publish", auth, rbac(...staffRoles), publishQuiz);
+router.delete("/quizzes/:id", auth, rbac(...staffRoles), deleteQuiz);
 
 // S3 listing — authenticated
 router.get("/s3/documents", auth, getS3Documents);
 
 // Question bank management — Lecturer/Admin only
-router.post("/quizzes", auth, rbac("LECTURER", "ADMIN"), createQuiz);
+router.post("/quizzes", auth, rbac(...staffRoles), createQuiz);
 
 // Question bank routes
-router.get("/questions/bank", auth, rbac("LECTURER", "ADMIN"), getQuestionBank);
-router.post("/questions/bank", auth, rbac("LECTURER", "ADMIN"), createQuestionBankItem);
-router.patch("/questions/bank/:id", auth, rbac("LECTURER", "ADMIN"), updateQuestionBankItem);
-router.delete("/questions/bank/:id", auth, rbac("LECTURER", "ADMIN"), deleteQuestionBankItem);
+router.get("/questions/bank", auth, rbac(...staffRoles), getQuestionBank);
+router.post("/questions/bank", auth, rbac(...staffRoles), createQuestionBankItem);
+router.patch("/questions/bank/:id", auth, rbac(...staffRoles), updateQuestionBankItem);
+router.delete("/questions/bank/:id", auth, rbac(...staffRoles), deleteQuestionBankItem);
 
 module.exports = router;

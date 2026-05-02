@@ -13,12 +13,21 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const { createServer } = require("http");
+const { Server } = require("socket.io");
 
 const { generateQuizWithAI } = require("./generateQuizWithAI");
 const { getQuiz } = require("./quizService");
 const s3 = require("./s3Upload");
 const db = require("./db");
 const { ensureIndexedForQuiz } = require("./documentPipeline");
+const { setAsyncJobHooks } = require("./src/services/asyncJobStore");
+const { initRealtimeHub, emitToUser } = require("./src/services/realtimeHub");
+const {
+  quizNavigatePath,
+  QUIZ_NAVIGATE_REPLACE_DEFAULT,
+} = require("./src/utils/quizNavigatePath");
+const { normalizeQuestionsForClient } = require("./src/utils/normalizeQuizClientPayload");
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
@@ -37,10 +46,21 @@ const S3_LECTURE_QUIZ_PREFIX =
   "lecture quiz/";
 
 app.use(helmet());
+
+/** Requests per IP per windowMs. Prod default 100; dev higher so SPA + HMR does not hit 429. Override with RATE_LIMIT_MAX. */
+const rateLimitMax = (() => {
+  const raw = process.env.RATE_LIMIT_MAX;
+  if (raw !== undefined && String(raw).trim() !== "") {
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 100;
+  }
+  return process.env.NODE_ENV === "production" ? 100 : 2000;
+})();
+
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 100,
+    max: rateLimitMax,
     standardHeaders: true,
     legacyHeaders: false,
     message: { success: false, message: MSG_TRY_AGAIN },
@@ -101,6 +121,158 @@ const upload = multer({
   limits: { fileSize: MAX_FILE_SIZE },
   fileFilter,
 });
+const questionBankUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 }, // support large local videos
+});
+const questionMediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 },
+});
+
+function buildQuestionMediaKey({ userId, mediaType, originalName }) {
+  const ext = path.extname(String(originalName || "")).toLowerCase();
+  const base = path.basename(String(originalName || "media"), ext);
+  const safeBase = base
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase() || "media";
+  const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+  return `question-bank-media/user-${Number(userId) || 0}/${String(mediaType || "file")}/${unique}-${safeBase}${ext}`;
+}
+
+function buildQuestionMediaProxyUrl(s3Key) {
+  return `/api/questions/media/file?s3Key=${encodeURIComponent(String(s3Key || "").trim())}`;
+}
+
+function getMissingAwsMediaEnvKeys() {
+  const required = ["AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "S3_BUCKET"];
+  return required.filter((name) => !String(process.env[name] || "").trim());
+}
+
+function selectQuestionMediaFile(req) {
+  if (req.file) return req.file;
+  if (Array.isArray(req.files)) {
+    return req.files.find((f) => f && f.buffer) || null;
+  }
+  const files = req.files || {};
+  const picks = [
+    files.file?.[0],
+    files.mediaFile?.[0],
+    files.imageFile?.[0],
+    files.videoFile?.[0],
+    files.audioFile?.[0],
+  ].filter(Boolean);
+  return picks[0] || null;
+}
+
+async function resolveQuestionBankMediaPayload(req, userId) {
+  const mediaTypeInput = String(req.body?.mediaType ?? req.body?.media_type ?? "").trim().toLowerCase();
+  const youtubeUrlInput = String(req.body?.youtubeUrl ?? req.body?.mediaUrl ?? req.body?.media_url ?? "").trim();
+  const mediaFile = selectQuestionMediaFile(req);
+
+  if (mediaTypeInput === "youtube") {
+    if (!youtubeUrlInput) {
+      const err = new Error("YouTube link is required.");
+      err.statusCode = 400;
+      throw err;
+    }
+    return { mediaType: "youtube", mediaUrl: youtubeUrlInput };
+  }
+
+  if (!mediaFile) {
+    if (mediaTypeInput && mediaTypeInput !== "youtube") {
+      const err = new Error("Please choose a local media file.");
+      err.statusCode = 400;
+      throw err;
+    }
+    return {};
+  }
+
+  const mime = String(mediaFile.mimetype || "").toLowerCase();
+  let mediaType = mediaTypeInput;
+  if (!mediaType) {
+    if (mime.startsWith("image/")) mediaType = "image";
+    else if (mime.startsWith("video/")) mediaType = "video";
+    else if (mime.startsWith("audio/")) mediaType = "audio";
+  }
+  if (!["image", "video", "audio"].includes(mediaType)) {
+    const err = new Error("Unsupported media file type.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!s3.isS3Configured()) {
+    const err = new Error("S3 is not configured for media upload.");
+    err.statusCode = 503;
+    throw err;
+  }
+  const key = buildQuestionMediaKey({
+    userId,
+    mediaType,
+    originalName: mediaFile.originalname || "media.bin",
+  });
+  const uploaded = await s3.uploadDocumentBuffer({
+    buffer: mediaFile.buffer,
+    key,
+    contentType: mediaFile.mimetype || "application/octet-stream",
+  });
+  return { mediaType, mediaUrl: buildQuestionMediaProxyUrl(key) };
+}
+
+async function uploadQuestionMediaHandler(req, res) {
+  try {
+    if (!s3.isS3Configured()) {
+      return res.status(503).json({ success: false, message: "S3 is not configured for media upload." });
+    }
+    const tokenUid = getBearerUserId(req);
+    const userId = tokenUid ?? req.body?.userId ?? req.body?.user_id;
+    const uid = Number(userId);
+    if (!Number.isFinite(uid) || uid <= 0) {
+      return res.status(401).json({ success: false, message: "Authentication required." });
+    }
+    const mediaFile = selectQuestionMediaFile(req);
+    if (!mediaFile || !mediaFile.buffer) {
+      return res.status(400).json({ success: false, message: "No media file was selected." });
+    }
+    const mime = String(mediaFile.mimetype || "").toLowerCase();
+    let mediaType = String(req.body?.mediaType ?? req.body?.media_type ?? "").trim().toLowerCase();
+    if (!mediaType) {
+      if (mime.startsWith("image/")) mediaType = "image";
+      else if (mime.startsWith("video/")) mediaType = "video";
+      else if (mime.startsWith("audio/")) mediaType = "audio";
+    }
+    if (!["image", "video", "audio"].includes(mediaType)) {
+      return res.status(400).json({ success: false, message: "Unsupported media type. Use image, video, or audio." });
+    }
+    const key = buildQuestionMediaKey({
+      userId: uid,
+      mediaType,
+      originalName: mediaFile.originalname || "media.bin",
+    });
+    const uploaded = await s3.uploadDocumentBuffer({
+      buffer: mediaFile.buffer,
+      key,
+      contentType: mediaFile.mimetype || "application/octet-stream",
+    });
+    const mediaUrl = buildQuestionMediaProxyUrl(key);
+    return res.status(200).json({
+      success: true,
+      data: {
+        mediaType,
+        mediaUrl,
+        url: mediaUrl,
+        s3Key: key,
+        key,
+        sourceUrl: uploaded.url || s3.buildObjectPublicUrl(key),
+      },
+    });
+  } catch (err) {
+    console.error("[api/questions/media/upload]", err);
+    return res.status(400).json({ success: false, message: err?.message || MSG_TRY_AGAIN });
+  }
+}
 
 function isEmpty(value) {
   return !value || !String(value).trim();
@@ -290,17 +462,40 @@ function mapUserForClient(row) {
 }
 
 function getBearerUserId(req) {
-  const h = req.headers.authorization || req.headers.Authorization || "";
-  const m = /^Bearer\s+(.+)$/i.exec(String(h));
-  if (!m) return null;
-  try {
-    const decoded = jwt.verify(String(m[1]).trim(), authJwtSecret());
-    const sub = decoded?.sub;
-    const n = Number(sub);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
+  const claims = getBearerClaims(req);
+  return claims?.id ?? null;
+}
+
+/** JWT id + role for quiz navigation hints (legacy routes without auth middleware). */
+function getBearerClaims(req) {
+  const authHeader = req.headers.authorization || req.headers.Authorization || "";
+  const xAccessToken = req.headers["x-access-token"] || "";
+  const raw = String(authHeader).trim();
+  const m = /^Bearer\s+(.+)$/i.exec(raw);
+  const token = String(m?.[1] || xAccessToken || "").trim();
+  if (!token) return null;
+  const secrets = [
+    process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim(),
+    process.env.JWT_SECRET_LEGACY && String(process.env.JWT_SECRET_LEGACY).trim(),
+    "dev-only-secret-change-me",
+  ].filter(Boolean);
+  for (const secret of secrets) {
+    try {
+      const decoded = jwt.verify(token, secret);
+      const rawUid = decoded?.id ?? decoded?.user_id ?? decoded?.sub;
+      const uid = Number(rawUid);
+      if (!Number.isFinite(uid) || uid <= 0) continue;
+      const roleRaw = decoded?.role ?? decoded?.userRole ?? null;
+      const role =
+        roleRaw != null && String(roleRaw).trim()
+          ? String(roleRaw).trim().toUpperCase()
+          : null;
+      return { id: uid, role };
+    } catch {
+      // Try the next known secret.
+    }
   }
+  return null;
 }
 
 app.post("/api/auth/register", async (req, res) => {
@@ -763,12 +958,33 @@ async function getPublishedQuizDetailFromS3(quizId) {
       creator_name: String(parsed?.creatorName || "Lecturer"),
       created_at: parsed?.createdAt || parsed?.publishedAt || null,
       published_at: parsed?.publishedAt || parsed?.createdAt || null,
-      questions: questions.map((q, idx) => ({
-        question_id: Number(q?.question_id || q?.id || idx + 1),
-        question_text: String(q?.question_text || q?.question || ""),
-        options: Array.isArray(q?.options) ? q.options : [],
-        correct_answer: q?.correct_answer ?? q?.answer ?? "",
-      })),
+      questions: questions.map((q, idx) => {
+        const raw = q || {};
+        const question_type =
+          String(raw.question_type || raw.type || "multiple-choice").trim() || "multiple-choice";
+        const optObj =
+          raw.options && typeof raw.options === "object" && !Array.isArray(raw.options)
+            ? raw.options
+            : {
+                A: raw.option_a ?? raw.optionA,
+                B: raw.option_b ?? raw.optionB,
+                C: raw.option_c ?? raw.optionC,
+                D: raw.option_d ?? raw.optionD,
+              };
+        return {
+          ...raw,
+          question_id: Number(raw?.question_id || raw?.id || idx + 1),
+          question_text: String(raw?.question_text || raw?.question || ""),
+          question_type,
+          type: question_type,
+          option_a: raw.option_a ?? optObj?.A,
+          option_b: raw.option_b ?? optObj?.B,
+          option_c: raw.option_c ?? optObj?.C,
+          option_d: raw.option_d ?? optObj?.D,
+          options: optObj,
+          correct_answer: raw.correct_answer ?? raw.answer ?? "",
+        };
+      }),
     };
   } catch (_) {
     return null;
@@ -1566,20 +1782,400 @@ app.get("/api/quizzes/history", async (req, res) => {
       });
     }
     const limit = req.query.limit;
-    const userId = req.query.userId ?? req.query.user_id;
-    const ownerOnly =
-      req.query.ownerOnly === true ||
-      req.query.ownerOnly === "true" ||
-      req.query.owner_only === "true" ||
-      req.query.owner_only === 1;
+    const userId =
+      req.query.userId ??
+      req.query.user_id ??
+      getBearerUserId(req);
+    const ownerOnlyParam =
+      req.query.ownerOnly ??
+      req.query.owner_only ??
+      "";
+    let ownerOnly =
+      ownerOnlyParam === true ||
+      ownerOnlyParam === "true" ||
+      ownerOnlyParam === 1 ||
+      ownerOnlyParam === "1";
+    if ((ownerOnlyParam == null || String(ownerOnlyParam).trim() === "") && userId != null && String(userId).trim() !== "") {
+      try {
+        const role = await db.getUserRole(userId);
+        const isLecturerOrAdmin = ["LECTURER", "TEACHER", "ADMIN"].includes(String(role || "").trim().toUpperCase());
+        if (isLecturerOrAdmin) ownerOnly = true;
+      } catch (_) {}
+    }
     const data = await db.listQuizHistory(limit, userId, ownerOnly);
-    return res.status(200).json({ success: true, data });
+    let merged = Array.isArray(data) ? data.slice() : [];
+
+    // Lecturer/Admin "ownerOnly" view should also include student-shared quizzes.
+    if (ownerOnly && userId != null && String(userId).trim() !== "") {
+      try {
+        const role = await db.getUserRole(userId);
+        const isLecturerOrAdmin = ["LECTURER", "TEACHER", "ADMIN"].includes(String(role || "").trim().toUpperCase());
+        if (isLecturerOrAdmin && db.isConfigured()) {
+          const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
+          const [sharedRows] = await db.getPool().execute(
+            `SELECT q.quiz_id, q.title, q.created_at, q.published_at, q.is_published, q.source_file_url, q.document_id,
+                    c.course_code,
+                    (SELECT dcat.category FROM documents dcat WHERE dcat.document_id = q.document_id LIMIT 1) AS document_category,
+                    (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
+                    (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
+                    (SELECT qa.score FROM quiz_attempts qa WHERE qa.quiz_id = q.quiz_id AND qa.completed_at IS NOT NULL
+                     ORDER BY qa.completed_at DESC, qa.attempt_id DESC LIMIT 1) AS last_score,
+                    (SELECT qa.completed_at FROM quiz_attempts qa WHERE qa.quiz_id = q.quiz_id AND qa.completed_at IS NOT NULL
+                     ORDER BY qa.completed_at DESC, qa.attempt_id DESC LIMIT 1) AS last_completed_at,
+                    COALESCE(q.shared_for_review, 0) AS shared_for_review,
+                    q.shared_at,
+                    COALESCE(q.shared_by_user_id, q.created_by) AS shared_by_user_id,
+                    u.name AS shared_by_name,
+                    u.email AS shared_by_email
+             FROM quizzes q
+             LEFT JOIN courses c ON c.course_id = q.course_id
+             LEFT JOIN users u ON u.user_id = COALESCE(q.shared_by_user_id, q.created_by)
+             WHERE COALESCE(q.shared_for_review, 0) = 1
+             ORDER BY COALESCE(q.shared_at, q.created_at) DESC
+             LIMIT ${lim}`
+          );
+          const sharedMapped = (sharedRows || []).map((row) => ({
+            quizId: row.quiz_id,
+            title: row.title,
+            createdAt: row.created_at,
+            publishedAt: row.published_at,
+            courseCode: row.course_code,
+            documentCategory: row.document_category != null ? String(row.document_category) : null,
+            s3Key: row.source_file_url || "",
+            documentId: row.document_id != null ? Number(row.document_id) : null,
+            questionCount: Number(row.question_count || 0),
+            attemptsCount: Number(row.attempts_count || 0),
+            scorePercent: null,
+            lastAttemptAt: row.last_completed_at,
+            isPublished: Number(row.is_published ?? 0) === 1,
+            shared_for_review: Number(row.shared_for_review || 0) === 1,
+            shared_at: row.shared_at || null,
+            shared_by_user_id: row.shared_by_user_id != null ? Number(row.shared_by_user_id) : null,
+            shared_by_name: row.shared_by_name != null ? String(row.shared_by_name) : null,
+            shared_by_email: row.shared_by_email != null ? String(row.shared_by_email) : null,
+          }));
+
+          const seen = new Set(merged.map((r) => Number(r?.quizId)).filter((n) => Number.isFinite(n)));
+          for (const row of sharedMapped) {
+            const id = Number(row?.quizId);
+            if (!Number.isFinite(id) || seen.has(id)) continue;
+            merged.push(row);
+            seen.add(id);
+          }
+        }
+      } catch (sharedErr) {
+        console.warn("[api/quizzes/history] shared merge skipped:", sharedErr.message);
+      }
+    }
+
+    const withShareFlags = merged.map((row) => ({
+      ...row,
+      sharedForReview: Boolean(
+        row?.sharedForReview ??
+        row?.shared_from_student ??
+        row?.sharedFromStudent ??
+        row?.shared_for_review
+      ),
+      sharedAt: row?.sharedAt ?? row?.shared_at ?? null,
+      creatorName: row?.creatorName ?? row?.sharedByName ?? row?.shared_by_name ?? null,
+      sharedByUserId: row?.sharedByUserId ?? row?.shared_by_user_id ?? null,
+      sharedByName: row?.sharedByName ?? row?.shared_by_name ?? null,
+      sharedByEmail: row?.sharedByEmail ?? row?.shared_by_email ?? null,
+      reviewedByLecturer: Boolean(
+        row?.reviewedByLecturer ??
+        row?.reviewed_by_lecturer
+      ),
+      reviewedAt: row?.reviewedAt ?? row?.reviewed_at ?? null,
+    }));
+    return res.status(200).json({ success: true, data: withShareFlags });
   } catch (err) {
     console.error("[api/quizzes/history]", err);
     return res.status(200).json({
       success: true,
       data: [],
       message: "Quiz history is temporarily unavailable.",
+    });
+  }
+});
+
+app.get("/api/quizzes/reviewed-by-lecturer", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+    }
+    const limit = req.query.limit;
+    const userId =
+      req.query.userId ??
+      req.query.user_id ??
+      req.query.viewerUserId ??
+      req.query.viewer_user_id ??
+      getBearerUserId(req);
+    const data = await db.listLecturerReviewedQuizzes(limit, userId);
+    const normalized = (Array.isArray(data) ? data : []).map((row) => ({
+      ...row,
+      quiz_id: row?.quizId ?? null,
+      shared_by_user_id: row?.sharedByUserId ?? null,
+      reviewed_by_lecturer: row?.reviewedByLecturer ?? false,
+      hasResult: false,
+      resultUrl: null,
+      reviewed_at: row?.reviewedAt ?? null,
+      shared_at: row?.sharedAt ?? null,
+      question_count: row?.questionCount ?? 0,
+      attempts_count: row?.attemptsCount ?? 0,
+    }));
+    return res.status(200).json({ success: true, data: normalized, quizzes: normalized, items: normalized });
+  } catch (err) {
+    console.error("[api/quizzes/reviewed-by-lecturer]", err);
+    return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
+// Backward-compatible alias used by FE tab "Edited by Lecturer".
+app.get("/api/quizzes/edited-by-lecturer", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+    }
+    const limit = req.query.limit;
+    const userId =
+      req.query.userId ??
+      req.query.user_id ??
+      req.query.viewerUserId ??
+      req.query.viewer_user_id ??
+      getBearerUserId(req);
+    const data = await db.listLecturerReviewedQuizzes(limit, userId);
+    const normalized = (Array.isArray(data) ? data : []).map((row) => ({
+      ...row,
+      quiz_id: row?.quizId ?? null,
+      shared_by_user_id: row?.sharedByUserId ?? null,
+      reviewed_by_lecturer: row?.reviewedByLecturer ?? false,
+      hasResult: false,
+      resultUrl: null,
+      reviewed_at: row?.reviewedAt ?? null,
+      shared_at: row?.sharedAt ?? null,
+      question_count: row?.questionCount ?? 0,
+      attempts_count: row?.attemptsCount ?? 0,
+    }));
+    return res.status(200).json({ success: true, data: normalized, quizzes: normalized, items: normalized });
+  } catch (err) {
+    console.error("[api/quizzes/edited-by-lecturer]", err);
+    return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
+// FE compatibility alias for lecturer tab "Shared by Students".
+app.get("/api/quizzes/shared-by-students", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+    }
+    const limit = req.query.limit;
+    const userId =
+      req.query.userId ??
+      req.query.user_id ??
+      req.query.viewerUserId ??
+      req.query.viewer_user_id ??
+      getBearerUserId(req);
+    const data = await db.listLecturerReviewedQuizzes(limit, userId);
+    const normalized = (Array.isArray(data) ? data : []).map((row) => ({
+      ...row,
+      quiz_id: row?.quizId ?? null,
+      shared_by_user_id: row?.sharedByUserId ?? null,
+      reviewed_by_lecturer: row?.reviewedByLecturer ?? false,
+      hasResult: false,
+      resultUrl: null,
+      reviewed_at: row?.reviewedAt ?? null,
+      shared_at: row?.sharedAt ?? null,
+      question_count: row?.questionCount ?? 0,
+      attempts_count: row?.attemptsCount ?? 0,
+    }));
+    return res.status(200).json({ success: true, data: normalized, quizzes: normalized, items: normalized });
+  } catch (err) {
+    console.error("[api/quizzes/shared-by-students]", err);
+    return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
+// Student tab: shared/reviewed quizzes related to this student.
+app.get("/api/quizzes/student/edited-by-lecturer", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: [], quizzes: [], items: [], message: MSG_DATA_UNAVAILABLE });
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
+    const userId =
+      req.query.userId ??
+      req.query.user_id ??
+      getBearerUserId(req);
+    const uid = Number(userId);
+    if (!Number.isFinite(uid) || uid <= 0) {
+      return res.status(200).json({ success: true, data: [], quizzes: [], items: [] });
+    }
+    const [rows] = await db.getPool().execute(
+      `SELECT
+         q.quiz_id,
+         q.title,
+         q.created_at,
+         q.shared_at,
+         q.reviewed_at,
+         q.shared_by_user_id,
+         q.reviewed_by_lecturer,
+         q.shared_for_review,
+         q.shared_from_student,
+         q.source_file_url,
+         q.document_id,
+         (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
+         (SELECT COUNT(*) FROM quiz_attempts qa WHERE qa.quiz_id = q.quiz_id AND qa.user_id = ?) AS attempts_count
+       FROM quizzes q
+       WHERE (COALESCE(q.shared_for_review, 0) = 1 OR COALESCE(q.shared_from_student, 0) = 1)
+         AND (q.shared_by_user_id = ? OR q.created_by = ?)
+       ORDER BY COALESCE(q.reviewed_at, q.shared_at, q.created_at) DESC
+       LIMIT ${limit}`,
+      [uid, uid, uid]
+    );
+    const normalized = (rows || []).map((row) => ({
+      quizId: Number(row.quiz_id),
+      quiz_id: Number(row.quiz_id),
+      title: row.title || "Quiz",
+      createdAt: row.created_at || null,
+      sharedAt: row.shared_at || null,
+      reviewedAt: row.reviewed_at || null,
+      sharedByUserId: row.shared_by_user_id != null ? Number(row.shared_by_user_id) : null,
+      shared_by_user_id: row.shared_by_user_id != null ? Number(row.shared_by_user_id) : null,
+      reviewedByLecturer: Number(row.reviewed_by_lecturer || 0) === 1,
+      reviewed_by_lecturer: Number(row.reviewed_by_lecturer || 0) === 1,
+      sharedForReview: Number(row.shared_for_review || 0) === 1,
+      shared_for_review: Number(row.shared_for_review || 0) === 1,
+      sharedFromStudent: Number(row.shared_from_student || 0) === 1,
+      shared_from_student: Number(row.shared_from_student || 0) === 1,
+      questionCount: Number(row.question_count || 0),
+      question_count: Number(row.question_count || 0),
+      attemptsCount: Number(row.attempts_count || 0),
+      attempts_count: Number(row.attempts_count || 0),
+      resultUrl: null,
+      hasResult: false,
+    }));
+    return res.status(200).json({ success: true, data: normalized, quizzes: normalized, items: normalized });
+  } catch (err) {
+    console.error("[api/quizzes/student/edited-by-lecturer]", err);
+    return res.status(200).json({ success: true, data: [], quizzes: [], items: [], message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
+app.post("/api/quizzes/:id/share", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+
+    const quizId = Number(req.params.id);
+    if (!Number.isFinite(quizId) || quizId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid quiz id." });
+    }
+
+    const tokenUserId = getBearerUserId(req);
+    const bodyUserId = Number(req.body?.userId ?? req.body?.user_id);
+    const ownerUserId = Number.isFinite(bodyUserId) && bodyUserId > 0 ? bodyUserId : tokenUserId;
+    if (!Number.isFinite(ownerUserId) || ownerUserId <= 0) {
+      return res.status(401).json({ success: false, message: "Unauthorized." });
+    }
+
+    const quizRow = await db.getQuizWithQuestions(quizId);
+    if (!quizRow) {
+      return res.status(404).json({ success: false, message: "Quiz not found." });
+    }
+    const createdBy = Number(quizRow.created_by);
+    if (!Number.isFinite(createdBy) || createdBy !== Number(ownerUserId)) {
+      return res.status(403).json({ success: false, message: "You can only share your own quiz." });
+    }
+
+    const nextTitle = String(req.body?.title || "").trim();
+    if (nextTitle) {
+      await db.updateQuizTitle(quizId, nextTitle);
+    }
+
+    const incomingQuestions = Array.isArray(req.body?.questions) ? req.body.questions : [];
+    const normalizedQuestions = incomingQuestions
+      .map((q) => db.normalizeQuestionInput(q))
+      .filter(Boolean);
+    if (normalizedQuestions.length > 0) {
+      await db.replaceQuizQuestions(quizId, normalizedQuestions);
+    }
+
+    // Ensure share columns exist on older schemas.
+    try {
+      const pool = db.getPool();
+      await pool.execute("ALTER TABLE quizzes ADD COLUMN shared_for_review TINYINT(1) NOT NULL DEFAULT 0");
+    } catch (_) {}
+    try {
+      const pool = db.getPool();
+      await pool.execute("ALTER TABLE quizzes ADD COLUMN shared_at DATETIME NULL DEFAULT NULL");
+    } catch (_) {}
+
+    try {
+      const pool = db.getPool();
+      await pool.execute(
+        "UPDATE quizzes SET shared_for_review = 1, shared_at = NOW() WHERE quiz_id = ?",
+        [quizId]
+      );
+    } catch {
+      // If schema is still incompatible, keep share route successful without hard fail.
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Quiz shared for lecturer review.",
+      data: { quizId, sharedForReview: true },
+    });
+  } catch (err) {
+    console.error("[api/quizzes/:id/share]", err);
+    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+});
+
+// Quiz comments (view + add). Auth required.
+app.get("/api/quizzes/:id/comments", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: [] });
+    }
+    const quizId = Number(req.params.id);
+    const limit = req.query.limit;
+    const comments = await db.listQuizComments(quizId, limit);
+    return res.status(200).json({ success: true, data: comments });
+  } catch (err) {
+    console.error("[api/quizzes/:id/comments]", err);
+    return res.status(200).json({ success: true, data: [] });
+  }
+});
+
+app.post("/api/quizzes/:id/comments", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const quizId = Number(req.params.id);
+    const userId =
+      req.body.userId ??
+      req.body.user_id ??
+      getBearerUserId(req);
+    const content =
+      req.body?.content ??
+      req.body?.message ??
+      req.body?.comment ??
+      req.body?.commentText ??
+      req.body?.text ??
+      req.body?.body ??
+      "";
+    const commentId = await db.addQuizComment({ quizId, userId, content });
+    const comments = await db.listQuizComments(quizId, 50);
+    return res.status(201).json({ success: true, commentId, data: comments });
+  } catch (err) {
+    console.error("[api/quizzes/:id/comments POST]", err);
+    // Do not leak internal validation/stack details to client.
+    return res.status(400).json({
+      success: false,
+      message: "Cannot post comment right now. Please check your input and try again.",
     });
   }
 });
@@ -1604,13 +2200,53 @@ app.get("/api/questions/bank", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(200).json({ success: true, data: [] });
     }
-    const userId = req.query.userId ?? req.query.user_id;
+    const tokenUid = getBearerUserId(req);
+    const userId = tokenUid ?? req.query.userId ?? req.query.user_id;
     const limit = req.query.limit;
     const rows = await db.listQuestionBank(limit, userId);
     return res.status(200).json({ success: true, data: rows });
   } catch (err) {
     console.error("[api/questions/bank GET]", err);
     return res.status(200).json({ success: true, data: [] });
+  }
+});
+
+app.post("/api/questions/media/upload", questionMediaUpload.any(), uploadQuestionMediaHandler);
+app.put("/api/questions/media/upload", questionMediaUpload.any(), uploadQuestionMediaHandler);
+app.post("/api/questions/media/upload-s3", questionMediaUpload.any(), uploadQuestionMediaHandler);
+app.put("/api/questions/media/upload-s3", questionMediaUpload.any(), uploadQuestionMediaHandler);
+app.get("/api/questions/media/file", async (req, res) => {
+  try {
+    const s3Key = String(req.query.s3Key ?? req.query.s3_key ?? "").trim();
+    if (!s3Key || s3Key.includes("..")) {
+      return res.status(400).json({ success: false, message: "Invalid media file reference." });
+    }
+    if (!s3.isS3Configured()) {
+      const missing = getMissingAwsMediaEnvKeys();
+      return res.status(503).json({
+        success: false,
+        message: missing.length
+          ? `S3 media proxy unavailable. Missing env: ${missing.join(", ")}.`
+          : "S3 media proxy is unavailable.",
+      });
+    }
+
+    const { buffer, contentType } = await s3.getObjectBuffer(s3Key);
+    const baseName = path.basename(s3Key) || "media";
+    const safeBase = baseName.replace(/[\r\n"]/g, "_");
+    res.setHeader("Content-Type", contentType || "application/octet-stream");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename*=UTF-8''${encodeURIComponent(safeBase)}`
+    );
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    return res.status(200).send(buffer);
+  } catch (err) {
+    console.error("[api/questions/media/file]", err);
+    return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
   }
 });
 
@@ -1654,38 +2290,55 @@ app.get("/api/quizzes/analytics", async (req, res) => {
   }
 });
 
-app.post("/api/questions/bank", async (req, res) => {
+/** Instructor: list completed attempts for a quiz (Student attempts modal). Matches FE GET /quizzes/:id/attempts */
+app.get("/api/quizzes/:quizId/attempts", async (req, res) => {
   try {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const userId = req.body.userId ?? req.body.user_id;
-    const uid = Number(userId);
+    const qid = Number(req.params.quizId);
+    if (!Number.isFinite(qid) || qid <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid quiz id." });
+    }
+    const tokenUid = getBearerUserId(req);
+    const uid = Number(tokenUid ?? req.query.userId ?? req.query.user_id);
     if (!Number.isFinite(uid) || uid <= 0) {
-      return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+      return res.status(403).json({ success: false, message: "Access denied." });
     }
-    const role = await db.getUserRole(uid);
-    if (!isLecturerRole(role)) {
-      return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+    const quiz = await db.getQuizWithQuestions(qid);
+    if (!quiz) {
+      return res.status(404).json({ success: false, message: "Quiz not found." });
     }
-    const norm = db.normalizeQuestionInput(req.body || {});
-    if (!norm) {
-      return res.status(400).json({ success: false, message: "Please provide a valid question." });
+    const allowed = await db.canUserManageQuiz(qid, uid);
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have access to this quiz's attempts.",
+      });
     }
-    const id = await db.createQuestionBankItem(uid, { ...req.body, ...norm });
-    return res.status(201).json({ success: true, id });
+    const rows = await db.listCompletedQuizAttemptsByQuizId(qid);
+    return res.status(200).json({ success: true, data: rows });
   } catch (err) {
-    console.error("[api/questions/bank POST]", err);
-    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    console.error("[api/quizzes/:quizId/attempts]", err);
+    return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
   }
 });
 
-app.patch("/api/questions/bank/:id", async (req, res) => {
+app.post(
+  "/api/questions/bank",
+  questionBankUpload.fields([
+    { name: "mediaFile", maxCount: 1 },
+    { name: "imageFile", maxCount: 1 },
+    { name: "videoFile", maxCount: 1 },
+    { name: "audioFile", maxCount: 1 },
+  ]),
+  async (req, res) => {
   try {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const userId = req.body.userId ?? req.body.user_id;
+    const tokenUid = getBearerUserId(req);
+    const userId = tokenUid ?? req.body.userId ?? req.body.user_id ?? req.query.userId ?? req.query.user_id;
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) {
       return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
@@ -1698,14 +2351,51 @@ app.patch("/api/questions/bank/:id", async (req, res) => {
     if (!norm) {
       return res.status(400).json({ success: false, message: "Please provide a valid question." });
     }
-    const ok = await db.updateQuestionBankItem(req.params.id, uid, { ...req.body, ...norm });
+    const mediaPayload = await resolveQuestionBankMediaPayload(req, uid);
+    const id = await db.createQuestionBankItem(uid, { ...req.body, ...norm, ...mediaPayload });
+    return res.status(201).json({ success: true, id });
+  } catch (err) {
+    console.error("[api/questions/bank POST]", err);
+    return res.status(err?.statusCode || 400).json({ success: false, message: err?.message || MSG_TRY_AGAIN });
+  }
+});
+
+app.patch(
+  "/api/questions/bank/:id",
+  questionBankUpload.fields([
+    { name: "mediaFile", maxCount: 1 },
+    { name: "imageFile", maxCount: 1 },
+    { name: "videoFile", maxCount: 1 },
+    { name: "audioFile", maxCount: 1 },
+  ]),
+  async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const tokenUid = getBearerUserId(req);
+    const userId = tokenUid ?? req.body.userId ?? req.body.user_id ?? req.query.userId ?? req.query.user_id;
+    const uid = Number(userId);
+    if (!Number.isFinite(uid) || uid <= 0) {
+      return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+    }
+    const role = await db.getUserRole(uid);
+    if (!isLecturerRole(role)) {
+      return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
+    }
+    const norm = db.normalizeQuestionInput(req.body || {});
+    if (!norm) {
+      return res.status(400).json({ success: false, message: "Please provide a valid question." });
+    }
+    const mediaPayload = await resolveQuestionBankMediaPayload(req, uid);
+    const ok = await db.updateQuestionBankItem(req.params.id, uid, { ...req.body, ...norm, ...mediaPayload });
     if (!ok) {
       return res.status(404).json({ success: false, message: "Question not found." });
     }
     return res.status(200).json({ success: true });
   } catch (err) {
     console.error("[api/questions/bank PATCH]", err);
-    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    return res.status(err?.statusCode || 400).json({ success: false, message: err?.message || MSG_TRY_AGAIN });
   }
 });
 
@@ -1714,7 +2404,8 @@ app.delete("/api/questions/bank/:id", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const userId = req.body?.userId ?? req.query?.userId ?? req.query?.user_id;
+    const tokenUid = getBearerUserId(req);
+    const userId = tokenUid ?? req.body?.userId ?? req.query?.userId ?? req.query?.user_id;
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) {
       return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
@@ -1748,6 +2439,163 @@ app.get("/api/quiz/result/:attemptId", async (req, res) => {
   }
 });
 
+// Lecturer: xem chi tiết attempt của học viên (cùng format getAttemptResultDetail + studentUserId / attemptId / quizId).
+app.get("/api/quiz/result/:attemptId/lecturer", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const staffId =
+      getBearerUserId(req) ?? req.query.userId ?? req.query.user_id;
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: "Authentication required." });
+    }
+    const role = await db.getUserRole(staffId);
+    if (!isLecturerRole(role)) {
+      return res.status(403).json({ success: false, message: "Lecturer access required." });
+    }
+    const data = await db.getAttemptResultDetailForStaff(req.params.attemptId, staffId);
+    if (!data) {
+      return res.status(404).json({ success: false, message: "Attempt not found or access denied." });
+    }
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error("[api/quiz/result/:attemptId/lecturer]", err);
+    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+});
+
+// Lecturer: chấm điểm lại theo từng câu — body { grades: [{ questionId, isCorrect }] }.
+app.patch("/api/quiz/attempts/:attemptId/grade", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const staffId =
+      getBearerUserId(req) ??
+      req.body?.userId ??
+      req.body?.user_id ??
+      req.query?.userId ??
+      req.query?.user_id;
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: "Authentication required." });
+    }
+    const role = await db.getUserRole(staffId);
+    if (!isLecturerRole(role)) {
+      return res.status(403).json({ success: false, message: "Lecturer access required." });
+    }
+    const raw = req.body.grades ?? req.body.items ?? req.body.answers;
+    const list = Array.isArray(raw) ? raw : [];
+    const grades = list.map((g) => ({
+      questionId: g?.questionId ?? g?.question_id,
+      isCorrect: !!(g?.isCorrect ?? g?.is_correct ?? g?.markedCorrect),
+    }));
+    const data = await db.manualRegradeQuizAttempt({
+      attemptId: req.params.attemptId,
+      staffUserId: staffId,
+      grades,
+    });
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    const code = Number(err.statusCode) || 400;
+    if (code === 403) {
+      return res.status(403).json({ success: false, message: err.message || "Forbidden." });
+    }
+    if (code === 404) {
+      return res.status(404).json({ success: false, message: err.message || "Not found." });
+    }
+    console.error("[api/quiz/attempts/:attemptId/grade]", err);
+    return res.status(code >= 400 && code < 600 ? code : 400).json({
+      success: false,
+      message: err.message || MSG_TRY_AGAIN,
+    });
+  }
+});
+
+app.get("/api/quiz/result/latest/:quizId", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(200).json({ success: true, data: null, message: MSG_DATA_UNAVAILABLE });
+    }
+    const quizId = Number(req.params.quizId);
+    const userId = req.query.userId ?? req.query.user_id;
+    const uid = Number(userId);
+    if (!Number.isFinite(quizId) || quizId <= 0 || !Number.isFinite(uid) || uid <= 0) {
+      return res.status(200).json({ success: true, data: null });
+    }
+    const pool = db.getPool();
+    const [rows] = await pool.execute(
+      `SELECT attempt_id
+       FROM quiz_attempts
+       WHERE quiz_id = ?
+         AND user_id = ?
+         AND completed_at IS NOT NULL
+       ORDER BY attempt_id DESC
+       LIMIT 1`,
+      [quizId, uid]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(200).json({ success: true, data: null });
+    }
+    const latestAttemptId = Number(rows[0]?.attempt_id);
+    if (!Number.isFinite(latestAttemptId) || latestAttemptId <= 0) {
+      return res.status(200).json({ success: true, data: null });
+    }
+    const data = await db.getAttemptResultDetail(latestAttemptId, uid);
+    return res.status(200).json({ success: true, data: data || null });
+  } catch (err) {
+    console.error("[api/quiz/result/latest/:quizId]", err);
+    return res.status(200).json({ success: true, data: null, message: MSG_DATA_UNAVAILABLE });
+  }
+});
+
+// FE legacy compatibility: lecturer views latest result of shared student quiz.
+app.get("/api/quizzes/:id/shared-student-result", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
+    }
+    const quizId = Number(req.params.id);
+    if (!Number.isFinite(quizId) || quizId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid quiz id." });
+    }
+    const viewerId =
+      req.query.userId ??
+      req.query.user_id ??
+      req.query.viewerUserId ??
+      req.query.viewer_user_id ??
+      getBearerUserId(req);
+    const canManage = await db.canUserManageQuiz(quizId, viewerId);
+    if (!canManage) {
+      return res.status(403).json({ success: false, message: "You do not have permission to view this shared result." });
+    }
+    const quizRow = await db.getQuizWithQuestions(quizId);
+    if (!quizRow) {
+      return res.status(404).json({ success: false, message: "Quiz not found." });
+    }
+    const sharedStudentId = quizRow?.shared_by_user_id;
+    if (!sharedStudentId) {
+      return res.status(200).json({
+        success: true,
+        data: null,
+        message: "No shared student source found for this quiz.",
+      });
+    }
+    const data = await db.getLatestQuizAttemptResultByQuizAndUser(quizId, sharedStudentId);
+    if (!data) {
+      return res.status(200).json({
+        success: true,
+        data: null,
+        message: "No completed attempt found for the shared student.",
+      });
+    }
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error("[api/quizzes/:id/shared-student-result]", err);
+    return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+});
+
 app.post("/api/quiz/attempts", async (req, res) => {
   try {
     if (!db.isConfigured()) {
@@ -1775,8 +2623,9 @@ app.post("/api/quiz/attempts", async (req, res) => {
     const score = req.body.score ?? req.body.correctCount ?? req.body.correct;
     const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
     const timeTakenSeconds = req.body.timeTaken ?? req.body.time_taken_seconds ?? null;
+    let attemptId = null;
     if (answers.length) {
-      await db.finishQuizAttemptWithAnswers({
+      attemptId = await db.finishQuizAttemptWithAnswers({
         quizId,
         userId,
         score,
@@ -1792,8 +2641,30 @@ app.post("/api/quiz/attempts", async (req, res) => {
         timeTakenSeconds,
         completedAt: req.body.completedAt,
       });
+      try {
+        const pool = db.getPool();
+        const [rows] = await pool.execute(
+          `SELECT attempt_id FROM quiz_attempts WHERE quiz_id = ? AND (user_id <=> ?) ORDER BY attempt_id DESC LIMIT 1`,
+          [Number(quizId), userId]
+        );
+        attemptId = rows?.[0]?.attempt_id != null ? Number(rows[0].attempt_id) : null;
+      } catch (_) {
+        attemptId = null;
+      }
     }
-    return res.status(201).json({ success: true, message: "Attempt result saved." });
+    let result = null;
+    if (attemptId != null && userId != null) {
+      try {
+        result = await db.getAttemptResultDetail(attemptId, userId);
+      } catch (_) {
+        // ignore
+      }
+    }
+    return res.status(201).json({
+      success: true,
+      message: "Attempt result saved.",
+      data: { attemptId, result },
+    });
   } catch (err) {
     console.error("[api/quiz/attempts]", err);
     return res.status(400).json({
@@ -1956,7 +2827,7 @@ async function handleQuizGenerate(req, res) {
       }
     }
 
-    const language = req.body.language ?? "Vietnamese";
+    const language = req.body.language ?? "Auto";
     const { questions: rawQuiz, targetCount } = await generateQuizWithAI({
       s3Key,
       query: req.body.query ?? req.body.topic ?? req.body.keyword,
@@ -1966,7 +2837,14 @@ async function handleQuizGenerate(req, res) {
     const history = req.body.history ?? req.body.userHistory ?? [];
     const quiz = getQuiz(rawQuiz, history, targetCount);
 
-    const payload = { quiz };
+    const claims = getBearerClaims(req);
+    const payload = {
+      quiz,
+      quizId: null,
+      navigateTo: null,
+      autoOpen: false,
+      navigateReplace: false,
+    };
     if (req._quizIndexMeta) {
       payload.indexMeta = {
         reindexed: !req._quizIndexMeta.skipped,
@@ -1974,12 +2852,7 @@ async function handleQuizGenerate(req, res) {
       };
     }
 
-    const wantPersist =
-      req.body.persist === true ||
-      req.body.persist === "true" ||
-      req.body.persist === 1 ||
-      req.body.save === true ||
-      req.body.save === "true";
+    const wantPersist = true;
     if (wantPersist) {
       if (!db.isConfigured()) {
         return res.status(503).json({
@@ -1990,22 +2863,25 @@ async function handleQuizGenerate(req, res) {
       const quizTitle =
         String(req.body.quizTitle || req.body.title || "").trim() || "AI-generated quiz";
       const courseId = req.body.courseId ?? req.body.course_id;
-      const createdByRaw = req.body.createdBy ?? req.body.created_by ?? req.body.userId;
+      const createdByRaw =
+        req.body.createdBy ??
+        req.body.created_by ??
+        req.body.userId ??
+        req.body.user_id ??
+        getBearerUserId(req);
       const createdBy = Number(createdByRaw);
       if (!Number.isFinite(createdBy) || createdBy <= 0) {
-        return res.status(403).json({
+        return res.status(401).json({
           success: false,
-          message: "Only lecturers can save and edit AI-generated quizzes.",
-        });
-      }
-      const creatorRole = await db.getUserRole(createdBy);
-      if (!isLecturerRole(creatorRole)) {
-        return res.status(403).json({
-          success: false,
-          message: "Only lecturers can save and edit AI-generated quizzes.",
+          message: "Authentication required to save generated quiz.",
         });
       }
       const requestedQuizId = Number(req.body.quizId ?? req.body.quiz_id);
+      const autoPublish =
+        req.body.autoPublish !== false &&
+        req.body.autoPublish !== "false" &&
+        req.body.publish !== false &&
+        req.body.publish !== "false";
       if (Number.isFinite(requestedQuizId) && requestedQuizId > 0) {
         const canManage = await db.canUserManageQuiz(requestedQuizId, createdBy);
         if (!canManage) {
@@ -2016,6 +2892,13 @@ async function handleQuizGenerate(req, res) {
         }
         await db.updateQuizTitle(requestedQuizId, quizTitle);
         await db.replaceQuizQuestions(requestedQuizId, quiz);
+        if (autoPublish) {
+          try {
+            await db.setQuizPublished(requestedQuizId, true);
+          } catch (e) {
+            console.warn("[quiz/generate] auto-publish(existing) failed:", e?.message || e);
+          }
+        }
         if (s3.isS3Configured()) {
           try {
             const row = await db.getQuizWithQuestions(requestedQuizId);
@@ -2025,7 +2908,26 @@ async function handleQuizGenerate(req, res) {
           }
         }
         payload.quizId = requestedQuizId;
-        return res.status(200).json({ success: true, data: payload });
+        payload.navigateTo = quizNavigatePath(requestedQuizId, { role: claims?.role });
+        payload.autoOpen = true;
+        payload.navigateReplace = QUIZ_NAVIGATE_REPLACE_DEFAULT;
+        try {
+          emitToUser(createdBy, "quiz:ready", {
+            quizId: requestedQuizId,
+            navigateTo: payload.navigateTo,
+            autoOpen: true,
+            navigateReplace: payload.navigateReplace !== false,
+            source: "generate-sync",
+          });
+        } catch (_) {}
+        return res.status(200).json({
+          success: true,
+          data: payload,
+          quizId: payload.quizId,
+          navigateTo: payload.navigateTo,
+          autoOpen: true,
+          navigateReplace: payload.navigateReplace !== false,
+        });
       }
 
       const idxMeta = req._quizIndexMeta || {};
@@ -2041,6 +2943,13 @@ async function handleQuizGenerate(req, res) {
         sourceFileUrl: s3Key,
         documentId,
       });
+      if (autoPublish) {
+        try {
+          await db.setQuizPublished(newQuizId, true);
+        } catch (e) {
+          console.warn("[quiz/generate] auto-publish(new) failed:", e?.message || e);
+        }
+      }
       if (s3.isS3Configured()) {
         try {
           const row = await db.getQuizWithQuestions(newQuizId);
@@ -2050,10 +2959,36 @@ async function handleQuizGenerate(req, res) {
         }
       }
       payload.quizId = newQuizId;
-      return res.status(201).json({ success: true, data: payload });
+      payload.navigateTo = quizNavigatePath(newQuizId, { role: claims?.role });
+      payload.autoOpen = true;
+      payload.navigateReplace = QUIZ_NAVIGATE_REPLACE_DEFAULT;
+      try {
+        emitToUser(createdBy, "quiz:ready", {
+          quizId: newQuizId,
+          navigateTo: payload.navigateTo,
+          autoOpen: true,
+          navigateReplace: payload.navigateReplace !== false,
+          source: "generate-sync",
+        });
+      } catch (_) {}
+      return res.status(201).json({
+        success: true,
+        data: payload,
+        quizId: payload.quizId,
+        navigateTo: payload.navigateTo,
+        autoOpen: true,
+        navigateReplace: payload.navigateReplace !== false,
+      });
     }
 
-    return res.status(200).json({ success: true, data: payload });
+    return res.status(200).json({
+      success: true,
+      data: payload,
+      quizId: payload.quizId ?? null,
+      navigateTo: payload.navigateTo ?? null,
+      autoOpen: payload.autoOpen === true,
+      navigateReplace: payload.navigateReplace === true,
+    });
   } catch (err) {
     const status = err.status ?? err.statusCode;
     const code = err.code ?? err.error?.code;
@@ -2090,15 +3025,34 @@ app.post("/api/quiz/generate", handleQuizGenerate);
 
 app.get("/api/quizzes/published", async (req, res) => {
   try {
-    if (!s3.isS3Configured()) {
-      return res.status(200).json({
-        success: true,
-        data: [],
-        message: MSG_DATA_UNAVAILABLE,
+    const lim = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+    const fromS3 = s3.isS3Configured() ? await listPublishedQuizzesFromS3(lim * 2) : [];
+    const fromDb = db.isConfigured() ? await db.listPublishedQuizzes(lim * 2) : [];
+    const byId = new Map();
+    for (const row of fromDb || []) {
+      const id = Number(row?.quizId);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      byId.set(id, { ...row });
+    }
+    for (const row of fromS3 || []) {
+      const id = Number(row?.quizId);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      const prev = byId.get(id) || {};
+      byId.set(id, {
+        ...prev,
+        ...row,
+        creatorName: row?.creatorName ?? prev?.creatorName ?? null,
+        courseCode: row?.courseCode ?? prev?.courseCode ?? "DOC",
+        questionCount: Number(row?.questionCount ?? prev?.questionCount ?? 0),
       });
     }
-    const limit = req.query.limit;
-    const data = await listPublishedQuizzesFromS3(limit);
+    let data = [...byId.values()].sort((a, b) => {
+      const ta = new Date(a?.publishedAt || a?.createdAt || 0).getTime();
+      const tb = new Date(b?.publishedAt || b?.createdAt || 0).getTime();
+      return tb - ta;
+    });
+    data = data.slice(0, lim);
+
     return res.status(200).json({ success: true, data });
   } catch (err) {
     console.error("[api/quizzes/published]", err);
@@ -2116,12 +3070,25 @@ app.patch("/api/quizzes/:id", async (req, res) => {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
     const quizId = req.params.id;
-    const userId = req.body.userId ?? req.body.user_id;
+    const userId =
+      getBearerUserId(req) ?? req.body.userId ?? req.body.user_id ?? req.query?.userId ?? req.query?.user_id;
     const ok = await db.canUserManageQuiz(quizId, userId);
     if (!ok) {
       return res.status(403).json({
         success: false,
         message: "You do not have permission to edit this quiz.",
+      });
+    }
+    let row = await db.getQuizWithQuestions(quizId);
+    if (!row) {
+      return res.status(404).json({ success: false, message: "Quiz not found." });
+    }
+    const isSharedFromStudent = Number(row?.shared_from_student || 0) === 1;
+    if (isSharedFromStudent) {
+      return res.status(403).json({
+        success: false,
+        message: "This quiz was shared by a student and is view/comment only.",
+        canEdit: false,
       });
     }
     if (req.body.title != null && String(req.body.title).trim()) {
@@ -2130,7 +3097,21 @@ app.patch("/api/quizzes/:id", async (req, res) => {
     if (Array.isArray(req.body.questions)) {
       await db.replaceQuizQuestions(quizId, req.body.questions);
     }
-    const row = await db.getQuizWithQuestions(quizId);
+    row = await db.getQuizWithQuestions(quizId);
+    try {
+      const role = await db.getUserRole(userId);
+      const normRole = String(role || "").trim().toUpperCase();
+      const isLecturerOrAdmin = normRole === "LECTURER" || normRole === "TEACHER" || normRole === "ADMIN";
+      const isShared =
+        Number(row?.shared_for_review || 0) === 1 ||
+        Number(row?.shared_from_student || 0) === 1;
+      if (isLecturerOrAdmin && isShared) {
+        await db.markQuizReviewedByLecturer(quizId, userId);
+        row = await db.getQuizWithQuestions(quizId);
+      }
+    } catch (reviewErr) {
+      console.warn("[api/quizzes PATCH] review flag skipped:", reviewErr.message);
+    }
     let questionBankS3Key = null;
     if (s3.isS3Configured()) {
       try {
@@ -2209,7 +3190,15 @@ app.post("/api/quizzes", async (req, res) => {
       }
     }
     const row = await db.getQuizWithQuestions(quizId);
-    return res.status(201).json({ success: true, data: row, quizId });
+    const navTo = quizNavigatePath(quizId, { role });
+    return res.status(201).json({
+      success: true,
+      data: row,
+      quizId,
+      navigateTo: navTo,
+      autoOpen: true,
+      navigateReplace: QUIZ_NAVIGATE_REPLACE_DEFAULT,
+    });
   } catch (err) {
     console.error("[api/quizzes POST]", err);
     return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
@@ -2228,7 +3217,7 @@ app.post("/api/quizzes/:id/publish", async (req, res) => {
       });
     }
     const quizId = req.params.id;
-    const userId = req.body.userId ?? req.body.user_id;
+    const userId = getBearerUserId(req) ?? req.body.userId ?? req.body.user_id ?? req.query?.userId ?? req.query?.user_id;
     const ok = await db.canUserManageQuiz(quizId, userId);
     if (!ok) {
       return res.status(403).json({
@@ -2277,7 +3266,12 @@ app.delete("/api/quizzes/:id", async (req, res) => {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
     const quizId = req.params.id;
-    const userId = req.body?.userId ?? req.query?.userId ?? req.query?.user_id;
+    const userId =
+      getBearerUserId(req) ??
+      req.body?.userId ??
+      req.body?.user_id ??
+      req.query?.userId ??
+      req.query?.user_id;
     const ok = await db.canUserManageQuiz(quizId, userId);
     if (!ok) {
       return res.status(403).json({
@@ -2310,7 +3304,11 @@ app.get("/api/quizzes/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "Quiz not found." });
     }
     const viewerId =
-      req.query.userId ?? req.query.user_id ?? req.query.viewerUserId ?? req.query.viewer_user_id;
+      req.query.userId ??
+      req.query.user_id ??
+      req.query.viewerUserId ??
+      req.query.viewer_user_id ??
+      getBearerUserId(req);
     const canManage = db.isConfigured()
       ? await db.canUserManageQuiz(req.params.id, viewerId)
       : false;
@@ -2320,7 +3318,54 @@ app.get("/api/quizzes/:id", async (req, res) => {
         message: "Quiz is not published or does not exist.",
       });
     }
-    return res.status(200).json({ success: true, data: row });
+    const payload = {
+      ...row,
+      courseCode: row?.courseCode ?? row?.course_code ?? "DOC",
+      sharedByUserId: row?.sharedByUserId ?? row?.shared_by_user_id ?? null,
+    };
+    const sharedUid = Number(payload.sharedByUserId);
+    if (db.isConfigured() && Number.isFinite(sharedUid) && sharedUid > 0) {
+      try {
+        const pool = db.getPool();
+        let displayName = null;
+        try {
+          const [rows] = await pool.execute(
+            "SELECT full_name AS name FROM users WHERE user_id = ? LIMIT 1",
+            [sharedUid]
+          );
+          displayName = rows?.[0]?.name || null;
+        } catch (_) {}
+        if (!displayName) {
+          try {
+            const [rows] = await pool.execute(
+              "SELECT name FROM users WHERE user_id = ? LIMIT 1",
+              [sharedUid]
+            );
+            displayName = rows?.[0]?.name || null;
+          } catch (_) {}
+        }
+        if (!displayName) {
+          try {
+            const [rows] = await pool.execute(
+              "SELECT email AS name FROM users WHERE user_id = ? LIMIT 1",
+              [sharedUid]
+            );
+            displayName = rows?.[0]?.name || null;
+          } catch (_) {}
+        }
+        payload.sharedByUserName = displayName || `User #${sharedUid}`;
+      } catch (_) {
+        payload.sharedByUserName = `User #${sharedUid}`;
+      }
+    } else {
+      payload.sharedByUserName = null;
+    }
+    payload.questions = normalizeQuestionsForClient(payload.questions || []);
+    const envMins = Number(process.env.QUIZ_DEFAULT_TIME_LIMIT_MINUTES);
+    const fallbackMins = Number.isFinite(envMins) && envMins > 0 ? envMins : 10;
+    payload.timeLimitMinutes = Number(payload.time_limit_minutes ?? payload.timeLimitMinutes) || fallbackMins;
+    payload.durationMinutes = payload.timeLimitMinutes;
+    return res.status(200).json({ success: true, data: payload });
   } catch (err) {
     console.error("[api/quizzes/:id]", err);
     return res.status(500).json({
@@ -2546,9 +3591,86 @@ async function start() {
   } else {
     console.warn("MySQL is not configured — s3Key + embedding quiz flow will not run.");
   }
-  const server = app.listen(PORT, () => {
+  const httpServer = createServer(app);
+  const io = new Server(httpServer, {
+    cors: {
+      origin: true,
+      methods: ["GET", "POST"],
+      credentials: true,
+    },
+  });
+
+  io.use((socket, next) => {
+    try {
+      const authHeader = String(socket.handshake.headers?.authorization || "");
+      const authToken = String(socket.handshake.auth?.token || socket.handshake.query?.token || "");
+      const bearer = /^Bearer\s+(.+)$/i.exec(authHeader);
+      const raw = (bearer?.[1] || authToken || "").trim();
+      if (!raw) return next();
+      const decoded = jwt.verify(raw, authJwtSecret());
+      const uid = Number(decoded?.sub);
+      if (Number.isFinite(uid) && uid > 0) {
+        socket.data.userId = uid;
+      }
+      return next();
+    } catch {
+      return next();
+    }
+  });
+
+  io.on("connection", (socket) => {
+    const uid = Number(socket.data?.userId);
+    if (Number.isFinite(uid) && uid > 0) {
+      socket.join(`user:${uid}`);
+    }
+  });
+
+  initRealtimeHub(io);
+  setAsyncJobHooks({
+    onCompleted: (job) => {
+      const uid = Number(job?.metadata?.userId);
+      if (!Number.isFinite(uid) || uid <= 0) return;
+      emitToUser(uid, "async-job:completed", {
+        jobId: job.jobId,
+        type: job.type,
+        status: job.status,
+        result: job.result ?? null,
+        updatedAt: job.updatedAt,
+      });
+      if (job?.type === "quiz-generate") {
+        const d = job?.result?.data || {};
+        const quizId = d.quizId;
+        if (quizId != null) {
+          const navigateTo =
+            d.navigateTo ||
+            quizNavigatePath(quizId, { role: job?.metadata?.role });
+          emitToUser(uid, "quiz:ready", {
+            quizId,
+            navigateTo,
+            autoOpen: d.autoOpen !== false,
+            navigateReplace: d.navigateReplace !== false,
+            source: "async-generate",
+          });
+        }
+      }
+    },
+    onFailed: (job) => {
+      const uid = Number(job?.metadata?.userId);
+      if (!Number.isFinite(uid) || uid <= 0) return;
+      emitToUser(uid, "async-job:failed", {
+        jobId: job?.jobId,
+        type: job?.type,
+        status: job?.status,
+        error: job?.error ?? null,
+        updatedAt: job?.updatedAt,
+      });
+    },
+  });
+
+  const server = httpServer.listen(PORT, () => {
     console.log(`Server listening at http://localhost:${PORT}`);
     console.log("Routes: GET /api/documents/download-file (save to disk), GET /api/documents/download-url (presigned JSON).");
+    console.log("Realtime: Socket.IO ready (events: async-job:completed, async-job:failed, quiz:ready).");
   });
   server.on("error", (err) => {
     if (err && err.code === "EADDRINUSE") {

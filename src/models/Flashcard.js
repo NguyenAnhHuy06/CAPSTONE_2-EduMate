@@ -15,14 +15,6 @@ const Flashcard = sequelize.define('Flashcard', {
         type: DataTypes.INTEGER,
         allowNull: false
     },
-    front_text: {
-        type: DataTypes.TEXT,
-        allowNull: false
-    },
-    back_text: {
-        type: DataTypes.TEXT,
-        allowNull: false
-    },
     created_at: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW

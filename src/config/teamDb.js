@@ -7,6 +7,10 @@
  */
 const path = require("path");
 const mysql = require("mysql2/promise");
+const {
+  normalizeQuestionInputCore,
+  normalizeShortAnswerText,
+} = require("../utils/questionTypes");
 
 function createPoolConfig() {
   return {
@@ -19,6 +23,7 @@ function createPoolConfig() {
 }
 
 let pool;
+const columnExistenceCache = new Map();
 
 function isConfigured() {
   const dbName = String(process.env.DB_NAME || "").trim();
@@ -46,10 +51,65 @@ async function ensureQuizLifecycleColumns() {
     "ALTER TABLE quizzes ADD COLUMN published_at DATETIME NULL DEFAULT NULL",
     "ALTER TABLE quizzes ADD COLUMN source_file_url VARCHAR(512) NULL DEFAULT NULL",
     "ALTER TABLE quizzes ADD COLUMN document_id INT NULL DEFAULT NULL",
+    "ALTER TABLE quizzes ADD COLUMN shared_from_student TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE quizzes ADD COLUMN shared_by_user_id INT NULL DEFAULT NULL",
+    "ALTER TABLE quizzes ADD COLUMN lecturer_edited TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE quizzes ADD COLUMN lecturer_edited_by INT NULL DEFAULT NULL",
+    "ALTER TABLE quizzes ADD COLUMN lecturer_edited_at DATETIME NULL DEFAULT NULL",
+    "ALTER TABLE quiz_questions ADD COLUMN media_type VARCHAR(16) NULL DEFAULT NULL",
+    "ALTER TABLE quiz_questions ADD COLUMN media_url VARCHAR(1024) NULL DEFAULT NULL",
+    "ALTER TABLE question_bank_items ADD COLUMN media_type VARCHAR(16) NULL DEFAULT NULL",
+    "ALTER TABLE question_bank_items ADD COLUMN media_url VARCHAR(1024) NULL DEFAULT NULL",
+    "ALTER TABLE quiz_questions ADD COLUMN question_type VARCHAR(32) NOT NULL DEFAULT 'multiple-choice'",
+    "ALTER TABLE quiz_questions MODIFY COLUMN correct_answer VARCHAR(2048) NOT NULL",
+    "ALTER TABLE quiz_answers MODIFY COLUMN user_answer VARCHAR(2048) NULL DEFAULT NULL",
+    "ALTER TABLE quiz_questions ADD COLUMN explanation TEXT NULL",
   ];
   for (const sql of stmts) {
     try { await p.execute(sql); }
     catch (e) { if (e.code !== "ER_DUP_FIELDNAME") console.warn("ensureQuizLifecycleColumns:", e.message); }
+  }
+  columnExistenceCache.clear();
+}
+
+async function ensureManualGradeColumns() {
+  const p = getPool();
+  const stmts = [
+    "ALTER TABLE quiz_answers ADD COLUMN manual_override TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE quiz_attempts ADD COLUMN manual_graded_at DATETIME NULL DEFAULT NULL",
+    "ALTER TABLE quiz_attempts ADD COLUMN manual_graded_by_user_id INT NULL DEFAULT NULL",
+  ];
+  for (const sql of stmts) {
+    try {
+      await p.execute(sql);
+    } catch (e) {
+      if (e.code !== "ER_DUP_FIELDNAME") {
+        console.warn("ensureManualGradeColumns:", e.message);
+      }
+    }
+  }
+  columnExistenceCache.clear();
+}
+
+async function hasTableColumn(tableName, columnName) {
+  const key = `${tableName}.${columnName}`;
+  if (columnExistenceCache.has(key)) return columnExistenceCache.get(key);
+  try {
+    const [rows] = await getPool().execute(
+      `SELECT 1
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = ?
+         AND COLUMN_NAME = ?
+       LIMIT 1`,
+      [String(tableName), String(columnName)]
+    );
+    const hasColumn = rows.length > 0;
+    columnExistenceCache.set(key, hasColumn);
+    return hasColumn;
+  } catch (_) {
+    columnExistenceCache.set(key, false);
+    return false;
   }
 }
 
@@ -58,6 +118,8 @@ async function initDb() {
   await p.execute("SELECT 1");
   try { await ensureQuizLifecycleColumns(); }
   catch (e) { console.warn("ensureQuizLifecycleColumns (init):", e.message); }
+  try { await ensureManualGradeColumns(); }
+  catch (e) { console.warn("ensureManualGradeColumns (init):", e.message); }
   console.log("[teamDb] MySQL connection pool ready.");
 }
 
@@ -267,6 +329,60 @@ function scoreToPercent(score, questionCount) {
   return null;
 }
 
+function normalizeAttemptScorePercent(score, totalQuestions, correctCount) {
+  const pctFromScore = scoreToPercent(score, totalQuestions);
+  if (pctFromScore != null) return pctFromScore;
+  const c = Number(correctCount);
+  const t = Number(totalQuestions);
+  if (Number.isFinite(c) && Number.isFinite(t) && t > 0 && c >= 0) {
+    return Math.round((100 * c) / t);
+  }
+  return 0;
+}
+
+/**
+ * Completed attempts for one quiz (FE: GET /api/quizzes/:id/attempts). Caller must authorize.
+ */
+async function listCompletedQuizAttemptsByQuizId(quizId) {
+  const qid = Number(quizId);
+  if (!Number.isFinite(qid) || qid <= 0) return [];
+  const p = getPool();
+  const [rows] = await p.execute(
+    `SELECT qa.attempt_id, qa.user_id, qa.score, qa.correct_count, qa.total_questions, qa.completed_at,
+            u.name AS user_name, u.email AS user_email,
+            (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = qa.quiz_id) AS question_count_db
+     FROM quiz_attempts qa
+     LEFT JOIN users u ON u.user_id = qa.user_id
+     WHERE qa.quiz_id = ? AND qa.completed_at IS NOT NULL
+     ORDER BY qa.completed_at DESC, qa.attempt_id DESC`,
+    [qid]
+  );
+  return (rows || []).map((r) => {
+    const uid = r.user_id != null ? Number(r.user_id) : null;
+    const label = String(r.user_name || "").trim() || (uid != null ? `User ${uid}` : "Student");
+    const totalQs = Number(r.total_questions || 0) || Number(r.question_count_db || 0) || 0;
+    const correctCount = Number(r.correct_count ?? 0);
+    const scorePercent = normalizeAttemptScorePercent(r.score, totalQs, correctCount);
+    return {
+      attemptId: Number(r.attempt_id),
+      userId: uid,
+      studentName: label,
+      studentEmail: r.user_email != null ? String(r.user_email) : null,
+      scorePercent,
+      correctCount: Number.isFinite(correctCount) ? correctCount : 0,
+      totalQuestions: totalQs,
+      completedAt: r.completed_at,
+    };
+  });
+}
+
+function optionLetterFromAnswer(answer) {
+  const n = Number(answer);
+  if (Number.isFinite(n) && n >= 0 && n <= 3) return ["A", "B", "C", "D"][n];
+  const s = String(answer || "").trim().toUpperCase();
+  return ["A", "B", "C", "D"].includes(s) ? s : null;
+}
+
 async function listQuizHistory(limit = 20, userId = null) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
@@ -276,28 +392,38 @@ async function listQuizHistory(limit = 20, userId = null) {
 
   const sql = `
     SELECT
+      qa.attempt_id,
       q.quiz_id,
       q.title,
       q.created_at,
       q.is_published,
+      q.lecturer_edited,
+      q.lecturer_edited_by,
+      q.lecturer_edited_at,
       c.course_code,
       (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
-      COUNT(qa.attempt_id) AS attempts_count,
-      MAX(qa.score) AS last_score,
-      MAX(qa.completed_at) AS last_completed_at
+      (
+        SELECT COUNT(*)
+        FROM quiz_attempts qa2
+        WHERE qa2.quiz_id = q.quiz_id
+          AND qa2.user_id = qa.user_id
+          AND qa2.completed_at IS NOT NULL
+      ) AS attempts_count,
+      qa.score AS last_score,
+      qa.completed_at AS last_completed_at
     FROM quiz_attempts qa
     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
     LEFT JOIN courses c ON c.course_id = q.course_id
     WHERE qa.user_id = ?
       AND qa.completed_at IS NOT NULL
-    GROUP BY q.quiz_id, q.title, q.created_at, q.is_published, c.course_code
-    ORDER BY MAX(qa.completed_at) DESC
+    ORDER BY qa.completed_at DESC, qa.attempt_id DESC
     LIMIT ${lim}
   `;
 
   const [rows] = await p.execute(sql, [uid]);
 
   return rows.map(row => ({
+    attemptId: row.attempt_id != null ? Number(row.attempt_id) : null,
     quizId: row.quiz_id,
     title: row.title,
     createdAt: row.created_at,
@@ -307,6 +433,9 @@ async function listQuizHistory(limit = 20, userId = null) {
     scorePercent: scoreToPercent(row.last_score, row.question_count),
     lastAttemptAt: row.last_completed_at,
     isPublished: Number(row.is_published ?? 0) === 1,
+    lecturerEdited: Number(row.lecturer_edited ?? 0) === 1,
+    lecturerEditedBy: row.lecturer_edited_by != null ? Number(row.lecturer_edited_by) : null,
+    lecturerEditedAt: row.lecturer_edited_at || null,
   }));
 }
 
@@ -350,64 +479,164 @@ function isLecturerRole(role) {
   return normalized === "LECTURER" || normalized === "TEACHER";
 }
 
+function isAdminRole(role) {
+  const normalized = String(role || "").trim().toUpperCase();
+  return normalized === "ADMIN";
+}
+
 async function canUserManageQuiz(quizId, userId) {
   const row = await getQuizWithQuestions(quizId);
   if (!row) return false;
   if (!userId) return false;
-  if (row.created_by == null || String(row.created_by) !== String(userId)) return false;
   const role = await getUserRole(userId);
-  return isLecturerRole(role);
+  if (isAdminRole(role)) return true;
+  // Shared quizzes can be reviewed/edited by lecturers.
+  if (Number(row.shared_from_student || 0) === 1 && isLecturerRole(role)) return true;
+  if (row.created_by == null || String(row.created_by) !== String(userId)) return false;
+  // Owner can always access/manage own quiz draft, regardless of role.
+  return true;
 }
 
 function normalizeQuestionInput(q) {
-  if (!q || typeof q !== "object") return null;
-  const questionText = String(q.question ?? q.question_text ?? "").trim();
-  if (!questionText) return null;
-  let opts = q.options;
-  if (Array.isArray(opts)) {
-    const L = ["A", "B", "C", "D"];
-    opts = Object.fromEntries(L.map((letter, i) => [letter, String(opts[i] ?? "").trim()]));
-  } else if (opts && typeof opts === "object") {
-    opts = { A: trunc255(opts.A ?? opts.a ?? ""), B: trunc255(opts.B ?? opts.b ?? ""), C: trunc255(opts.C ?? opts.c ?? ""), D: trunc255(opts.D ?? opts.d ?? "") };
-  } else {
-    opts = { A: trunc255(q.option_a), B: trunc255(q.option_b), C: trunc255(q.option_c), D: trunc255(q.option_d) };
-  }
-  let cor = q.correct_answer ?? q.correctAnswer ?? q.correct ?? q.answer ?? q.answerKey;
-  const rawCor = String(cor ?? "").trim();
-  const rawUpper = rawCor.toUpperCase();
-  if (typeof cor === "number" && cor >= 0 && cor <= 3) {
-    cor = ["A", "B", "C", "D"][cor];
-  } else if (/^[0-3]$/.test(rawCor)) {
-    cor = ["A", "B", "C", "D"][Number(rawCor)];
-  } else if (/^(OPTION[_\s-]?)?[ABCD](\.|:|\)|\s|$)/i.test(rawCor)) {
-    cor = rawUpper.replace(/^OPTION[_\s-]?/i, "").trim().charAt(0);
-  } else {
-    cor = rawUpper;
-  }
-  let correct = String(cor || "A").trim().charAt(0) || "A";
-  if (!["A", "B", "C", "D"].includes(correct)) {
-    const entries = [
-      ["A", String(opts.A || "").trim()],
-      ["B", String(opts.B || "").trim()],
-      ["C", String(opts.C || "").trim()],
-      ["D", String(opts.D || "").trim()],
-    ];
-    const matched = entries.find(([, text]) => text && text.toUpperCase() === rawUpper);
-    correct = matched ? matched[0] : "A";
-  }
-  return { question: questionText, options: opts, correct_answer: correct };
+  const base = normalizeQuestionInputCore(q);
+  if (!base) return null;
+  const normalizedMediaType = String(
+    q.media_type ?? q.mediaType ?? q.attachmentType ?? q.resourceType ?? ""
+  )
+    .trim()
+    .toLowerCase();
+  const mediaUrlRaw =
+    q.media_url ??
+    q.mediaUrl ??
+    q.attachmentUrl ??
+    q.resourceUrl ??
+    q.imageUrl ??
+    q.videoUrl ??
+    q.audioUrl ??
+    q.youtubeUrl ??
+    "";
+  const mediaUrl = String(mediaUrlRaw || "").trim();
+  const mediaType = ["image", "video", "audio", "youtube"].includes(normalizedMediaType)
+    ? normalizedMediaType
+    : null;
+  return {
+    ...base,
+    media_type: mediaType,
+    media_url: mediaUrl || null,
+  };
 }
 
 async function insertQuizQuestion(quizId, q) {
   const norm = normalizeQuestionInput(q);
   if (!norm) return;
   const opts = norm.options || {};
-  const [a, b, c, d] = ["A", "B", "C", "D"].map(L => trunc255(opts[L]));
-  const correct = String(norm.correct_answer || "A").toUpperCase().trim().slice(0, 1) || "A";
-  await getPool().execute(
-    "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer) VALUES (?,?,?,?,?,?,?)",
-    [quizId, norm.question, a, b, c, d, correct]
-  );
+  const [a, b, c, d] = ["A", "B", "C", "D"].map((L) => trunc255(opts[L]));
+  const qType = norm.question_type || "multiple-choice";
+  let correctStored;
+  if (qType === "short-answer") {
+    correctStored = String(norm.correct_answer || "").trim().slice(0, 2048);
+    if (!correctStored) return;
+  } else {
+    correctStored = String(norm.correct_answer || "A").toUpperCase().trim().slice(0, 1) || "A";
+    if (!["A", "B", "C", "D"].includes(correctStored)) correctStored = "A";
+  }
+  const supportQType = await hasTableColumn("quiz_questions", "question_type");
+  const supportMediaType = await hasTableColumn("quiz_questions", "media_type");
+  const supportMediaUrl = await hasTableColumn("quiz_questions", "media_url");
+  const supportExp = await hasTableColumn("quiz_questions", "explanation");
+  const expStr = String(norm.explanation ?? "").trim();
+  const expParam = expStr ? expStr.slice(0, 8000) : null;
+  if (supportQType && supportMediaType && supportMediaUrl) {
+    if (supportExp) {
+      await getPool().execute(
+        "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, media_type, media_url, explanation) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [quizId, norm.question, a, b, c, d, correctStored, qType, norm.media_type, norm.media_url, expParam]
+      );
+    } else {
+      await getPool().execute(
+        "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, media_type, media_url) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [quizId, norm.question, a, b, c, d, correctStored, qType, norm.media_type, norm.media_url]
+      );
+    }
+    return;
+  }
+  if (supportQType) {
+    if (supportExp) {
+      await getPool().execute(
+        "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, explanation) VALUES (?,?,?,?,?,?,?,?,?)",
+        [quizId, norm.question, a, b, c, d, correctStored, qType, expParam]
+      );
+    } else {
+      await getPool().execute(
+        "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type) VALUES (?,?,?,?,?,?,?,?)",
+        [quizId, norm.question, a, b, c, d, correctStored, qType]
+      );
+    }
+    return;
+  }
+  if (supportMediaType && supportMediaUrl) {
+    if (supportExp) {
+      await getPool().execute(
+        "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, media_type, media_url, explanation) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [
+          quizId,
+          norm.question,
+          a,
+          b,
+          c,
+          d,
+          qType === "short-answer" ? correctStored.slice(0, 1) : correctStored,
+          norm.media_type,
+          norm.media_url,
+          expParam,
+        ]
+      );
+    } else {
+      await getPool().execute(
+        "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, media_type, media_url) VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+          quizId,
+          norm.question,
+          a,
+          b,
+          c,
+          d,
+          qType === "short-answer" ? correctStored.slice(0, 1) : correctStored,
+          norm.media_type,
+          norm.media_url,
+        ]
+      );
+    }
+    return;
+  }
+  if (supportExp) {
+    await getPool().execute(
+      "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer, explanation) VALUES (?,?,?,?,?,?,?,?)",
+      [
+        quizId,
+        norm.question,
+        a,
+        b,
+        c,
+        d,
+        qType === "short-answer" ? correctStored.slice(0, 1) : correctStored,
+        expParam,
+      ]
+    );
+  } else {
+    await getPool().execute(
+      "INSERT INTO quiz_questions (quiz_id, question_text, option_a, option_b, option_c, option_d, correct_answer) VALUES (?,?,?,?,?,?,?)",
+      [
+        quizId,
+        norm.question,
+        a,
+        b,
+        c,
+        d,
+        qType === "short-answer" ? correctStored.slice(0, 1) : correctStored,
+      ]
+    );
+  }
 }
 
 async function saveQuizWithQuestions({ title, courseId, createdBy, questions, sourceFileUrl, documentId }) {
@@ -432,17 +661,55 @@ async function saveQuizWithQuestions({ title, courseId, createdBy, questions, so
   return quizId;
 }
 
+function shapeQuizQuestionRow(r) {
+  const t = String(r.question_type || "multiple-choice").trim() || "multiple-choice";
+  const ex = r.explanation != null && String(r.explanation).trim() ? String(r.explanation).trim() : null;
+  return {
+    ...r,
+    question_type: t,
+    type: t,
+    explanation: ex,
+    media_type: r.media_type ?? null,
+    media_url: r.media_url ?? null,
+    mediaType: r.media_type ?? null,
+    mediaUrl: r.media_url ?? null,
+    options: {
+      A: r.option_a,
+      B: r.option_b,
+      C: r.option_c,
+      D: r.option_d,
+    },
+  };
+}
+
 async function getQuizWithQuestions(quizId) {
   const p = getPool();
   const id = Number(quizId);
   if (!Number.isFinite(id)) return null;
   const [quizzes] = await p.execute("SELECT * FROM quizzes WHERE quiz_id = ? LIMIT 1", [id]);
   if (!quizzes.length) return null;
-  const [questions] = await p.execute(
-    "SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC",
-    [id]
-  );
-  return { ...quizzes[0], questions };
+  const supportQType = await hasTableColumn("quiz_questions", "question_type");
+  const supportMediaType = await hasTableColumn("quiz_questions", "media_type");
+  const supportMediaUrl = await hasTableColumn("quiz_questions", "media_url");
+  const parts = [
+    "question_id",
+    "question_text",
+    "option_a",
+    "option_b",
+    "option_c",
+    "option_d",
+    "correct_answer",
+  ];
+  if (supportQType) parts.push("question_type");
+  if (supportMediaType && supportMediaUrl) {
+    parts.push("media_type", "media_url");
+  }
+  if (await hasTableColumn("quiz_questions", "explanation")) {
+    parts.push("explanation");
+  }
+  const questionSelect = `SELECT ${parts.join(", ")} FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC`;
+  const [questions] = await p.execute(questionSelect, [id]);
+  return { ...quizzes[0], questions: (questions || []).map(shapeQuizQuestionRow) };
 }
 
 async function assertQuizExists(quizId, p = getPool()) {
@@ -467,47 +734,133 @@ async function finishQuizAttempt({ quizId, userId, score, completedAt = null, an
   if (!Number.isFinite(sc) || sc < 0) throw new Error("score không hợp lệ.");
   const when = completedAt ? new Date(completedAt) : new Date();
   await assertQuizExists(qid, p);
-  
+
   const answersJson = Array.isArray(answers) ? JSON.stringify(answers) : "[]";
-  const timeTakenSecs = Number(timeTaken) || null;
-  const totalQuestions = Array.isArray(answers) ? answers.length : 0;
-  let correctCount = 0;
-  
-  // Calculate correct count if possible
-  if (Array.isArray(answers) && answers.length > 0) {
-    try {
-      const [qRows] = await p.execute("SELECT question_id, correct_answer FROM quiz_questions WHERE quiz_id = ?", [qid]);
-      const qMap = new Map();
-      qRows.forEach(r => qMap.set(String(r.question_id), String(r.correct_answer || 'A').toUpperCase()));
-      const LETTERS = ['A', 'B', 'C', 'D'];
-      for (const a of answers) {
-        const cor = qMap.get(String(a.questionId));
-        if (cor) {
-          const corIdx = LETTERS.indexOf(cor);
-          if (corIdx >= 0 && corIdx === Number(a.selectedAnswer)) correctCount++;
-        }
-      }
-    } catch(e) {}
-  }
+  const timeTakenSecs =
+    timeTaken != null && Number.isFinite(Number(timeTaken)) && Number(timeTaken) >= 0
+      ? Math.floor(Number(timeTaken))
+      : null;
 
   const [openRows] = await p.execute(
     "SELECT attempt_id FROM quiz_attempts WHERE quiz_id = ? AND (user_id <=> ?) AND completed_at IS NULL ORDER BY attempt_id DESC LIMIT 1",
     [qid, userId || null]
   );
+  let attemptId;
   if (openRows.length) {
-    await p.execute("UPDATE quiz_attempts SET score = ?, completed_at = ?, answers_json = ?, time_taken_seconds = ?, correct_count = ?, total_questions = ? WHERE attempt_id = ?", 
-      [Math.round(sc), when, answersJson, timeTakenSecs, correctCount, totalQuestions, openRows[0].attempt_id]);
-    return;
+    attemptId = Number(openRows[0].attempt_id);
+    await p.execute("UPDATE quiz_attempts SET score = ?, completed_at = ? WHERE attempt_id = ?", [Math.round(sc), when, attemptId]);
+  } else {
+    const [hdr] = await p.execute(
+      "INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,?,?)",
+      [qid, userId || null, Math.round(sc), when]
+    );
+    attemptId = Number(hdr.insertId);
   }
-  await p.execute("INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at, answers_json, time_taken_seconds, correct_count, total_questions) VALUES (?,?,?,?,?,?,?,?)", 
-    [qid, userId || null, Math.round(sc), when, answersJson, timeTakenSecs, correctCount, totalQuestions]);
+
+  try {
+    const hasAnswersJson = await hasTableColumn("quiz_attempts", "answers_json");
+    const hasTimeTaken = await hasTableColumn("quiz_attempts", "time_taken_seconds");
+    if (hasAnswersJson || (hasTimeTaken && timeTakenSecs != null)) {
+      const sets = [];
+      const params = [];
+      if (hasAnswersJson) {
+        sets.push("answers_json = ?");
+        params.push(answersJson);
+      }
+      if (hasTimeTaken && timeTakenSecs != null) {
+        sets.push("time_taken_seconds = ?");
+        params.push(timeTakenSecs);
+      }
+      if (sets.length) {
+        await p.execute(`UPDATE quiz_attempts SET ${sets.join(", ")} WHERE attempt_id = ?`, [...params, attemptId]);
+      }
+    }
+  } catch (_) {}
+
+  const answersPayload = Array.isArray(answers) ? answers : [];
+  if (!answersPayload.length) return attemptId;
+
+  const supportQType = await hasTableColumn("quiz_questions", "question_type");
+  const qSql = supportQType
+    ? "SELECT question_id, correct_answer, question_type FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC"
+    : "SELECT question_id, correct_answer FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC";
+  const [questionRows] = await p.execute(qSql, [qid]);
+  const questionsById = new Map(
+    questionRows.map((q) => [
+      Number(q.question_id),
+      {
+        correct: String(q.correct_answer ?? ""),
+        type: supportQType
+          ? String(q.question_type || "multiple-choice").trim() || "multiple-choice"
+          : "multiple-choice",
+      },
+    ])
+  );
+
+  await p.execute("DELETE FROM quiz_answers WHERE attempt_id = ?", [attemptId]);
+  for (let i = 0; i < answersPayload.length; i++) {
+    const a = answersPayload[i];
+    let questionId = Number(a?.questionId ?? a?.question_id);
+    if (!Number.isFinite(questionId)) {
+      const byIndex = questionRows[i];
+      questionId = Number(byIndex?.question_id);
+    }
+    if (!Number.isFinite(questionId)) continue;
+
+    const meta = questionsById.get(questionId);
+    const qt = meta?.type || "multiple-choice";
+    let storedAnswer = "";
+    let isCorrect = 0;
+    if (qt === "short-answer") {
+      let userText = String(
+        a?.shortAnswer ??
+          a?.textAnswer ??
+          a?.user_answer ??
+          a?.userAnswer ??
+          a?.answer ??
+          ""
+      ).trim();
+      if (userText.length > 2048) userText = userText.slice(0, 2048);
+      storedAnswer = userText;
+      const expected = meta?.correct ?? "";
+      isCorrect =
+        normalizeShortAnswerText(userText) === normalizeShortAnswerText(expected) ? 1 : 0;
+    } else {
+      const userLetter = optionLetterFromAnswer(a?.selectedAnswer ?? a?.user_answer ?? a?.answer);
+      storedAnswer = userLetter || "";
+      const correctLetter = String(meta?.correct || "").toUpperCase().trim().slice(0, 1);
+      isCorrect = userLetter && correctLetter && userLetter === correctLetter ? 1 : 0;
+    }
+    await p.execute(
+      "INSERT INTO quiz_answers (attempt_id, question_id, user_answer, is_correct) VALUES (?,?,?,?)",
+      [attemptId, questionId, storedAnswer, isCorrect]
+    );
+  }
+
+  const [[cntRow]] = await p.execute(
+    "SELECT COUNT(*) AS c FROM quiz_answers WHERE attempt_id = ? AND is_correct = 1",
+    [attemptId]
+  );
+  const correctN = Number(cntRow?.c || 0);
+  await p.execute("UPDATE quiz_attempts SET score = ? WHERE attempt_id = ?", [correctN, attemptId]);
+  if (await hasTableColumn("quiz_attempts", "correct_count")) {
+    await p.execute("UPDATE quiz_attempts SET correct_count = ? WHERE attempt_id = ?", [correctN, attemptId]);
+  }
+  const [[tqRow]] = await p.execute("SELECT COUNT(*) AS n FROM quiz_questions WHERE quiz_id = ?", [qid]);
+  const totalQ = Number(tqRow?.n || 0);
+  if (totalQ > 0 && (await hasTableColumn("quiz_attempts", "total_questions"))) {
+    await p.execute("UPDATE quiz_attempts SET total_questions = ? WHERE attempt_id = ?", [totalQ, attemptId]);
+  }
+
+  return attemptId;
 }
 
+/** Legacy/alternate shape used by some routes — reads attempt row + answers_json. */
 async function getAttemptResult(attemptId, userId) {
   const p = getPool();
   const aid = Number(attemptId);
   if (!Number.isFinite(aid)) return null;
-  
+
   const sql = `
     SELECT qa.*, q.title FROM quiz_attempts qa
     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
@@ -516,40 +869,45 @@ async function getAttemptResult(attemptId, userId) {
   `;
   const params = userId ? [aid, userId] : [aid];
   const [rows] = await p.execute(sql, params);
-  
+
   if (!rows.length) return null;
   const row = rows[0];
-  
+
   let answers = [];
   try {
     if (row.answers_json) answers = JSON.parse(row.answers_json);
-  } catch(e) {}
+  } catch (e) {}
 
   if (answers.length > 0) {
     try {
-      const qIds = answers.map(a => a.questionId || a.question_id).filter(Boolean).map(id => String(id).replace(/[^0-9a-zA-Z_-]/g, ''));
+      const qIds = answers
+        .map((a) => a.questionId || a.question_id)
+        .filter(Boolean)
+        .map((id) => String(id).replace(/[^0-9a-zA-Z_-]/g, ""));
       if (qIds.length > 0) {
-         const qIdStr = qIds.map(id => `'${id}'`).join(',');
-         const [qRows] = await p.execute(`SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer FROM quiz_questions WHERE question_id IN (${qIdStr})`);
-         const qMap = new Map();
-         qRows.forEach(r => qMap.set(String(r.question_id), r));
-         
-         const LETTERS = ['A', 'B', 'C', 'D'];
-         answers = answers.map(a => {
-           const qData = qMap.get(String(a.questionId || a.question_id));
-           if (qData) {
-             return {
-               ...a,
-               question_text: qData.question_text,
-               options: [qData.option_a, qData.option_b, qData.option_c, qData.option_d],
-               correctAnswer: Math.max(0, LETTERS.indexOf(String(qData.correct_answer || 'A').toUpperCase()))
-             };
-           }
-           return a;
-         });
+        const qIdStr = qIds.map((id) => `'${id}'`).join(",");
+        const [qRows] = await p.execute(
+          `SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer FROM quiz_questions WHERE question_id IN (${qIdStr})`
+        );
+        const qMap = new Map();
+        qRows.forEach((r) => qMap.set(String(r.question_id), r));
+
+        const LETTERS = ["A", "B", "C", "D"];
+        answers = answers.map((a) => {
+          const qData = qMap.get(String(a.questionId || a.question_id));
+          if (qData) {
+            return {
+              ...a,
+              question_text: qData.question_text,
+              options: [qData.option_a, qData.option_b, qData.option_c, qData.option_d],
+              correctAnswer: Math.max(0, LETTERS.indexOf(String(qData.correct_answer || "A").toUpperCase())),
+            };
+          }
+          return a;
+        });
       }
-    } catch(e) {
-       console.error("Error fetching detail for answers:", e);
+    } catch (e) {
+      console.error("Error fetching detail for answers:", e);
     }
   }
 
@@ -562,8 +920,326 @@ async function getAttemptResult(attemptId, userId) {
     time_taken_seconds: row.time_taken_seconds,
     correct_count: row.correct_count,
     total_questions: row.total_questions,
-    answers: answers
+    answers,
   };
+}
+
+function optionTextFromLetter(questionRow, answerLetter) {
+  const letter = String(answerLetter || "").trim().toUpperCase();
+  if (!["A", "B", "C", "D"].includes(letter)) return "";
+  if (letter === "A") return String(questionRow?.option_a || "");
+  if (letter === "B") return String(questionRow?.option_b || "");
+  if (letter === "C") return String(questionRow?.option_c || "");
+  if (letter === "D") return String(questionRow?.option_d || "");
+  return "";
+}
+
+function isShortAnswerQuestionType(qt) {
+  const t = String(qt || "multiple-choice")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-");
+  return t === "short-answer" || t === "shortanswer" || t === "essay";
+}
+
+async function getQuizAttemptResult(attemptId, userId = null) {
+  const p = getPool();
+  const aid = Number(attemptId);
+  if (!Number.isFinite(aid) || aid <= 0) throw new Error("attemptId không hợp lệ.");
+  const uid = parseOptionalInt(userId);
+
+  const [attemptRows] = await p.execute(
+    `SELECT
+      qa.attempt_id,
+      qa.quiz_id,
+      qa.user_id,
+      qa.score,
+      qa.completed_at,
+      q.title
+     FROM quiz_attempts qa
+     INNER JOIN quizzes q ON q.quiz_id = qa.quiz_id
+     WHERE qa.attempt_id = ?
+     LIMIT 1`,
+    [aid]
+  );
+  if (!attemptRows.length) return null;
+  const attempt = attemptRows[0];
+  if (uid != null && Number(attempt.user_id) !== uid) return null;
+
+  const [questionCountRows] = await p.execute(
+    "SELECT COUNT(*) AS total_questions FROM quiz_questions WHERE quiz_id = ?",
+    [attempt.quiz_id]
+  );
+  const totalQuestions = Number(questionCountRows?.[0]?.total_questions || 0);
+
+  const moCol = await hasTableColumn("quiz_answers", "manual_override");
+  const moSelect = moCol ? ", qa.manual_override" : "";
+  const supportQType = await hasTableColumn("quiz_questions", "question_type");
+  const supportExp = await hasTableColumn("quiz_questions", "explanation");
+  const qTypeCol = supportQType ? "qq.question_type, " : "";
+  const expCol = supportExp ? "qq.explanation, " : "";
+  const [answerRows] = await p.execute(
+    `SELECT
+      qa.question_id,
+      qa.user_answer,
+      qa.is_correct${moSelect},
+      qq.question_text,
+      ${qTypeCol}${expCol}
+      qq.option_a,
+      qq.option_b,
+      qq.option_c,
+      qq.option_d,
+      qq.correct_answer
+     FROM quiz_answers qa
+     INNER JOIN quiz_questions qq ON qq.question_id = qa.question_id
+     WHERE qa.attempt_id = ?
+     ORDER BY qq.question_id ASC`,
+    [aid]
+  );
+
+  const explanationsByQuestionId = {};
+  for (const r0 of answerRows || []) {
+    if (supportExp && r0.explanation != null && String(r0.explanation).trim()) {
+      explanationsByQuestionId[String(r0.question_id)] = String(r0.explanation).trim();
+    }
+  }
+
+  const answers = (answerRows || []).map((r) => {
+    const qTypeRaw = supportQType ? r.question_type : "multiple-choice";
+    const isShort = isShortAnswerQuestionType(qTypeRaw);
+    const correctLetterMc = String(r.correct_answer || "").trim().toUpperCase().slice(0, 1);
+
+    if (isShort) {
+      const text = String(r.user_answer ?? "");
+      return {
+        questionId: Number(r.question_id),
+        question_text: String(r.question_text || ""),
+        question_type: String(qTypeRaw || "short-answer"),
+        type: String(qTypeRaw || "short-answer"),
+        options: [r.option_a, r.option_b, r.option_c, r.option_d].map((x) => String(x || "")),
+        selectedAnswer: text,
+        selected_answer: text,
+        correctAnswer: String(r.correct_answer ?? ""),
+        correct_answer: String(r.correct_answer ?? ""),
+        is_correct: Number(r.is_correct || 0) === 1,
+        manual_override: moCol ? Number(r.manual_override || 0) === 1 : false,
+      };
+    }
+
+    const selectedLetter = optionLetterFromAnswer(r.user_answer) || "";
+    const correctLetter = optionLetterFromAnswer(r.correct_answer) || correctLetterMc;
+    const selectedOptText = optionTextFromLetter(r, selectedLetter);
+    const correctOptText = optionTextFromLetter(r, correctLetter);
+    const selectedDisplay =
+      selectedLetter && selectedOptText
+        ? `${selectedLetter}: ${selectedOptText}`
+        : selectedLetter || "—";
+    return {
+      questionId: Number(r.question_id),
+      question_text: String(r.question_text || ""),
+      question_type: String(qTypeRaw || "multiple-choice"),
+      type: String(qTypeRaw || "multiple-choice"),
+      options: [r.option_a, r.option_b, r.option_c, r.option_d].map((x) => String(x || "")),
+      selectedAnswer: selectedLetter,
+      selected_answer: selectedDisplay,
+      correctAnswer: correctLetter,
+      correct_answer: correctOptText || correctLetter,
+      is_correct: Number(r.is_correct || 0) === 1,
+      manual_override: moCol ? Number(r.manual_override || 0) === 1 : false,
+    };
+  });
+
+  const scorePercent = scoreToPercent(attempt.score, totalQuestions);
+  const correctCount = answers.filter((a) => a.is_correct).length;
+  return {
+    attemptId: Number(attempt.attempt_id),
+    quizId: Number(attempt.quiz_id),
+    title: attempt.title || "Quiz",
+    score: Number(scorePercent ?? 0),
+    correct_count: Number(correctCount),
+    total_questions: totalQuestions,
+    time_taken_seconds: 0,
+    answers,
+    completed_at: attempt.completed_at || null,
+    ...(Object.keys(explanationsByQuestionId).length ? { explanationsByQuestionId } : {}),
+  };
+}
+
+/**
+ * Kết quả lượt làm cho giảng viên (cùng shape getQuizAttemptResult) sau khi kiểm tra canUserManageQuiz.
+ * Chỉ cho attempt đã completed.
+ */
+async function getQuizAttemptResultForStaff(attemptId, staffUserId) {
+  const aid = Number(attemptId);
+  const sid = parseOptionalInt(staffUserId);
+  if (!Number.isFinite(aid) || aid <= 0 || sid == null) return null;
+  const p = getPool();
+  const [rows] = await p.execute(
+    `SELECT attempt_id, quiz_id, user_id
+     FROM quiz_attempts
+     WHERE attempt_id = ? AND completed_at IS NOT NULL
+     LIMIT 1`,
+    [aid]
+  );
+  if (!rows.length) return null;
+  const row = rows[0];
+  if (!(await canUserManageQuiz(Number(row.quiz_id), sid))) return null;
+  return getQuizAttemptResult(aid, row.user_id);
+}
+
+async function manualRegradeQuizAttempt({ attemptId, staffUserId, grades }) {
+  await ensureManualGradeColumns();
+  const p = getPool();
+  const aid = Number(attemptId);
+  const sid = parseOptionalInt(staffUserId);
+  const list = Array.isArray(grades) ? grades : [];
+  if (!Number.isFinite(aid) || sid == null) {
+    const err = new Error("Yêu cầu attemptId và quyền giảng viên hợp lệ.");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!list.length) {
+    const err = new Error("Gửi grades: [{ questionId, isCorrect }, ...].");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [attemptRows] = await conn.execute(
+      `SELECT attempt_id, quiz_id, user_id FROM quiz_attempts WHERE attempt_id = ? AND completed_at IS NOT NULL LIMIT 1`,
+      [aid]
+    );
+    if (!attemptRows.length) {
+      const err = new Error("Không tìm thấy lượt làm đã hoàn thành.");
+      err.statusCode = 404;
+      throw err;
+    }
+    const att = attemptRows[0];
+    const quizId = Number(att.quiz_id);
+    if (!(await canUserManageQuiz(quizId, sid))) {
+      const err = new Error("Bạn không có quyền chấm lại lượt này.");
+      err.statusCode = 403;
+      throw err;
+    }
+
+    const hasMo = await hasTableColumn("quiz_answers", "manual_override");
+    const hasGradedAt = await hasTableColumn("quiz_attempts", "manual_graded_at");
+    const hasGradedBy = await hasTableColumn("quiz_attempts", "manual_graded_by_user_id");
+    const hasCorrectCount = await hasTableColumn("quiz_attempts", "correct_count");
+    const hasTotalQuestions = await hasTableColumn("quiz_attempts", "total_questions");
+
+    for (const g of list) {
+      const qid = Number(g.questionId ?? g.question_id);
+      const isCorrect = !!(g.isCorrect ?? g.is_correct);
+      if (!Number.isFinite(qid)) continue;
+
+      const [qBelongs] = await conn.execute(
+        `SELECT 1 FROM quiz_questions WHERE quiz_id = ? AND question_id = ? LIMIT 1`,
+        [quizId, qid]
+      );
+      if (!qBelongs.length) {
+        const err = new Error(`Câu ${qid} không thuộc quiz này.`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const ic = isCorrect ? 1 : 0;
+      let sql;
+      let params;
+      if (hasMo) {
+        sql =
+          "UPDATE quiz_answers SET is_correct = ?, manual_override = 1 WHERE attempt_id = ? AND question_id = ?";
+        params = [ic, aid, qid];
+      } else {
+        sql = "UPDATE quiz_answers SET is_correct = ? WHERE attempt_id = ? AND question_id = ?";
+        params = [ic, aid, qid];
+      }
+      const [upd] = await conn.execute(sql, params);
+      const affected = upd?.affectedRows ?? 0;
+      if (!affected) {
+        const err = new Error(`Không có dòng trả lời cho câu ${qid} trong lượt làm này.`);
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
+    const [[cntRow]] = await conn.execute(
+      `SELECT COUNT(*) AS c FROM quiz_answers WHERE attempt_id = ? AND is_correct = 1`,
+      [aid]
+    );
+    const correctCount = Number(cntRow?.c || 0);
+    const [[totRow]] = await conn.execute(
+      `SELECT COUNT(*) AS n FROM quiz_questions WHERE quiz_id = ?`,
+      [quizId]
+    );
+    const totalQuestions = Number(totRow?.n || 0);
+
+    const updateParts = ["score = ?"];
+    const uParams = [correctCount];
+    if (hasCorrectCount) {
+      updateParts.push("correct_count = ?");
+      uParams.push(correctCount);
+    }
+    if (hasTotalQuestions) {
+      updateParts.push("total_questions = ?");
+      uParams.push(totalQuestions);
+    }
+    if (hasGradedAt) {
+      updateParts.push("manual_graded_at = NOW()");
+    }
+    if (hasGradedBy) {
+      updateParts.push("manual_graded_by_user_id = ?");
+      uParams.push(sid);
+    }
+    uParams.push(aid);
+    await conn.execute(
+      `UPDATE quiz_attempts SET ${updateParts.join(", ")} WHERE attempt_id = ?`,
+      uParams
+    );
+
+    await conn.commit();
+
+    return {
+      attemptId: aid,
+      quizId,
+      score: correctCount,
+      correctCount,
+      totalQuestions,
+    };
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch (_) {
+      // ignore
+    }
+    if (e.statusCode) throw e;
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function getLatestQuizAttemptResultByQuizAndUser(quizId, userId) {
+  const p = getPool();
+  const qid = Number(quizId);
+  const uid = parseOptionalInt(userId);
+  if (!Number.isFinite(qid) || qid <= 0) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("userId không hợp lệ.");
+
+  const [rows] = await p.execute(
+    `SELECT attempt_id
+     FROM quiz_attempts
+     WHERE quiz_id = ?
+       AND user_id = ?
+       AND completed_at IS NOT NULL
+     ORDER BY attempt_id DESC
+     LIMIT 1`,
+    [qid, uid]
+  );
+  if (!rows.length) return null;
+  return getQuizAttemptResult(rows[0].attempt_id, uid);
 }
 
 async function replaceQuizQuestions(quizId, questions) {
@@ -586,6 +1262,30 @@ async function setQuizPublished(quizId, published = true) {
     await p.execute("UPDATE quizzes SET is_published = 1, published_at = COALESCE(published_at, NOW()) WHERE quiz_id = ?", [id]);
   } else {
     await p.execute("UPDATE quizzes SET is_published = 0, published_at = NULL WHERE quiz_id = ?", [id]);
+  }
+}
+
+async function deleteQuizById(quizId) {
+  const p = getPool();
+  const id = Number(quizId);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("quizId không hợp lệ.");
+  const conn = await p.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute("DELETE FROM quiz_questions WHERE quiz_id = ?", [id]);
+    await conn.execute("DELETE FROM quiz_attempts WHERE quiz_id = ?", [id]);
+    const [result] = await conn.execute("DELETE FROM quizzes WHERE quiz_id = ? LIMIT 1", [id]);
+    await conn.commit();
+    return Number(result?.affectedRows || 0) > 0;
+  } catch (err) {
+    try {
+      await conn.rollback();
+    } catch (_) {
+      // ignore rollback error
+    }
+    throw err;
+  } finally {
+    conn.release();
   }
 }
 
@@ -628,17 +1328,41 @@ async function findQuizByS3Key(s3Key) {
 async function getQuizQuestionsById(quizId) {
   const id = Number(quizId);
   if (!Number.isFinite(id)) return [];
-  const [rows] = await getPool().execute(
-    "SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC",
-    [id]
-  );
-  return rows.map(r => ({
-    id: String(r.question_id),
-    question: r.question_text,
-    options: { A: r.option_a, B: r.option_b, C: r.option_c, D: r.option_d },
-    correct_answer: r.correct_answer,
-    explanation: "",
-  }));
+  const supportQType = await hasTableColumn("quiz_questions", "question_type");
+  const supportMediaType = await hasTableColumn("quiz_questions", "media_type");
+  const supportMediaUrl = await hasTableColumn("quiz_questions", "media_url");
+  const supportExp = await hasTableColumn("quiz_questions", "explanation");
+  const parts = [
+    "question_id",
+    "question_text",
+    "option_a",
+    "option_b",
+    "option_c",
+    "option_d",
+    "correct_answer",
+  ];
+  if (supportQType) parts.push("question_type");
+  if (supportMediaType && supportMediaUrl) {
+    parts.push("media_type", "media_url");
+  }
+  if (supportExp) parts.push("explanation");
+  const questionSelect = `SELECT ${parts.join(", ")} FROM quiz_questions WHERE quiz_id = ? ORDER BY question_id ASC`;
+  const [rows] = await getPool().execute(questionSelect, [id]);
+  return rows.map((r) => {
+    const t = String(r.question_type || "multiple-choice").trim() || "multiple-choice";
+    const ex = supportExp && r.explanation != null && String(r.explanation).trim() ? String(r.explanation).trim() : "";
+    return {
+      id: String(r.question_id),
+      question: r.question_text,
+      type: t,
+      question_type: t,
+      options: { A: r.option_a, B: r.option_b, C: r.option_c, D: r.option_d },
+      correct_answer: r.correct_answer,
+      media_type: r.media_type || null,
+      media_url: r.media_url || null,
+      explanation: ex,
+    };
+  });
 }
 
 
@@ -891,6 +1615,11 @@ async function listQuestionBankItems(ownerUserId) {
   const uid = Number(ownerUserId);
   if (!Number.isFinite(uid) || uid <= 0) return [];
 
+  const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
+  const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
+  const mediaColumns = supportMediaType && supportMediaUrl
+    ? ", qbi.media_type, qbi.media_url"
+    : "";
   const sql = `
     SELECT
       qbi.item_id,
@@ -911,6 +1640,7 @@ async function listQuestionBankItems(ownerUserId) {
       qbi.is_active,
       qbi.created_at,
       qbi.updated_at
+      ${mediaColumns}
     FROM question_bank_items qbi
     WHERE qbi.owner_user_id = ?
       AND qbi.is_active = 1
@@ -930,6 +1660,8 @@ async function listQuestionBankItems(ownerUserId) {
     difficulty: r.difficulty || "medium",
     options: [r.option_a, r.option_b, r.option_c, r.option_d].map((x) => String(x ?? "")),
     correctAnswer: r.correct_answer || "A",
+    mediaType: r.media_type || null,
+    mediaUrl: r.media_url || null,
     versionNo: Number(r.version_no || 1),
     version: Number(r.version || 1),
     createdAt: r.created_at || null,
@@ -946,6 +1678,8 @@ async function insertQuestionBankItem({
   difficulty,
   options,
   correctAnswer,
+  mediaType,
+  mediaUrl,
 }) {
   const p = getPool();
   const uid = Number(ownerUserId);
@@ -956,6 +1690,8 @@ async function insertQuestionBankItem({
     question,
     options,
     correctAnswer,
+    mediaType,
+    mediaUrl,
   });
   if (!normalized) throw new Error("Câu hỏi không hợp lệ.");
 
@@ -964,27 +1700,53 @@ async function insertQuestionBankItem({
   const safeCategory = String(category || "").trim() || null;
   const safeDifficulty = String(difficulty || "medium").trim() || "medium";
 
-  const [hdr] = await p.execute(
-    `INSERT INTO question_bank_items (
-      bank_id, owner_user_id, question_text,
-      option_a, option_b, option_c, option_d,
-      correct_answer, question_type, topic, category, difficulty
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [
-      bankId,
-      uid,
-      normalized.question,
-      trunc255(normalized.options.A),
-      trunc255(normalized.options.B),
-      trunc255(normalized.options.C),
-      trunc255(normalized.options.D),
-      normalized.correct_answer,
-      safeType,
-      safeTopic,
-      safeCategory,
-      safeDifficulty,
-    ]
-  );
+  const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
+  const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
+  const [hdr] = supportMediaType && supportMediaUrl
+    ? await p.execute(
+      `INSERT INTO question_bank_items (
+        bank_id, owner_user_id, question_text,
+        option_a, option_b, option_c, option_d,
+        correct_answer, question_type, topic, category, difficulty, media_type, media_url
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        bankId,
+        uid,
+        normalized.question,
+        trunc255(normalized.options.A),
+        trunc255(normalized.options.B),
+        trunc255(normalized.options.C),
+        trunc255(normalized.options.D),
+        normalized.correct_answer,
+        safeType,
+        safeTopic,
+        safeCategory,
+        safeDifficulty,
+        normalized.media_type,
+        normalized.media_url,
+      ]
+    )
+    : await p.execute(
+      `INSERT INTO question_bank_items (
+        bank_id, owner_user_id, question_text,
+        option_a, option_b, option_c, option_d,
+        correct_answer, question_type, topic, category, difficulty
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        bankId,
+        uid,
+        normalized.question,
+        trunc255(normalized.options.A),
+        trunc255(normalized.options.B),
+        trunc255(normalized.options.C),
+        trunc255(normalized.options.D),
+        normalized.correct_answer,
+        safeType,
+        safeTopic,
+        safeCategory,
+        safeDifficulty,
+      ]
+    );
 
   const itemId = hdr.insertId;
   const [rows] = await p.execute(
@@ -997,7 +1759,7 @@ async function insertQuestionBankItem({
 async function updateQuestionBankItem(
   itemId,
   ownerUserId,
-  { question, type, topic, category, difficulty, options, correctAnswer }
+  { question, type, topic, category, difficulty, options, correctAnswer, mediaType, mediaUrl }
 ) {
   const p = getPool();
   const id = Number(itemId);
@@ -1022,39 +1784,80 @@ async function updateQuestionBankItem(
     question: question ?? base.question_text,
     options: mergedOptions,
     correctAnswer: correctAnswer ?? base.correct_answer,
+    mediaType: mediaType ?? base.media_type,
+    mediaUrl: mediaUrl ?? base.media_url,
   });
   if (!normalized) throw new Error("Câu hỏi không hợp lệ.");
 
-  await p.execute(
-    `UPDATE question_bank_items
-     SET question_text = ?,
-         option_a = ?,
-         option_b = ?,
-         option_c = ?,
-         option_d = ?,
-         correct_answer = ?,
-         question_type = ?,
-         topic = ?,
-         category = ?,
-         difficulty = ?,
-         version_no = version_no + 1,
-         version = version + 1
-     WHERE item_id = ? AND owner_user_id = ?`,
-    [
-      normalized.question,
-      trunc255(normalized.options.A),
-      trunc255(normalized.options.B),
-      trunc255(normalized.options.C),
-      trunc255(normalized.options.D),
-      normalized.correct_answer,
-      String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
-      trunc255(topic || base.topic || "General") || "General",
-      String(category ?? base.category ?? "").trim() || null,
-      String(difficulty || base.difficulty || "medium").trim() || "medium",
-      id,
-      uid,
-    ]
-  );
+  const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
+  const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
+  if (supportMediaType && supportMediaUrl) {
+    await p.execute(
+      `UPDATE question_bank_items
+       SET question_text = ?,
+           option_a = ?,
+           option_b = ?,
+           option_c = ?,
+           option_d = ?,
+           correct_answer = ?,
+           question_type = ?,
+           topic = ?,
+           category = ?,
+           difficulty = ?,
+           media_type = ?,
+           media_url = ?,
+           version_no = version_no + 1,
+           version = version + 1
+       WHERE item_id = ? AND owner_user_id = ?`,
+      [
+        normalized.question,
+        trunc255(normalized.options.A),
+        trunc255(normalized.options.B),
+        trunc255(normalized.options.C),
+        trunc255(normalized.options.D),
+        normalized.correct_answer,
+        String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+        trunc255(topic || base.topic || "General") || "General",
+        String(category ?? base.category ?? "").trim() || null,
+        String(difficulty || base.difficulty || "medium").trim() || "medium",
+        normalized.media_type,
+        normalized.media_url,
+        id,
+        uid,
+      ]
+    );
+  } else {
+    await p.execute(
+      `UPDATE question_bank_items
+       SET question_text = ?,
+           option_a = ?,
+           option_b = ?,
+           option_c = ?,
+           option_d = ?,
+           correct_answer = ?,
+           question_type = ?,
+           topic = ?,
+           category = ?,
+           difficulty = ?,
+           version_no = version_no + 1,
+           version = version + 1
+       WHERE item_id = ? AND owner_user_id = ?`,
+      [
+        normalized.question,
+        trunc255(normalized.options.A),
+        trunc255(normalized.options.B),
+        trunc255(normalized.options.C),
+        trunc255(normalized.options.D),
+        normalized.correct_answer,
+        String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+        trunc255(topic || base.topic || "General") || "General",
+        String(category ?? base.category ?? "").trim() || null,
+        String(difficulty || base.difficulty || "medium").trim() || "medium",
+        id,
+        uid,
+      ]
+    );
+  }
 
   const [rows] = await p.execute(
     "SELECT * FROM question_bank_items WHERE item_id = ? LIMIT 1",
@@ -1063,21 +1866,54 @@ async function updateQuestionBankItem(
   return rows.length ? rows[0] : null;
 }
 
-async function deleteQuestionBankItem(itemId, ownerUserId) {
+async function deleteQuestionBankItem(itemId, ownerUserId, options = {}) {
   const p = getPool();
   const id = Number(itemId);
   const uid = Number(ownerUserId);
+  const allowAnyOwner = options?.allowAnyOwner === true;
 
   if (!Number.isFinite(id) || id <= 0) throw new Error("itemId không hợp lệ.");
-  if (!Number.isFinite(uid) || uid <= 0) throw new Error("ownerUserId không hợp lệ.");
+  if (!allowAnyOwner && (!Number.isFinite(uid) || uid <= 0)) {
+    throw new Error("ownerUserId không hợp lệ.");
+  }
 
+  const supportsIsActive = await hasTableColumn("question_bank_items", "is_active");
+  const supportsVersionNo = await hasTableColumn("question_bank_items", "version_no");
+  const supportsVersion = await hasTableColumn("question_bank_items", "version");
+
+  // Try soft delete first when schema supports it.
+  if (supportsIsActive) {
+    const setClauses = ["is_active = 0"];
+    if (supportsVersionNo) setClauses.push("version_no = version_no + 1");
+    if (supportsVersion) setClauses.push("version = version + 1");
+    const whereOwner = allowAnyOwner ? "" : " AND owner_user_id = ?";
+    const params = allowAnyOwner ? [id] : [id, uid];
+    const [result] = await p.execute(
+      `UPDATE question_bank_items
+       SET ${setClauses.join(", ")}
+       WHERE item_id = ?${whereOwner} AND is_active = 1`,
+      params
+    );
+    if (Number(result.affectedRows || 0) > 0) return true;
+
+    // Idempotent behavior: if item already inactive but exists, treat as success.
+    const [existingRows] = await p.execute(
+      `SELECT item_id
+       FROM question_bank_items
+       WHERE item_id = ?${whereOwner}
+       LIMIT 1`,
+      params
+    );
+    return existingRows.length > 0;
+  }
+
+  // Legacy schema fallback: hard delete when no is_active column.
+  const whereOwner = allowAnyOwner ? "" : " AND owner_user_id = ?";
+  const params = allowAnyOwner ? [id] : [id, uid];
   const [result] = await p.execute(
-    `UPDATE question_bank_items
-     SET is_active = 0, version_no = version_no + 1, version = version + 1
-     WHERE item_id = ? AND owner_user_id = ? AND is_active = 1`,
-    [id, uid]
+    `DELETE FROM question_bank_items WHERE item_id = ?${whereOwner}`,
+    params
   );
-
   return Number(result.affectedRows || 0) > 0;
 }
 
@@ -1213,6 +2049,8 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
   const uid = parseOptionalInt(ownerUserId);
   if (uid == null) return [];
 
+  const role = await getUserRole(uid);
+  const includeShared = isLecturerRole(role) || isAdminRole(role);
   const sql = `
     SELECT
       q.quiz_id,
@@ -1220,6 +2058,10 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
       q.created_at,
       q.published_at,
       q.is_published,
+      q.shared_from_student,
+      q.shared_by_user_id,
+      u_shared.name AS shared_by_name,
+      u_shared.email AS shared_by_email,
       q.document_id,
       q.source_file_url AS s3Key,
       c.course_code,
@@ -1245,7 +2087,8 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
     FROM quizzes q
     LEFT JOIN courses c ON c.course_id = q.course_id
     LEFT JOIN documents d ON d.document_id = q.document_id
-    WHERE q.created_by = ?
+    LEFT JOIN users u_shared ON u_shared.user_id = COALESCE(q.shared_by_user_id, q.created_by)
+    WHERE (q.created_by = ? ${includeShared ? "OR q.shared_from_student = 1" : ""})
     ORDER BY q.created_at DESC
     LIMIT ${lim}
   `;
@@ -1258,6 +2101,10 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
     createdAt: row.created_at || null,
     publishedAt: row.published_at || null,
     isPublished: Number(row.is_published || 0) === 1,
+    sharedFromStudent: Number(row.shared_from_student || 0) === 1,
+    sharedByUserId: row.shared_by_user_id != null ? Number(row.shared_by_user_id) : null,
+    sharedByName: row.shared_by_name != null ? String(row.shared_by_name) : null,
+    sharedByEmail: row.shared_by_email != null ? String(row.shared_by_email) : null,
     documentId: row.document_id != null ? Number(row.document_id) : null,
     s3Key: row.s3Key || "",
     courseCode: row.course_code || "DOC",
@@ -1265,6 +2112,106 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
     questionCount: Number(row.question_count || 0),
     attemptsCount: Number(row.attempts_count || 0),
     scorePercent: Number(row.score_percent || 0),
+  }));
+}
+
+async function shareQuizForReview({ quizId, userId }) {
+  const p = getPool();
+  const qid = Number(quizId);
+  const uid = Number(userId);
+  if (!Number.isFinite(qid) || qid <= 0) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("userId không hợp lệ.");
+  await assertQuizExists(qid, p);
+
+  const role = await getUserRole(uid);
+  if (!String(role || "").toUpperCase().includes("STUDENT")) {
+    throw new Error("Chỉ sinh viên mới chia sẻ quiz để giảng viên review.");
+  }
+  const [attemptRows] = await p.execute(
+    `SELECT 1
+     FROM quiz_attempts
+     WHERE quiz_id = ?
+       AND user_id = ?
+       AND completed_at IS NOT NULL
+     LIMIT 1`,
+    [qid, uid]
+  );
+  if (!attemptRows.length) {
+    throw new Error("Bạn cần hoàn thành quiz trước khi chia sẻ.");
+  }
+
+  await p.execute(
+    `UPDATE quizzes
+     SET shared_from_student = 1,
+         shared_by_user_id = ?,
+         is_published = 0
+     WHERE quiz_id = ?`,
+    [uid, qid]
+  );
+}
+
+async function markQuizEditedByLecturer({ quizId, lecturerUserId }) {
+  const p = getPool();
+  const qid = Number(quizId);
+  const uid = Number(lecturerUserId);
+  if (!Number.isFinite(qid) || qid <= 0) throw new Error("quizId không hợp lệ.");
+  if (!Number.isFinite(uid) || uid <= 0) throw new Error("lecturerUserId không hợp lệ.");
+  await p.execute(
+    `UPDATE quizzes
+     SET lecturer_edited = 1,
+         lecturer_edited_by = ?,
+         lecturer_edited_at = NOW()
+     WHERE quiz_id = ?
+       AND shared_from_student = 1`,
+    [uid, qid]
+  );
+}
+
+async function listEditedSharedQuizzesByStudent(limit = 50, studentUserId = null) {
+  const p = getPool();
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const uid = parseOptionalInt(studentUserId);
+  if (uid == null) return [];
+  const sql = `
+    SELECT
+      q.quiz_id,
+      q.title,
+      q.created_at,
+      q.lecturer_edited_at,
+      q.document_id,
+      q.source_file_url AS s3Key,
+      c.course_code,
+      d.category AS document_category,
+      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
+      (
+        SELECT COUNT(*)
+        FROM quiz_attempts qa
+        WHERE qa.quiz_id = q.quiz_id
+          AND qa.user_id = ?
+          AND qa.completed_at IS NOT NULL
+      ) AS attempts_count
+    FROM quizzes q
+    LEFT JOIN courses c ON c.course_id = q.course_id
+    LEFT JOIN documents d ON d.document_id = q.document_id
+    WHERE q.shared_from_student = 1
+      AND q.shared_by_user_id = ?
+      AND q.lecturer_edited = 1
+    ORDER BY COALESCE(q.lecturer_edited_at, q.created_at) DESC
+    LIMIT ${lim}
+  `;
+  const [rows] = await p.execute(sql, [uid, uid]);
+  return rows.map((row) => ({
+    quizId: Number(row.quiz_id),
+    title: row.title || "Quiz",
+    createdAt: row.created_at || null,
+    lecturerEditedAt: row.lecturer_edited_at || null,
+    documentId: row.document_id != null ? Number(row.document_id) : null,
+    s3Key: row.s3Key || "",
+    courseCode: row.course_code || "DOC",
+    documentCategory: row.document_category || "",
+    questionCount: Number(row.question_count || 0),
+    attemptsCount: Number(row.attempts_count || 0),
+    lecturerEdited: true,
   }));
 }
 
@@ -1279,8 +2226,17 @@ module.exports = {
   listDocumentsRecent, saveQuizWithQuestions, insertQuizQuestion,
   getQuizWithQuestions, listQuizHistory, listPublishedQuizzes,
   startQuizAttempt, finishQuizAttempt, scoreToPercent,
+  getQuizAttemptResult,
+  getQuizAttemptResultForStaff,
+  listCompletedQuizAttemptsByQuizId,
+  manualRegradeQuizAttempt,
+  getLatestQuizAttemptResultByQuizAndUser,
   getUserRole, canUserManageQuiz, replaceQuizQuestions,
-  updateQuizTitle, setQuizPublished, quizRowIsPublished, normalizeQuestionInput,
-  findQuizByS3Key, getQuizQuestionsById, getLeaderboard, getProgressSummary, 
-  ensureQuestionBankForOwner, listQuestionBankItems, insertQuestionBankItem, updateQuestionBankItem, deleteQuestionBankItem, getQuizAnalyticsByOwner, listOwnedQuizzesHistory, getAttemptResult
+  updateQuizTitle, setQuizPublished, deleteQuizById, quizRowIsPublished, normalizeQuestionInput,
+  findQuizByS3Key, getQuizQuestionsById, getLeaderboard, getProgressSummary,
+  ensureQuestionBankForOwner, listQuestionBankItems, insertQuestionBankItem, updateQuestionBankItem, deleteQuestionBankItem, getQuizAnalyticsByOwner, listOwnedQuizzesHistory,
+  shareQuizForReview,
+  markQuizEditedByLecturer,
+  listEditedSharedQuizzesByStudent,
+  getAttemptResult,
 };

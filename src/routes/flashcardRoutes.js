@@ -2,9 +2,12 @@ const express = require("express");
 const router = express.Router();
 const auth = require("../middleware/auth");
 const Flashcard = require("../models/Flashcard");
+const FlashcardContent = require("../models/FlashcardContent");
 const path = require("path");
 const s3 = require("../services/s3Upload");
 const { extractDocumentText } = require("../services/extractDocumentText");
+const { runAsyncJob, getAsyncJob } = require("../services/asyncJobStore");
+const db = require("../config/teamDb");
 
 const GENERATION_FAIL_MESSAGE = "Generation failed. Please try again.";
 
@@ -103,26 +106,46 @@ async function resolveExistingUserId({ requestedUserId, documentId }) {
     return null;
 }
 
-async function generateFlashcardsHandler(req, res) {
-    try {
-        const { s3Key } = req.body;
-        if (!s3Key) {
-            return res.status(200).json({ success: false, message: GENERATION_FAIL_MESSAGE });
+async function buildGeneratedFlashcards(reqLike) {
+    const body = reqLike?.body || {};
+    const { s3Key } = body;
+    if (!s3Key) throw new Error("Missing s3Key.");
+
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    if (!openRouterKey) throw new Error("OPENROUTER_API_KEY is missing.");
+
+    const db = require("../config/teamDb");
+    const rawKey = String(s3Key || "").trim();
+    const decodedKey = decodeURIComponent(rawKey);
+    const normalizedKey = decodedKey.split("?")[0].split("#")[0];
+    const baseName = path.basename(normalizedKey);
+
+    let docRows = [];
+    let contextText = "";
+
+    // 1) Fast/robust path: try reading indexed segments directly by possible s3 keys.
+    const keyCandidates = [...new Set([
+        rawKey,
+        normalizedKey,
+        decodeURIComponent(normalizedKey),
+        baseName,
+    ].filter(Boolean))];
+    for (const key of keyCandidates) {
+        try {
+            const concatenated = await db.getConcatenatedChunksByS3Key(key);
+            const plain = String(concatenated || "").trim();
+            if (plain) {
+                contextText = plain.slice(0, 10000);
+                break;
+            }
+        } catch (_) {
+            // ignore and continue other candidates
         }
+    }
 
-        const openRouterKey = process.env.OPENROUTER_API_KEY;
-        if (!openRouterKey) {
-            return res.status(200).json({ success: false, message: GENERATION_FAIL_MESSAGE });
-        }
-
-        const db = require("../config/teamDb");
-        const rawKey = String(s3Key || "").trim();
-        const decodedKey = decodeURIComponent(rawKey);
-        const normalizedKey = decodedKey.split("?")[0].split("#")[0];
-        const baseName = path.basename(normalizedKey);
-
-        // Resolve document by exact match first, then loose filename/url-end matching.
-        const [docRows] = await db.getPool().execute(
+    // 2) Fallback: resolve a document row then read its segment rows.
+    if (!contextText.trim()) {
+        [docRows] = await db.getPool().execute(
             `SELECT document_id, file_url
              FROM documents
              WHERE file_url = ?
@@ -131,17 +154,9 @@ async function generateFlashcardsHandler(req, res) {
                 OR file_url LIKE ?
              ORDER BY (file_url = ?) DESC, document_id DESC
              LIMIT 1`,
-            [
-                rawKey,
-                normalizedKey,
-                `%/${baseName}`,
-                `%${baseName}`,
-                normalizedKey,
-            ]
+            [rawKey, normalizedKey, `%/${baseName}`, `%${baseName}`, normalizedKey]
         );
         const documentId = docRows?.[0]?.document_id;
-        let contextText = "";
-
         if (documentId) {
             const [segmentRows] = await db.getPool().execute(
                 `SELECT content
@@ -154,88 +169,215 @@ async function generateFlashcardsHandler(req, res) {
             const segments = segmentRows || [];
             contextText = segments.map((s) => s.content).join("\n\n").substring(0, 10000);
         }
+    }
 
-        // Fallback: if DB segments are missing, try extracting text directly from the source file on S3.
-        if (!contextText.trim() && s3.isS3Configured()) {
-            const candidateKeys = [
-                String(docRows?.[0]?.file_url || "").trim(),
-                normalizedKey,
-                rawKey,
-                baseName,
-            ].filter(Boolean);
+    // 3) Last fallback: fetch object from S3 and extract text.
+    if (!contextText.trim() && s3.isS3Configured()) {
+        const candidateKeys = [...new Set([
+            String(docRows?.[0]?.file_url || "").trim(),
+            ...keyCandidates,
+        ].filter(Boolean))];
 
-            for (const candidate of candidateKeys) {
-                try {
-                    const { buffer, contentType } = await s3.getObjectBuffer(candidate);
-                    const ext = path.extname(candidate || "").toLowerCase();
-                    const extracted = await extractDocumentText(buffer, ext, contentType || "");
-                    contextText = String(extracted || "").trim().slice(0, 10000);
-                    if (contextText) break;
-                } catch (_) {
-                    // Try next candidate key quietly.
-                }
+        for (const candidate of candidateKeys) {
+            try {
+                const { buffer, contentType } = await s3.getObjectBuffer(candidate);
+                const ext = path.extname(candidate || "").toLowerCase();
+                const extracted = await extractDocumentText(buffer, ext, contentType || "");
+                contextText = String(extracted || "").trim().slice(0, 10000);
+                if (contextText) break;
+            } catch (_) {
+                // Try next candidate key quietly.
             }
         }
+    }
 
-        if (!contextText.trim()) {
-            return res.status(200).json({
-                success: false,
-                message: GENERATION_FAIL_MESSAGE
-            });
-        }
+    if (!contextText.trim()) throw new Error("No text extracted from document.");
 
-        const prompt = `You are an AI study assistant. Generate exactly 5 flashcards from this text.
+    const prompt = `You are an AI study assistant. Generate exactly 5 flashcards from this text.
 Return ONLY a valid JSON array of objects, with each object having "front" (question) and "back" (answer). Do not include any other text or markdown formatting.
 
 Text:
 ${contextText}`;
 
-        const fetch = global.fetch || require("node-fetch");
-        const aRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${openRouterKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                model: process.env.OPENROUTER_MODEL || "openrouter/free",
-                messages: [{ role: "user", content: prompt }]
-            })
+    const fetch = global.fetch || require("node-fetch");
+    const aRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${openRouterKey}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            model: process.env.OPENROUTER_MODEL || "openrouter/free",
+            messages: [{ role: "user", content: prompt }]
+        })
+    });
+    if (!aRes.ok) throw new Error("AI provider rejected flashcard generation.");
+
+    const data = await aRes.json().catch(() => ({}));
+    let answer = data.choices?.[0]?.message?.content || "[]";
+    if (answer.startsWith("```json")) {
+        answer = answer.replace(/```json/g, "").replace(/```/g, "").trim();
+    } else if (answer.startsWith("```")) {
+        answer = answer.replace(/```/g, "").trim();
+    }
+
+    const cards = parseAiCardsFromText(answer);
+    if (!cards.length) throw new Error("AI returned empty flashcards.");
+    return cards;
+}
+
+async function resolveDocumentIdByS3KeyForFlashcards(s3Key, userId) {
+    const rawKey = String(s3Key || "").trim();
+    if (!rawKey) return null;
+    const normalizedKey = decodeURIComponent(rawKey).split("?")[0].split("#")[0];
+    const baseName = path.basename(normalizedKey);
+
+    const candidates = [...new Set([rawKey, normalizedKey, baseName].filter(Boolean))];
+    for (const key of candidates) {
+        try {
+            const existingId = await db.getDocumentIdByS3Key(key);
+            if (Number.isFinite(Number(existingId)) && Number(existingId) > 0) {
+                return Number(existingId);
+            }
+        } catch (_) {
+            // continue trying
+        }
+    }
+
+    // Ensure a stub document exists so flashcards can be tied to a document_id.
+    const createdId = await db.ensureDocumentStub(normalizedKey || rawKey, {
+        title: baseName || "Document",
+        uploaderId: userId || null,
+    });
+    return Number(createdId);
+}
+
+async function saveGeneratedFlashcardsForUser({ userId, s3Key, cards }) {
+    const uid = Number(userId);
+    if (!Number.isFinite(uid) || uid <= 0) throw new Error("Invalid user for saving flashcards.");
+    if (!db.isConfigured()) throw new Error("MySQL chưa cấu hình.");
+
+    const documentId = await resolveDocumentIdByS3KeyForFlashcards(s3Key, uid);
+    if (!Number.isFinite(documentId) || documentId <= 0) {
+        throw new Error("Cannot resolve document_id for flashcard saving.");
+    }
+
+    const records = (Array.isArray(cards) ? cards : [])
+        .map((c) => ({
+            user_id: uid,
+            document_id: documentId,
+            front_text: String(c?.front ?? c?.front_text ?? "").trim(),
+            back_text: String(c?.back ?? c?.back_text ?? "").trim(),
+        }))
+        .filter((r) => r.front_text && r.back_text);
+
+    if (!records.length) return { documentId, savedCount: 0 };
+
+    // Replace old generated cards for this user+document to keep reusable set fresh.
+    const transaction = await Flashcard.sequelize.transaction();
+    try {
+        await Flashcard.destroy({ where: { user_id: uid, document_id: documentId }, transaction });
+        let savedCount = 0;
+        for (const record of records) {
+            const createdCard = await Flashcard.create(
+                {
+                    user_id: record.user_id,
+                    document_id: record.document_id,
+                },
+                { transaction }
+            );
+            await FlashcardContent.create(
+                {
+                    flashcard_id: createdCard.flashcard_id,
+                    front_text: record.front_text,
+                    back_text: record.back_text,
+                },
+                { transaction }
+            );
+            savedCount += 1;
+        }
+        await transaction.commit();
+        return { documentId, savedCount };
+    } catch (err) {
+        await transaction.rollback();
+        throw err;
+    }
+}
+
+async function generateFlashcardsHandler(req, res) {
+    try {
+        const cards = await buildGeneratedFlashcards(req);
+        const userId = req.user?.id ?? req.user?.user_id;
+        const saved = await saveGeneratedFlashcardsForUser({
+            userId,
+            s3Key: req.body?.s3Key,
+            cards,
         });
-
-        if (!aRes.ok) {
-            return res.status(200).json({
-                success: false,
-                message: GENERATION_FAIL_MESSAGE
-            });
-        }
-
-        const data = await aRes.json().catch(() => ({}));
-        let answer = data.choices?.[0]?.message?.content || "[]";
-
-        if (answer.startsWith("```json")) {
-            answer = answer.replace(/```json/g, "").replace(/```/g, "").trim();
-        } else if (answer.startsWith("```")) {
-            answer = answer.replace(/```/g, "").trim();
-        }
-
-        const cards = parseAiCardsFromText(answer);
-        if (!cards.length) {
-            return res.status(200).json({
-                success: false,
-                message: GENERATION_FAIL_MESSAGE
-            });
-        }
-        return res.json({ success: true, data: cards });
+        return res.json({
+            success: true,
+            data: cards,
+            saved,
+        });
     } catch (err) {
         console.error("[generateFlashcards]", err);
         return res.status(200).json({ success: false, message: GENERATION_FAIL_MESSAGE });
     }
 }
 
+async function startGenerateFlashcardsAsync(req, res) {
+    const job = runAsyncJob({
+        type: "flashcards-generate",
+        metadata: {
+            s3Key: String(req.body?.s3Key || "").trim(),
+            userId: req.user?.id ?? req.user?.user_id ?? null,
+        },
+        runner: async () => {
+            const cards = await buildGeneratedFlashcards(req);
+            const saved = await saveGeneratedFlashcardsForUser({
+                userId: req.user?.id ?? req.user?.user_id,
+                s3Key: req.body?.s3Key,
+                cards,
+            });
+            return { success: true, data: cards, saved };
+        },
+    });
+    return res.status(202).json({
+        success: true,
+        data: {
+            jobId: job.jobId,
+            status: job.status,
+            message: "Flashcard generation started",
+            pollUrl: `/api/flashcards/generate-status/${job.jobId}`,
+        },
+    });
+}
+
+async function getGenerateFlashcardsAsyncStatus(req, res) {
+    const jobId = String(req.params.jobId || "").trim();
+    if (!jobId) return res.status(400).json({ success: false, message: "Missing jobId." });
+    const job = getAsyncJob(jobId);
+    if (!job) return res.status(404).json({ success: false, message: "Job not found or expired." });
+    return res.status(200).json({
+        success: true,
+        data: {
+            jobId: job.jobId,
+            type: job.type,
+            status: job.status,
+            progress: job.progress,
+            message: job.message,
+            result: job.result,
+            error: job.error,
+            createdAt: job.createdAt,
+            updatedAt: job.updatedAt,
+        },
+    });
+}
+
 // Generate flashcards using AI
 // Public endpoint by design: FE can request generation before auth state is fully ready.
-router.post("/generate", generateFlashcardsHandler);
+router.post("/generate", auth, generateFlashcardsHandler);
+router.post("/generate-async", auth, startGenerateFlashcardsAsync);
+router.get("/generate-status/:jobId", getGenerateFlashcardsAsyncStatus);
 // Defensive compatibility for accidental GET from legacy FE code.
 router.get("/generate", (req, res) => {
     return res.status(200).json({
@@ -281,9 +423,34 @@ router.post("/", async (req, res) => {
             document_id: Number(document_id),
             front_text: f.front_text || f.front || f.question || "",
             back_text: f.back_text || f.back || f.answer || "",
-        }));
+        })).filter((r) => String(r.front_text || "").trim() && String(r.back_text || "").trim());
 
-        const created = await Flashcard.bulkCreate(records);
+        const transaction = await Flashcard.sequelize.transaction();
+        const created = [];
+        try {
+            for (const record of records) {
+                const createdCard = await Flashcard.create(
+                    {
+                        user_id: record.user_id,
+                        document_id: record.document_id,
+                    },
+                    { transaction }
+                );
+                await FlashcardContent.create(
+                    {
+                        flashcard_id: createdCard.flashcard_id,
+                        front_text: record.front_text,
+                        back_text: record.back_text,
+                    },
+                    { transaction }
+                );
+                created.push(createdCard);
+            }
+            await transaction.commit();
+        } catch (innerErr) {
+            await transaction.rollback();
+            throw innerErr;
+        }
         return res.status(201).json({
             success: true,
             data: created,
@@ -312,10 +479,27 @@ router.get("/document/:documentId", async (req, res) => {
 
         const cards = await Flashcard.findAll({
             where,
+            include: [
+                {
+                    model: FlashcardContent,
+                    required: false,
+                    attributes: ["content_id", "front_text", "back_text"],
+                },
+            ],
             order: [["created_at", "DESC"]],
         });
+        const data = cards.map((card) => {
+            const row = typeof card.toJSON === "function" ? card.toJSON() : card;
+            const contents = Array.isArray(row?.FlashcardContents) ? row.FlashcardContents : [];
+            const firstContent = contents[0] || null;
+            return {
+                ...row,
+                front_text: String(firstContent?.front_text || ""),
+                back_text: String(firstContent?.back_text || ""),
+            };
+        });
 
-        return res.json({ success: true, data: cards });
+        return res.json({ success: true, data });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
