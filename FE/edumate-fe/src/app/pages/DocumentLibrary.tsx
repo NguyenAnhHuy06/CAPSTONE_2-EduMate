@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle } from 'lucide-react'
+import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from 'lucide-react'
 import { DocumentDetail } from '../pages/DocumentDetail'
 import api from '@/services/api'
 import { useNotification } from '../pages/NotificationContext'
@@ -39,6 +39,9 @@ export type CourseMaterialDoc = {
   isLecturerUpload: boolean
   categoryKey: 'general' | 'general-major' | 'specialized' | 'uncategorized'
   status?: string
+  year?: string
+  semester?: string
+  subject?: string
 }
 const STUDENT_FLASHCARD_NAVIGATE_KEY = 'edumate_student_flashcard_navigate'
 
@@ -146,6 +149,17 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
       : isLecturerUploaderRole(apiRow.uploaderRole)
   const isLecturerUpload = isLecturerUploaderRole(uploaderRoleStr) || highCredibility
 
+  let year, semester, subject
+  const s3Key = apiRow.s3Key || ''
+  if (s3Key.startsWith('DATA/')) {
+    const parts = s3Key.split('/')
+    if (parts.length >= 4) {
+      year = parts[1]
+      semester = parts[2]
+      subject = parts[3]
+    }
+  }
+
   return {
     id,
     title: String(apiRow.title || apiRow.fileName || 'Untitled document'),
@@ -171,6 +185,9 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
     isLecturerUpload,
     categoryKey,
     status: apiRow.status,
+    year,
+    semester,
+    subject,
   }
 }
 
@@ -186,6 +203,12 @@ export function DocumentLibrary({
   const [categoryFilter, setCategoryFilter] = useState<
     'all' | 'general' | 'general-major' | 'specialized' | 'uncategorized'
   >('all')
+  const [yearFilter, setYearFilter] = useState('all')
+  const [semesterFilter, setSemesterFilter] = useState('all')
+  
+  const [currentPage, setCurrentPage] = useState(1)
+  const [itemsPerPage, setItemsPerPage] = useState(10)
+
   const [selectedDocument, setSelectedDocument] = useState<CourseMaterialDoc | null>(null)
   const [documents, setDocuments] = useState<CourseMaterialDoc[]>([])
   const [loading, setLoading] = useState(true)
@@ -228,6 +251,20 @@ export function DocumentLibrary({
     }
   }, [userRole])
 
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, categoryFilter, yearFilter, semesterFilter])
+
+  const availableYears = useMemo(() => 
+    Array.from(new Set(documents.map(d => d.year).filter(Boolean))).sort(), 
+    [documents]
+  )
+  const availableSemesters = useMemo(() => 
+    Array.from(new Set(documents.map(d => d.semester).filter(Boolean))).sort(), 
+    [documents]
+  )
+
   const filteredDocuments = useMemo(() => {
     return documents.filter((doc) => {
       const q = searchQuery.toLowerCase().trim()
@@ -243,9 +280,30 @@ export function DocumentLibrary({
           ? doc.categoryKey === 'uncategorized'
           : doc.categoryKey === categoryFilter)
 
-      return matchesSearch && matchesCategory
+      const matchesYear = yearFilter === 'all' || doc.year === yearFilter
+      const matchesSemester = semesterFilter === 'all' || doc.semester === semesterFilter
+
+      return matchesSearch && matchesCategory && matchesYear && matchesSemester
     })
-  }, [documents, searchQuery, categoryFilter])
+  }, [documents, searchQuery, categoryFilter, yearFilter, semesterFilter])
+
+  const totalPages = Math.ceil(filteredDocuments.length / itemsPerPage) || 1
+  const paginatedDocuments = filteredDocuments.slice(
+    (currentPage - 1) * itemsPerPage,
+    currentPage * itemsPerPage
+  )
+
+  const getPageNumbers = (): (number | '...')[] => {
+    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1)
+    const pages: (number | '...')[] = [1]
+    if (currentPage > 3) pages.push('...')
+    const start = Math.max(2, currentPage - 1)
+    const end = Math.min(totalPages - 1, currentPage + 1)
+    for (let i = start; i <= end; i++) pages.push(i)
+    if (currentPage < totalPages - 2) pages.push('...')
+    pages.push(totalPages)
+    return pages
+  }
 
   useEffect(() => {
     if (!pendingFocusKey || loading) return
@@ -421,20 +479,61 @@ export function DocumentLibrary({
             />
           </div>
 
-          <div className="flex items-center gap-2">
-            <Filter className="text-gray-400" size={20} />
-            <select
-              aria-label="Filter by material category"
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value as typeof categoryFilter)}
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-            >
-              <option value="all">All categories</option>
-              <option value="general">General</option>
-              <option value="general-major">General Major</option>
-              <option value="specialized">Specialized</option>
-              <option value="uncategorized">Uncategorized</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Filter className="text-gray-400" size={20} />
+              <select
+                aria-label="Filter by material category"
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value as typeof categoryFilter)}
+                className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+              >
+                <option value="all">All categories</option>
+                <option value="general">General</option>
+                <option value="general-major">General Major</option>
+                <option value="specialized">Specialized</option>
+                <option value="uncategorized">Uncategorized</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <select
+                aria-label="Filter by year"
+                value={yearFilter}
+                onChange={(e) => setYearFilter(e.target.value)}
+                className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 min-w-[140px]"
+              >
+                <option value="all">All Years</option>
+                {availableYears.map(y => <option key={y as string} value={y as string}>{y as string}</option>)}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <select
+                aria-label="Filter by semester"
+                value={semesterFilter}
+                onChange={(e) => setSemesterFilter(e.target.value)}
+                className="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 min-w-[150px]"
+              >
+                <option value="all">All Semesters</option>
+                {availableSemesters.map(s => <option key={s as string} value={s as string}>{s as string}</option>)}
+              </select>
+            </div>
+            
+            {(categoryFilter !== 'all' || yearFilter !== 'all' || semesterFilter !== 'all') && (
+              <button
+                onClick={() => {
+                  setCategoryFilter('all')
+                  setYearFilter('all')
+                  setSemesterFilter('all')
+                  setSearchQuery('')
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors ml-auto"
+              >
+                <X size={14} />
+                Clear Filters
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -452,7 +551,7 @@ export function DocumentLibrary({
       )}
 
       <div className="space-y-4">
-        {filteredDocuments.map((doc) => (
+        {paginatedDocuments.map((doc) => (
           <div
             key={String(doc.id)}
             data-doc-focus-key={buildDocFocusKey(doc)}
@@ -487,6 +586,16 @@ export function DocumentLibrary({
                           ? 'General Major'
                           : 'Specialized'}
                   </span>
+                  {doc.year && (
+                    <span className="bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-medium">
+                      {doc.year}
+                    </span>
+                  )}
+                  {doc.semester && (
+                    <span className="bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-xs font-medium">
+                      {doc.semester}
+                    </span>
+                  )}
                   {doc.courseCode ? <span>{doc.courseCode}</span> : null}
                   {doc.courseName ? (
                     <>
@@ -538,6 +647,78 @@ export function DocumentLibrary({
                 ? 'No course materials yet. Upload a document from the Upload tab.'
                 : 'No documents found matching your search criteria.'}
             </p>
+          </div>
+        )}
+        {!loading && filteredDocuments.length > 0 && totalPages > 1 && (
+          <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-8 pb-4 bg-white rounded-lg border border-gray-200 p-4">
+            <div className="text-sm text-gray-500">
+              Showing <span className="font-semibold text-gray-700">{(currentPage - 1) * itemsPerPage + 1}</span>–<span className="font-semibold text-gray-700">{Math.min(currentPage * itemsPerPage, filteredDocuments.length)}</span> of <span className="font-semibold text-gray-700">{filteredDocuments.length}</span> documents
+            </div>
+
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setCurrentPage(1)}
+                disabled={currentPage === 1}
+                className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronsLeft size={16} />
+              </button>
+              <button
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronLeft size={16} />
+              </button>
+
+              {getPageNumbers().map((page, idx) =>
+                page === '...' ? (
+                  <span key={`dots-${idx}`} className="px-2 py-1 text-gray-400 text-sm">…</span>
+                ) : (
+                  <button
+                    key={page}
+                    onClick={() => setCurrentPage(page as number)}
+                    className={`min-w-[36px] h-9 rounded-lg text-sm font-medium transition-all ${
+                      currentPage === page
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    {page}
+                  </button>
+                )
+              )}
+
+              <button
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronRight size={16} />
+              </button>
+              <button
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={currentPage === totalPages}
+                className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              >
+                <ChevronsRight size={16} />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <span>Show</span>
+              <select
+                value={itemsPerPage}
+                onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}
+                className="border border-gray-300 rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value={5}>5</option>
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+              </select>
+              <span>per page</span>
+            </div>
           </div>
         )}
       </div>
