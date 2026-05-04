@@ -13,12 +13,12 @@ const User = sequelize.define('User', {
         unique: true
     },
     password_hash: {
-        field: 'password',
+        field: 'password_hash',
         type: DataTypes.STRING,
         allowNull: false
     },
     full_name: {
-        field: 'name',
+        field: 'full_name',
         type: DataTypes.STRING,
         allowNull: true
     },
