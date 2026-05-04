@@ -249,7 +249,7 @@ const handleSubmit = async (e: React.FormEvent) => {
         {/* Description */}
         <div className="mb-6">
           <label className="block text-gray-700 mb-2">
-            Description *
+            Description 
           </label>
           <textarea
             name="description"
