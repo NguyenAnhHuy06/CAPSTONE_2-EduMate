@@ -6,15 +6,18 @@ import { InstructorDashboard } from '../app/pages/lecturer/InstructorDashboard';
 import { StudentDashboard } from '../app/pages/student/StudentDashboard';
 import { AdminDashboard } from '../app/pages/AdminDashboard';
 import { NotificationProvider } from '../app/pages/NotificationContext';
+import DonatePage from '../app/pages/DonatePage';
 
 function LecturerQuizDeepLink({
   user,
   onLogout,
   onUserUpdate,
+  onOpenDonate,
 }: {
   user: any;
   onLogout: () => void;
   onUserUpdate?: (u: any) => void;
+  onOpenDonate?: () => void;
 }) {
   const { quizId } = useParams();
   const id = Number(quizId);
@@ -24,6 +27,7 @@ function LecturerQuizDeepLink({
       user={user}
       onLogout={onLogout}
       onUserUpdate={onUserUpdate}
+      onOpenDonate={onOpenDonate}
       initialMainTab="quizzes"
       focusQuizId={focusId}
     />
@@ -59,6 +63,15 @@ export default function App() {
   const [showRegister, setShowRegister] = useState(false);
   const [userRole, setUserRole] = useState<'instructor' | 'student' | 'admin' | null>(null);
   const [userData, setUserData] = useState<any>(null);
+  const [showDonate, setShowDonate] = useState(false);
+
+  const handleOpenDonate = () => {
+    setShowDonate(true);
+  };
+
+  const handleCloseDonate = () => {
+    setShowDonate(false);
+  };
 
   const handleLogin = (role: 'instructor' | 'student' | 'admin', data: any) => {
     setUserRole(role);
@@ -94,6 +107,7 @@ export default function App() {
                 user={userData}
                 onLogout={handleLogout}
                 onUserUpdate={(u) => setUserData(u)}
+                onOpenDonate={handleOpenDonate}
               />
             ) : (
               <Navigate to="/" replace />
@@ -108,6 +122,7 @@ export default function App() {
                 user={userData}
                 onLogout={handleLogout}
                 onUserUpdate={(u) => setUserData(u)}
+                onOpenDonate={handleOpenDonate}
               />
             ) : (
               <Navigate to="/" replace />
@@ -117,7 +132,19 @@ export default function App() {
         <Route
           path="*"
           element={
-            !isLoggedIn ? (
+            showDonate ? (
+              <div>
+                <div className="fixed top-4 left-4 z-50">
+                  <button
+                    onClick={handleCloseDonate}
+                    className="rounded-xl bg-white px-4 py-2 shadow border border-gray-200 hover:bg-gray-50"
+                  >
+                    ← Quay lại
+                  </button>
+                </div>
+                <DonatePage />
+              </div>
+            ) : !isLoggedIn ? (
               showRegister ? (
                 <Register
                   onRegister={handleRegister}
@@ -136,12 +163,14 @@ export default function App() {
                 user={userData}
                 onLogout={handleLogout}
                 onUserUpdate={(u) => setUserData(u)}
+                onOpenDonate={handleOpenDonate}
               />
             ) : (
               <StudentDashboard
                 user={userData}
                 onLogout={handleLogout}
                 onUserUpdate={(u) => setUserData(u)}
+                onOpenDonate={handleOpenDonate}
               />
             )
           }
