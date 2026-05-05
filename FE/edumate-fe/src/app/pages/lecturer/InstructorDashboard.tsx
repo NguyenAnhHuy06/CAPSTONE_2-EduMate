@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { BookOpen, Upload, FileText, CheckCircle, TrendingUp, User, Home, ClipboardList, Loader2, XCircle } from 'lucide-react';
+import { BookOpen, Upload, FileText, CheckCircle, TrendingUp, User, Home, ClipboardList, Loader2, XCircle, Heart } from 'lucide-react';
 import { Sidebar } from '../Sidebar';
 import { DocumentLibrary } from '../DocumentLibrary';
 import { UploadDocument } from '../UploadDocument';
@@ -30,7 +30,7 @@ interface InstructorDashboardProps {
   user: any;
   onLogout: () => void;
   onUserUpdate?: (user: any) => void;
-  /** When set (e.g. `/quiz/:id` or `/lecturer/quiz/:id` deep link), open Quizzes and focus this quiz in the editor. */
+  onOpenDonate?: () => void;
   focusQuizId?: number | null;
   initialMainTab?: InstructorMainTab;
 }
@@ -39,6 +39,7 @@ export function InstructorDashboard({
   user,
   onLogout,
   onUserUpdate,
+  onOpenDonate,
   focusQuizId = null,
   initialMainTab,
 }: InstructorDashboardProps) {
@@ -72,6 +73,7 @@ export function InstructorDashboard({
     { id: 'documents', label: 'Documents', icon: FileText },
     { id: 'upload', label: 'Upload', icon: Upload },
     { id: 'quizzes', label: 'Quizzes', icon: ClipboardList },
+    { id: 'donate', label: 'Donate', icon: Heart },
     { id: 'profile', label: 'Profile', icon: User },
   ];
 
@@ -274,7 +276,13 @@ export function InstructorDashboard({
       <Sidebar
         menuItems={menuItems}
         activeItem={activeTab}
-        onMenuItemClick={(id) => setActiveTab(id as any)}
+        onMenuItemClick={(id) => {
+          if (id === 'donate') {
+            onOpenDonate?.();
+            return;
+          }
+          setActiveTab(id as any);
+        }}
         onLogout={onLogout}
         userRole="Instructor"
         userName={user.name}

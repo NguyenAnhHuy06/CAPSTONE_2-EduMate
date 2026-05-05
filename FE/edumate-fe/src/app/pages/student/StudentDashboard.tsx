@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   XCircle,
   Bell,
+  Heart,
 } from 'lucide-react';
 import { Sidebar } from '../Sidebar';
 import { DocumentLibrary } from '../DocumentLibrary';
@@ -28,6 +29,7 @@ interface StudentDashboardProps {
   user: any;
   onLogout: () => void;
   onUserUpdate?: (user: any) => void;
+  onOpenDonate?: () => void;
 }
 
 type DashboardTab =
@@ -143,7 +145,7 @@ function getUserId(user: any) {
   return user?.user_id ?? user?.id ?? user?.userId ?? null;
 }
 
-export function StudentDashboard({ user, onLogout, onUserUpdate }: StudentDashboardProps) {
+export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }: StudentDashboardProps) {
   const [activeTab, setActiveTab] = useState<DashboardTab>('dashboard');
   const [studentQuizFileHighlight, setStudentQuizFileHighlight] = useState<{
     s3Key: string;
@@ -394,6 +396,7 @@ export function StudentDashboard({ user, onLogout, onUserUpdate }: StudentDashbo
     { id: 'quizzes', label: 'Quizzes', icon: ClipboardList },
     { id: 'progress', label: 'Progress', icon: Target },
     { id: 'leaderboard', label: 'Leaderboard', icon: Trophy },
+    { id: 'donate', label: 'Donate', icon: Heart },
     { id: 'profile', label: 'Profile', icon: User },
   ];
 
@@ -525,7 +528,13 @@ export function StudentDashboard({ user, onLogout, onUserUpdate }: StudentDashbo
       <Sidebar
         menuItems={menuItems}
         activeItem={activeTab}
-        onMenuItemClick={(id: string) => setActiveTab(id as DashboardTab)}
+        onMenuItemClick={(id: string) => {
+          if (id === 'donate') {
+            onOpenDonate?.();
+            return;
+          }
+          setActiveTab(id as DashboardTab);
+        }}
         onLogout={onLogout}
         userRole="Student"
         userName={user.name}
