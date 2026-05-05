@@ -17,14 +17,18 @@ import {
 import { Sidebar } from './Sidebar';
 import { Profile } from './Profile';
 import api from '../../services/api';
+import { Heart } from 'lucide-react';
+
+type AdminTab = 'overview' | 'users' | 'moderation' | 'logs' | 'profile';
 
 interface AdminDashboardProps {
   user: any;
   onLogout: () => void;
+  onOpenDonate?: () => void;
 }
 
-export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'moderation' | 'logs' | 'profile'>('overview');
+export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardProps) {
+  const [activeTab, setActiveTab] = useState<AdminTab>('overview');
   
   // Data States
   const [stats, setStats] = useState<any>(null);
@@ -38,6 +42,7 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
     { id: 'users', label: 'User Management', icon: Users },
     { id: 'moderation', label: 'Document Moderation', icon: ShieldCheck },
     { id: 'logs', label: 'Activity Logs', icon: Activity },
+    { id: 'donate', label: 'Donate', icon: Heart },
     { id: 'profile', label: 'Profile', icon: UserPlus },
   ];
 
@@ -101,7 +106,13 @@ export function AdminDashboard({ user, onLogout }: AdminDashboardProps) {
       <Sidebar
         menuItems={menuItems}
         activeItem={activeTab}
-        onMenuItemClick={(id) => setActiveTab(id as any)}
+        onMenuItemClick={(id) => {
+          if (id === 'donate') {
+            onOpenDonate?.();
+            return;
+          }
+          setActiveTab(id as AdminTab);
+        }}
         onLogout={onLogout}
         userRole="Administrator"
         userName={user.name}

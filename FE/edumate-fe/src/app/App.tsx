@@ -157,7 +157,11 @@ export default function App() {
                 />
               )
             ) : userRole === 'admin' ? (
-              <AdminDashboard user={userData} onLogout={handleLogout} />
+              <AdminDashboard
+                user={userData}
+                onLogout={handleLogout}
+                onOpenDonate={handleOpenDonate}
+              />
             ) : userRole === 'instructor' ? (
               <InstructorDashboard
                 user={userData}
