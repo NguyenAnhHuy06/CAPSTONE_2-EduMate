@@ -59,7 +59,7 @@ router.get("/documents/pending", auth, rbac("ADMIN"), async (req, res) => {
         const db = require("../config/teamDb");
         if (!db.isConfigured()) return res.status(503).json({ success: false, message: "Database not configured." });
         const [docs] = await db.getPool().execute(
-            `SELECT doc.*, u.name as uploader_name, u.email as uploader_email 
+            `SELECT doc.*, u.full_name as uploader_name, u.email as uploader_email 
              FROM documents doc 
              LEFT JOIN users u ON doc.uploader_id = u.user_id 
              WHERE doc.status = 'pending' 
