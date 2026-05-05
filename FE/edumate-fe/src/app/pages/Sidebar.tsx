@@ -31,7 +31,7 @@ export function Sidebar({
   const SidebarContent = () => (
     <>
       {/* Logo Section */}
-      <div className="p-6 border-b border-gray-200">
+      <div className="p-2 border-b border-gray-200">
         <div className="flex items-center gap-3">
           <div className="bg-blue-600 text-white p-2 rounded-lg">
             <BookOpen size={24} />

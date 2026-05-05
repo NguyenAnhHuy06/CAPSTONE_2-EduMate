@@ -150,7 +150,7 @@ const handleSubmit = async (e: React.FormEvent) => {
       <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6">
         {/* File Upload */}
         <div className="mb-6">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Document File *
           </label>
           <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-600 transition-colors">
@@ -181,7 +181,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Type */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Document Type
           </label>
           <select
@@ -200,7 +200,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Course Code */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Course Code *
           </label>
           <input
@@ -216,7 +216,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Course Name */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Course Name *
           </label>
           <input
@@ -232,7 +232,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Topic Title */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Topic Title *
           </label>
           <input
@@ -248,7 +248,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Description */}
         <div className="mb-6">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Description 
           </label>
           <textarea
