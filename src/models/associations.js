@@ -7,6 +7,7 @@ const ChatMessage = require('./ChatMessage');
 const Citation = require('./Citation');
 const Notification = require('./Notification');
 const Document = require('./Document');
+const Donation = require('./Donation');
 
 // User -> ActivityLog
 User.hasMany(ActivityLog, { foreignKey: 'user_id' });
@@ -40,6 +41,14 @@ Flashcard.belongsTo(Document, {foreignKey: 'document_id' });
 Flashcard.hasMany(FlashcardContent, { foreignKey: 'flashcard_id' });
 FlashcardContent.belongsTo(Flashcard, { foreignKey: 'flashcard_id' });
 
+// User -> Donation
+User.hasMany(Donation, { foreignKey: 'user_id', as: 'donations' });
+Donation.belongsTo(User, { foreignKey: 'user_id', as: 'donor' });
+
+// Admin User -> confirmed Donation
+User.hasMany(Donation, { foreignKey: 'confirmed_by', as: 'confirmedDonations' });
+Donation.belongsTo(User, { foreignKey: 'confirmed_by', as: 'confirmedByAdmin' });
+
 module.exports = {
     User,
     ActivityLog,
@@ -47,5 +56,6 @@ module.exports = {
     FlashcardContent,
     ChatSession,
     ChatMessage,
-    Citation
+    Citation,
+    Donation,
 };
