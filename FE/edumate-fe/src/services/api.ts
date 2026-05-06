@@ -38,10 +38,18 @@ api.interceptors.request.use((config) => {
     url.includes('/auth/verify-otp') ||
     url.includes('/auth/send-otp')
 
+  if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+    if (config.headers) {
+      delete (config.headers as any)['Content-Type']
+      delete (config.headers as any)['content-type']
+    }
+  }
+
   if (!isPublicAuth) {
     const token = getStoredAuthToken()
     if (token) config.headers.Authorization = `Bearer ${token}`
   }
+
   return config
 })
 

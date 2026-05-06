@@ -13,7 +13,6 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
-  Bell,
   Heart,
 } from 'lucide-react';
 import { Sidebar } from '../Sidebar';
@@ -24,6 +23,7 @@ import { Leaderboard } from './Leaderboard';
 import { ProgressTracker } from '../student/ProgressTracker';
 import { StudentQuizSection } from '../student/StudentQuizSection';
 import api from '../../../services/api';
+import { NotificationBell } from '@/app/components/NotificationBell';
 
 interface StudentDashboardProps {
   user: any;
@@ -89,6 +89,7 @@ const STUDENT_FLASHCARD_GENERATING_KEY = 'edumate_student_flashcard_generating';
 const STUDENT_FLASHCARD_NAVIGATE_KEY = 'edumate_student_flashcard_navigate';
 const STUDENT_SUCCESS_NOTIFICATIONS_KEY = 'edumate_student_success_notifications';
 const STUDENT_QUIZ_TAKING_EVENT = 'edumate:student-quiz-taking';
+
 type StudentQuizJobState = {
   running: boolean;
   status?: 'idle' | 'running' | 'completed' | 'failed';
@@ -100,6 +101,7 @@ type StudentQuizJobState = {
   startedAt?: number;
   updatedAt?: number;
 };
+
 type StudentSuccessNotification = {
   id: string;
   type: 'quiz' | 'flashcard';
@@ -155,7 +157,6 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
   const [quizJobState, setQuizJobState] = useState<StudentQuizJobState | null>(null);
   const [flashcardJobState, setFlashcardJobState] = useState<StudentQuizJobState | null>(null);
   const [successNotifs, setSuccessNotifs] = useState<StudentSuccessNotification[]>([]);
-  const [notifOpen, setNotifOpen] = useState(false);
 
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [summary, setSummary] = useState<ProgressSummary>(EMPTY_SUMMARY);
@@ -189,6 +190,7 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
       return next;
     });
   };
+
   const markNotificationAsRead = (notifId: string) => {
     setSuccessNotifs((prev) => {
       const next = prev.filter((n) => n.id !== notifId);
@@ -200,6 +202,7 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
       return next;
     });
   };
+
   const closeQuizJobNotification = () => {
     localStorage.setItem(
       STUDENT_QUIZ_GENERATING_KEY,
@@ -212,6 +215,7 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
     );
     window.dispatchEvent(new Event('edumate:student-quiz-generating'));
   };
+
   const closeFlashcardJobNotification = () => {
     localStorage.setItem(
       STUDENT_FLASHCARD_GENERATING_KEY,
@@ -224,6 +228,7 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
     );
     window.dispatchEvent(new Event('edumate:student-flashcard-generating'));
   };
+
   const openFlashcardViewerFromNotification = () => {
     if (!flashcardJobState) return;
     localStorage.setItem(
@@ -240,6 +245,7 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
     setActiveTab('documents');
     closeFlashcardJobNotification();
   };
+
   const openStudyMyFlashcards = (target: { title?: string; documentId?: number | null; s3Key?: string }) => {
     localStorage.setItem(
       STUDENT_FLASHCARD_NAVIGATE_KEY,
@@ -252,7 +258,6 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
       })
     );
     window.dispatchEvent(new Event('edumate:student-flashcard-navigate'));
-    setNotifOpen(false);
     setActiveTab('documents');
   };
 
@@ -544,70 +549,24 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
       <div className="flex-1 overflow-auto">
         <div className="bg-white border-b border-gray-200 p-4 lg:flex lg:justify-end hidden">
           <div className="flex items-center gap-3">
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setNotifOpen((v) => !v)}
-                className="relative p-2 rounded-lg border border-gray-200 hover:bg-gray-50"
-                aria-label="Open success notifications"
-              >
-                <Bell size={18} className="text-gray-700" />
-                {successNotifs.length > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-blue-600 text-white text-[10px] flex items-center justify-center">
-                    {successNotifs.length > 99 ? '99+' : successNotifs.length}
-                  </span>
-                )}
-              </button>
-              {notifOpen && (
-                <div className="absolute right-0 mt-2 w-80 bg-white border border-gray-200 rounded-xl shadow-xl z-[90]">
-                  <div className="px-3 py-2 border-b border-gray-100 flex items-center justify-between">
-                    <p className="text-sm font-semibold text-gray-900">Success notifications</p>
-                    {successNotifs.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSuccessNotifs([]);
-                          localStorage.removeItem(STUDENT_SUCCESS_NOTIFICATIONS_KEY);
-                        }}
-                        className="text-xs text-blue-600 hover:text-blue-700"
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-                  <div className="max-h-80 overflow-auto">
-                    {successNotifs.length === 0 ? (
-                      <p className="text-sm text-gray-500 px-3 py-4">No success notifications yet.</p>
-                    ) : (
-                      successNotifs.map((n) => (
-                        <button
-                          key={n.id}
-                          type="button"
-                          onClick={() => {
-                            markNotificationAsRead(n.id);
-                            if (n.type === 'flashcard') {
-                              openStudyMyFlashcards(n);
-                              return;
-                            }
-                            setNotifOpen(false);
-                            setActiveTab('quizzes');
-                          }}
-                          className="w-full text-left px-3 py-2 border-b border-gray-100 last:border-0 hover:bg-gray-50 transition-colors"
-                        >
-                          <p className="text-sm text-gray-900">
-                            {n.type === 'quiz' ? 'Quiz created successfully' : 'Flashcards created successfully'}
-                          </p>
-                          <p className="text-xs text-gray-600 truncate">{n.title}</p>
-                          <p className="text-[11px] text-gray-400 mt-0.5">
-                            {new Date(n.createdAt).toLocaleString()}
-                          </p>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
+            <NotificationBell
+              localNotifications={successNotifs}
+              onClearLocalNotifications={() => {
+                setSuccessNotifs([]);
+                localStorage.removeItem(STUDENT_SUCCESS_NOTIFICATIONS_KEY);
+              }}
+              onOpenLocalNotification={(n) => {
+                markNotificationAsRead(n.id);
+
+                if (n.type === 'flashcard') {
+                  openStudyMyFlashcards(n);
+                  return;
+                }
+
+                setActiveTab('quizzes');
+              }}
+            />
+
             <div className="text-right">
               <p className="text-gray-900">{user.name}</p>
               <p className="text-gray-500 text-xs">{user.email}</p>

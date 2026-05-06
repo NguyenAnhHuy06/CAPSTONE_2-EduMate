@@ -1,5 +1,5 @@
 import { useEffect, useState, type ChangeEvent } from 'react';
-import api from '@/services/api';
+import api, { getApiErrorMessage } from '@/services/api';
 
 export default function DonatePage() {
   const [loading, setLoading] = useState(true);
@@ -59,7 +59,21 @@ export default function DonatePage() {
     },
   ];
 
-    const handleInputChange = (
+  const [receiptFile, setReceiptFile] = useState<File | null>(null);
+  const [donationForm, setDonationForm] = useState({
+    amount: '',
+    transfer_note: '',
+    transaction_code: '',
+    message: '',
+  });
+
+  const [donationSubmitting, setDonationSubmitting] = useState(false);
+  const [donationMessage, setDonationMessage] = useState('');
+  const [donationError, setDonationError] = useState('');
+  const [myDonations, setMyDonations] = useState<any[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const handleInputChange = (
       e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
     ) => {
     const { name, value } = e.target;
@@ -82,18 +96,19 @@ export default function DonatePage() {
       setSaveMessage('');
       setSaveError('');
 
-      const res = await api.put('/donate/info', formData);
+      const res: any = await api.put('/donate/info', formData);
       const payload = res?.data ?? res ?? {};
+      const data = payload?.data ?? payload;
 
       const nextData = {
-        account_name: payload.account_name || formData.account_name,
-        bank_name: payload.bank_name || formData.bank_name,
-        account_number: payload.account_number || formData.account_number,
-        qr_image_url: payload.qr_image_url || formData.qr_image_url,
-        transfer_note: payload.transfer_note || formData.transfer_note,
-        message: payload.message || formData.message,
-        is_enabled: payload.is_enabled !== false,
-        updated_at: payload.updated_at || new Date().toISOString(),
+        account_name: data.account_name || formData.account_name,
+        bank_name: data.bank_name || formData.bank_name,
+        account_number: data.account_number || formData.account_number,
+        qr_image_url: data.qr_image_url || formData.qr_image_url,
+        transfer_note: data.transfer_note || formData.transfer_note,
+        message: data.message || formData.message,
+        is_enabled: data.is_enabled !== false,
+        updated_at: data.updated_at || new Date().toISOString(),
       };
 
       setQrVisible(!!nextData.qr_image_url);
@@ -110,30 +125,176 @@ export default function DonatePage() {
     }
   };
 
+  const loadMyDonations = async () => {
+    try {
+      const token = localStorage.getItem('edumate_token');
+      if (!token) return;
+
+      setHistoryLoading(true);
+      const res: any = await api.get('/donations/my');
+      const payload = res?.data ?? res ?? {};
+      setMyDonations(Array.isArray(payload) ? payload : payload.data || []);
+    } catch (err) {
+      console.error('Failed to load donation history:', err);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleDonationFormChange = (
+    e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    const { name, value } = e.target;
+    setDonationForm((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+  };
+
+  const handleReceiptChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] || null;
+    setDonationError('');
+
+    if (!file) {
+      setReceiptFile(null);
+      return;
+    }
+
+    const allowedTypes = [
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'application/pdf',
+    ];
+
+    if (!allowedTypes.includes(file.type)) {
+      setReceiptFile(null);
+      e.target.value = '';
+      setDonationError('Biên lai phải là JPG, PNG, WEBP hoặc PDF.');
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      setReceiptFile(null);
+      e.target.value = '';
+      setDonationError('Biên lai không được vượt quá 10MB.');
+      return;
+    }
+
+    setReceiptFile(file);
+  };
+
+  const handleSelectDonationLevel = (amount: string) => {
+    if (amount === 'Tùy ý') return;
+    const numeric = amount.replace(/[^\d]/g, '');
+    setDonationForm((prev) => ({
+      ...prev,
+      amount: numeric,
+    }));
+  };
+
+  const handleSubmitDonation = async () => {
+    try {
+      setDonationSubmitting(true);
+      setDonationMessage('');
+      setDonationError('');
+
+      const token = localStorage.getItem('edumate_token');
+      if (!token) {
+        setDonationError('Bạn cần đăng nhập để gửi biên lai donate.');
+        return;
+      }
+
+      if (!donateInfo.is_enabled) {
+        setDonationError('Tính năng donate hiện đang tạm tắt.');
+        return;
+      }
+
+      const amount = Number(donationForm.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        setDonationError('Vui lòng nhập số tiền ủng hộ hợp lệ.');
+        return;
+      }
+
+      if (!receiptFile) {
+        setDonationError('Vui lòng upload biên lai chuyển khoản.');
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append('amount', donationForm.amount);
+      fd.append('transfer_note', donationForm.transfer_note);
+      fd.append('transaction_code', donationForm.transaction_code);
+      fd.append('message', donationForm.message);
+      fd.append('receipt', receiptFile);
+
+      await api.post('/donations', fd);
+
+      setDonationMessage('Đã gửi biên lai. Vui lòng chờ admin xác nhận.');
+      setDonationForm({
+        amount: '',
+        transfer_note: '',
+        transaction_code: '',
+        message: '',
+      });
+      setReceiptFile(null);
+
+      const input = document.getElementById('donation-receipt') as HTMLInputElement | null;
+      if (input) input.value = '';
+
+      await loadMyDonations();
+    } catch (err) {
+      setDonationError(getApiErrorMessage(err));
+    } finally {
+      setDonationSubmitting(false);
+    }
+  };
+
+  const handleOpenDonationReceipt = async (donationId: number) => {
+    try {
+      setDonationError('');
+
+      const res: any = await api.get(`/donations/${donationId}/receipt`);
+      const payload = res?.data ?? res ?? {};
+      const url = payload?.url || payload?.data?.url;
+
+      if (!url) {
+        setDonationError('Không lấy được đường dẫn biên lai.');
+        return;
+      }
+
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      setDonationError(getApiErrorMessage(err));
+    }
+  };
+
   useEffect(() => {
     let mounted = true;
 
     const loadDonateInfo = async () => {
       try {
         setLoading(true);
-        const res = await api.get('/donate/info');
+
+        const res: any = await api.get('/donate/info');
         const payload = res?.data ?? res ?? {};
+        const data = payload?.data ?? payload;
 
         if (!mounted) return;
 
-        setQrVisible(!!payload.qr_image_url);
+        setQrVisible(!!data.qr_image_url);
 
         setDonateInfo({
-          account_name: payload.account_name || '',
-          bank_name: payload.bank_name || '',
-          account_number: payload.account_number || '',
-          qr_image_url: payload.qr_image_url || '',
-          transfer_note: payload.transfer_note || '',
+          account_name: data.account_name || '',
+          bank_name: data.bank_name || '',
+          account_number: data.account_number || '',
+          qr_image_url: data.qr_image_url || '',
+          transfer_note: data.transfer_note || '',
           message:
-            payload.message ||
+            data.message ||
             'Mỗi khoản ủng hộ sẽ giúp chúng tôi duy trì server, chi trả chi phí API, lưu trữ tài liệu và tiếp tục phát triển thêm những tính năng hữu ích cho sinh viên và giảng viên.',
-          is_enabled: payload.is_enabled !== false,
-          updated_at: payload.updated_at || '',
+          is_enabled: data.is_enabled !== false,
+          updated_at: data.updated_at || '',
         });
       } catch (err) {
         console.error('Failed to load donate info:', err);
@@ -147,6 +308,10 @@ export default function DonatePage() {
     return () => {
       mounted = false;
     };
+  }, []);
+
+  useEffect(() => {
+    loadMyDonations();
   }, []);
 
   useEffect(() => {
@@ -271,6 +436,8 @@ export default function DonatePage() {
             {donationLevels.map((level) => (
               <button
                 key={level.amount}
+                type="button"
+                onClick={() => handleSelectDonationLevel(level.amount)}
                 className="rounded-3xl border border-slate-200 bg-slate-50 p-5 text-left transition hover:border-slate-300 hover:bg-slate-100"
               >
                 <div className="text-xl font-bold text-slate-900">{level.amount}</div>
@@ -340,6 +507,203 @@ export default function DonatePage() {
             <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm leading-7 text-slate-600">
               Nếu bạn muốn đồng hành cùng EduMate, có thể ủng hộ qua thông tin bên trên. Sự đóng góp của bạn sẽ giúp dự án duy trì server, chi trả chi phí API, lưu trữ tài liệu và tiếp tục phát triển thêm tính năng mới.
             </div>
+          </div>
+        </div>
+      </section>
+
+      {donateInfo.is_enabled && (
+        <section className="mx-auto max-w-7xl px-6 pb-16 lg:px-10">
+          <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">
+              Xác nhận ủng hộ
+            </p>
+            <h2 className="mt-3 text-3xl font-bold text-slate-900">
+              Upload biên lai để admin xác nhận khoản donate.
+            </h2>
+            <p className="mt-4 text-base leading-8 text-slate-600">
+              Sau khi chuyển khoản theo thông tin bên trên, hãy gửi số tiền và biên lai. Admin sẽ kiểm tra và cập nhật trạng thái.
+            </p>
+
+            <div className="mt-8 grid gap-6 md:grid-cols-2">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-700">
+                  Số tiền đã chuyển (VND)
+                </label>
+                <input
+                  name="amount"
+                  type="number"
+                  min="1000"
+                  value={donationForm.amount}
+                  onChange={handleDonationFormChange}
+                  placeholder="Ví dụ: 50000"
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-medium text-slate-700">
+                  Mã giao dịch, nếu có
+                </label>
+                <input
+                  name="transaction_code"
+                  value={donationForm.transaction_code}
+                  onChange={handleDonationFormChange}
+                  placeholder="Ví dụ: FT123456789"
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="mb-2 block text-sm font-medium text-slate-700">
+                  Nội dung chuyển khoản
+                </label>
+                <input
+                  name="transfer_note"
+                  value={donationForm.transfer_note}
+                  onChange={handleDonationFormChange}
+                  placeholder={donateInfo.transfer_note || 'Ví dụ: DONATE EDUMATE'}
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="mb-2 block text-sm font-medium text-slate-700">
+                  Lời nhắn, tùy chọn
+                </label>
+                <textarea
+                  name="message"
+                  value={donationForm.message}
+                  onChange={handleDonationFormChange}
+                  rows={3}
+                  placeholder="Bạn có thể để lại lời nhắn cho nhóm EduMate."
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="mb-2 block text-sm font-medium text-slate-700">
+                  Biên lai chuyển khoản
+                </label>
+                <input
+                  id="donation-receipt"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,application/pdf"
+                  onChange={handleReceiptChange}
+                  className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
+                />
+                <p className="mt-2 text-xs text-slate-500">
+                  Chấp nhận JPG, PNG, WEBP hoặc PDF. Tối đa 10MB.
+                </p>
+              </div>
+            </div>
+
+            {donationMessage && (
+              <div className="mt-6 rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+                {donationMessage}
+              </div>
+            )}
+
+            {donationError && (
+              <div className="mt-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {donationError}
+              </div>
+            )}
+
+            <div className="mt-8">
+              <button
+                type="button"
+                onClick={handleSubmitDonation}
+                disabled={donationSubmitting}
+                className="rounded-2xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {donationSubmitting ? 'Đang gửi...' : 'Gửi biên lai xác nhận'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <section className="mx-auto max-w-7xl px-6 pb-16 lg:px-10">
+        <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">
+                Lịch sử ủng hộ
+              </p>
+              <h2 className="mt-3 text-3xl font-bold text-slate-900">
+                Trạng thái các khoản donate của bạn.
+              </h2>
+            </div>
+            <button
+              type="button"
+              onClick={loadMyDonations}
+              className="rounded-2xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Làm mới
+            </button>
+          </div>
+
+          <div className="mt-8 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50">
+                  <th className="px-4 py-3">Ngày gửi</th>
+                  <th className="px-4 py-3">Số tiền</th>
+                  <th className="px-4 py-3">Trạng thái</th>
+                  <th className="px-4 py-3">Ghi chú admin</th>
+                  <th className="px-4 py-3 text-right">Biên lai</th>
+                </tr>
+              </thead>
+              <tbody>
+                {historyLoading ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
+                      Đang tải lịch sử...
+                    </td>
+                  </tr>
+                ) : myDonations.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
+                      Chưa có khoản donate nào.
+                    </td>
+                  </tr>
+                ) : (
+                  myDonations.map((item) => (
+                    <tr key={item.donation_id} className="border-b border-slate-100">
+                      <td className="px-4 py-3">
+                        {item.created_at ? new Date(item.created_at).toLocaleString('vi-VN') : '-'}
+                      </td>
+                      <td className="px-4 py-3 font-semibold">
+                        {Number(item.amount || 0).toLocaleString('vi-VN')}đ
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`rounded-full px-3 py-1 text-xs font-bold ${
+                          item.status === 'CONFIRMED'
+                            ? 'bg-green-100 text-green-700'
+                            : item.status === 'REJECTED'
+                              ? 'bg-red-100 text-red-700'
+                              : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {item.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {item.admin_note || '-'}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenDonationReceipt(item.donation_id)}
+                          className="rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                          Xem biên lai
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </section>

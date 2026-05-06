@@ -19,7 +19,7 @@ import { Profile } from './Profile';
 import api from '../../services/api';
 import { Heart } from 'lucide-react';
 
-type AdminTab = 'overview' | 'users' | 'moderation' | 'logs' | 'profile';
+type AdminTab = 'overview' | 'users' | 'moderation' | 'donations' | 'logs' | 'profile';
 
 interface AdminDashboardProps {
   user: any;
@@ -36,11 +36,14 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
   const [pendingDocs, setPendingDocs] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [donations, setDonations] = useState<any[]>([]);
+  const [donationStatus, setDonationStatus] = useState<'PENDING' | 'CONFIRMED' | 'REJECTED' | 'ALL'>('PENDING');
 
   const menuItems = [
     { id: 'overview', label: 'Overview', icon: Home },
     { id: 'users', label: 'User Management', icon: Users },
     { id: 'moderation', label: 'Document Moderation', icon: ShieldCheck },
+    { id: 'donations', label: 'Donation Management', icon: Heart },
     { id: 'logs', label: 'Activity Logs', icon: Activity },
     { id: 'donate', label: 'Donate', icon: Heart },
     { id: 'profile', label: 'Profile', icon: UserPlus },
@@ -61,6 +64,10 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
       } else if (activeTab === 'logs') {
         const res: any = await api.get('/admin/activity-logs?limit=50');
         setLogs(res.data || []);
+      } else if (activeTab === 'donations') {
+        const query = donationStatus === 'ALL' ? '' : `?status=${donationStatus}`;
+        const res: any = await api.get(`/donations/admin${query}`);
+        setDonations(res.data || []);
       }
     } catch (err) {
       console.error('Error fetching admin data:', err);
@@ -71,7 +78,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
 
   useEffect(() => {
     fetchData();
-  }, [activeTab]);
+  }, [activeTab, donationStatus]);
 
   const handleUpdateRole = async (userId: string, newRole: string) => {
     try {
@@ -98,6 +105,45 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
       if (activeTab === 'overview') fetchData(); // Refresh stats
     } catch (err) {
       alert(`Failed to ${action} document`);
+    }
+  };
+
+  const handleOpenDonationReceipt = async (donationId: number) => {
+    try {
+      const res: any = await api.get(`/donations/${donationId}/receipt`);
+      const payload = res?.data ?? res ?? {};
+      const url = payload?.url || payload?.data?.url;
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      alert('Failed to open receipt');
+    }
+  };
+
+  const handleConfirmDonation = async (donationId: number) => {
+    try {
+      await api.patch(`/donations/${donationId}/confirm`, {
+        admin_note: 'Đã xác nhận khoản ủng hộ.',
+      });
+      fetchData();
+    } catch (err) {
+      alert('Failed to confirm donation');
+    }
+  };
+
+  const handleRejectDonation = async (donationId: number) => {
+    try {
+      const reason = window.prompt(
+        'Reason for rejection:',
+        'Biên lai không hợp lệ hoặc chưa tìm thấy giao dịch.'
+      );
+
+      await api.patch(`/donations/${donationId}/reject`, {
+        admin_note: reason || 'Đã từ chối khoản ủng hộ.',
+      });
+
+      fetchData();
+    } catch (err) {
+      alert('Failed to reject donation');
     }
   };
 
@@ -349,6 +395,144 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
 
           {activeTab === 'profile' && (
             <Profile user={user} />
+          )}
+
+          {activeTab === 'donations' && (
+            <div className="space-y-6">
+              <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg flex items-start gap-3">
+                <Heart className="text-blue-600 shrink-0" size={20} />
+                <p className="text-blue-800 text-sm">
+                  Các khoản donate đang chờ xác nhận. Admin cần kiểm tra biên lai với giao dịch ngân hàng trước khi xác nhận.
+                </p>
+              </div>
+
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-gray-100 flex flex-wrap gap-3 justify-between items-center">
+                  <h3 className="text-lg font-semibold">
+                    Donation Requests
+                  </h3>
+
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={donationStatus}
+                      onChange={(e) => setDonationStatus(e.target.value as 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'ALL')}
+                      className="px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="PENDING">Pending</option>
+                      <option value="CONFIRMED">Confirmed</option>
+                      <option value="REJECTED">Rejected</option>
+                      <option value="ALL">All</option>
+                    </select>
+
+                    <button
+                      onClick={fetchData}
+                      className="px-3 py-2 text-sm rounded-lg border border-gray-200 hover:bg-gray-50"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-100">
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Donor</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Amount</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Transfer Info</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Date</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Status</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {donations.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="p-8 text-center text-gray-400">
+                            No donations found.
+                          </td>
+                        </tr>
+                      ) : (
+                        donations.map((d) => (
+                          <tr key={d.donation_id} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="p-4">
+                              <div className="font-medium text-gray-900">
+                                {d.donor_name || 'Unknown'}
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                {d.donor_email || '-'}
+                              </div>
+                            </td>
+                            <td className="p-4 font-semibold">
+                              {Number(d.amount || 0).toLocaleString('vi-VN')}đ
+                            </td>
+                            <td className="p-4 text-sm">
+                              <div className="text-gray-900">
+                                Note: {d.transfer_note || '-'}
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                Transaction: {d.transaction_code || '-'}
+                              </div>
+                              {d.message ? (
+                                <div className="text-xs text-gray-500 mt-1">
+                                  Message: {d.message}
+                                </div>
+                              ) : null}
+                            </td>
+                            <td className="p-4 text-sm text-gray-400">
+                              {d.created_at ? new Date(d.created_at).toLocaleString('vi-VN') : '-'}
+                            </td>
+                            <td className="p-4">
+                              <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${
+                                d.status === 'CONFIRMED'
+                                  ? 'bg-green-100 text-green-700'
+                                  : d.status === 'REJECTED'
+                                    ? 'bg-red-100 text-red-700'
+                                    : 'bg-yellow-100 text-yellow-700'
+                              }`}>
+                                {d.status || 'PENDING'}
+                              </span>
+                            </td>
+                            <td className="p-4 text-right">
+                              <div className="flex justify-end gap-2">
+                                <button
+                                  onClick={() => handleOpenDonationReceipt(d.donation_id)}
+                                  className="px-2.5 py-1 bg-gray-700 text-white rounded text-[11px] font-medium hover:bg-gray-800"
+                                >
+                                  Receipt
+                                </button>
+
+                                {d.status === 'PENDING' ? (
+                                  <>
+                                    <button
+                                      onClick={() => handleConfirmDonation(d.donation_id)}
+                                      className="flex items-center gap-1 px-2.5 py-1 bg-green-600 text-white rounded text-[11px] font-medium hover:bg-green-700"
+                                    >
+                                      <CheckCircle size={13} /> Confirm
+                                    </button>
+
+                                    <button
+                                      onClick={() => handleRejectDonation(d.donation_id)}
+                                      className="flex items-center gap-1 px-2.5 py-1 bg-red-600 text-white rounded text-[11px] font-medium hover:bg-red-700"
+                                    >
+                                      <XCircle size={13} /> Reject
+                                    </button>
+                                  </>
+                                ) : (
+                                  <span className="px-2.5 py-1 rounded text-[11px] font-medium bg-gray-100 text-gray-500">
+                                    No action
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       </div>

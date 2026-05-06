@@ -7,6 +7,7 @@ import { UploadDocument } from '../UploadDocument';
 import { Profile } from '../Profile';
 import { QuizManagement, type InitialAiDocumentPayload } from '../lecturer/QuizManagement';
 import api from '@/services/api';
+import { NotificationBell } from '@/app/components/NotificationBell';
 
 const LECTURER_QUIZ_GENERATING_KEY = 'edumate_lecturer_quiz_generating';
 const LECTURER_QUIZ_AUTOSTART_KEY = 'edumate_lecturer_quiz_autostart';
@@ -293,9 +294,13 @@ export function InstructorDashboard({
       <div className="flex-1 overflow-auto">
         {/* Top Bar for Mobile and User Info */}
         <div className="bg-white border-b border-gray-200 p-4 lg:flex lg:justify-end hidden">
-          <div className="text-right">
-            <p className="text-gray-900">{user.name}</p>
-            <p className="text-gray-500 text-xs">{user.email}</p>
+          <div className="flex items-center gap-3">
+            <NotificationBell />
+
+            <div className="text-right">
+              <p className="text-gray-900">{user.name}</p>
+              <p className="text-gray-500 text-xs">{user.email}</p>
+            </div>
           </div>
         </div>
 
