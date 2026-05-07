@@ -36,6 +36,9 @@ interface DocumentDetailProps {
   /** Student flow: auto-open flashcard screen once detail loads. */
   autoOpenFlashcardMode?: 'creator' | 'viewer' | null;
   onAutoOpenFlashcardHandled?: () => void;
+  /** Update comment/download count as soon as back to list */
+  onCommentCountChange?: (count: number) => void;
+  onDownloadSuccess?: () => void;
 }
 
 type DiscussionComment = {
@@ -89,6 +92,8 @@ export function DocumentDetail ({
   onOpenQuiz,
   autoOpenFlashcardMode,
   onAutoOpenFlashcardHandled,
+  onCommentCountChange,
+  onDownloadSuccess,
 }: DocumentDetailProps) {
 
   const { showNotification } = useNotification()
@@ -189,6 +194,7 @@ export function DocumentDetail ({
         role: c?.role === 'instructor' ? 'instructor' : 'student',
       }));
       setComments(mapped);
+      onCommentCountChange?.(mapped.length);
     } catch {
       setComments([]);
       showNotification({
@@ -449,6 +455,7 @@ export function DocumentDetail ({
         return;
       }
       triggerBrowserDownload(blob, suggestedName);
+      onDownloadSuccess?.();
     } catch {
       showNotification({
         type: 'error',

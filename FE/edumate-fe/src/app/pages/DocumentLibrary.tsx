@@ -150,14 +150,17 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
       : isLecturerUploaderRole(apiRow.uploaderRole)
   const isLecturerUpload = isLecturerUploaderRole(uploaderRoleStr) || highCredibility
 
-  let year, semester, subject
+  let year = String(apiRow.year || '').trim() || undefined
+  let semester = String(apiRow.semester || '').trim() || undefined
+  let subject = String(apiRow.subject || '').trim() || undefined
+
   const s3Key = apiRow.s3Key || ''
-  if (s3Key.startsWith('DATA/')) {
+  if ((!year || !semester || !subject) && s3Key.startsWith('DATA/')) {
     const parts = s3Key.split('/')
     if (parts.length >= 4) {
-      year = parts[1]
-      semester = parts[2]
-      subject = parts[3]
+      year = year || parts[1]
+      semester = semester || parts[2]
+      subject = subject || parts[3]
     }
   }
 
@@ -391,6 +394,32 @@ export function DocumentLibrary({
         userRole={userRole}
         user={user}
         onBack={() => setSelectedDocument(null)}
+        onCommentCountChange={(count) => {
+          const key = buildDocFocusKey(selectedDocument)
+          setDocuments((prev) =>
+            prev.map((d) =>
+              buildDocFocusKey(d) === key
+                ? { ...d, comments: count }
+                : d
+            )
+          )
+          setSelectedDocument((prev) =>
+            prev ? { ...prev, comments: count } : prev
+          )
+        }}
+        onDownloadSuccess={() => {
+          const key = buildDocFocusKey(selectedDocument)
+          setDocuments((prev) =>
+            prev.map((d) =>
+              buildDocFocusKey(d) === key
+                ? { ...d, downloads: Number(d.downloads || 0) + 1 }
+                : d
+            )
+          )
+          setSelectedDocument((prev) =>
+            prev ? { ...prev, downloads: Number(prev.downloads || 0) + 1 } : prev
+          )
+        }}
         autoOpenFlashcardMode={
           userRole === 'student' &&
           autoOpenFlashcardDocKey != null &&
