@@ -30,6 +30,18 @@ const Document = sequelize.define('Document', {
     status: {
         type: DataTypes.ENUM('pending', 'verified', 'rejected'),
         defaultValue: 'pending'
+    },
+    category: {
+        type: DataTypes.STRING(128),
+        allowNull: true
+    },
+    year: {
+        type: DataTypes.STRING(50),
+        allowNull: true
+    },
+    description: {
+        type: DataTypes.TEXT,
+        allowNull: true
     }
 }, {
     tableName: 'documents',
