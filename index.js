@@ -313,6 +313,8 @@ const flashcardRoutes = require("./src/routes/flashcardRoutes");
 const adminRoutes = require("./src/routes/adminRoutes");
 const notificationRoutes = require("./src/routes/notificationRoutes");
 const quizRoutes = require("./src/routes/quizRoutes"); // For Leaderboard and modular quiz controllers
+const donationRoutes = require("./src/routes/donationRoutes");
+const donateRoutes = require("./src/routes/donateRoutes");
 const activityLog = require("./src/middleware/activityLog");
 const teamDb = require("./src/config/teamDb");
 
@@ -325,6 +327,8 @@ app.use("/api/ai/flashcards", flashcardRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/quiz-v2", quizRoutes); // Modular version alongside legacy
+app.use("/api/donations", donationRoutes);
+app.use("/api/donate", donateRoutes);
 // Compatibility endpoint used by older frontend builds.
 app.get("/api/leaderboard", async (req, res) => {
   try {

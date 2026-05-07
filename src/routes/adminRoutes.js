@@ -39,12 +39,12 @@ router.patch("/users/:id/role", auth, rbac("ADMIN"), async (req, res) => {
 });
 
 // Deactivate / activate user
-router.patch("/users/:id/status", auth, rbac("ADMIN"), async (req, res) => {
+// Alternate endpoint for activating/deactivating user (in case PATCH status route is unreachable)
+router.patch("/users/:id/activate", auth, rbac("ADMIN"), async (req, res) => {
     try {
         const { is_active } = req.body;
         const user = await User.findByPk(req.params.id);
         if (!user) return res.status(404).json({ success: false, message: "User not found." });
-
         user.is_active = is_active === true || is_active === "true" ? true : false;
         await user.save();
         return res.json({ success: true, message: `User ${user.is_active ? "activated" : "deactivated"}.` });
@@ -63,7 +63,7 @@ router.get("/documents/pending", auth, rbac("ADMIN"), async (req, res) => {
              FROM documents doc 
              LEFT JOIN users u ON doc.uploader_id = u.user_id 
              WHERE doc.status = 'pending' 
-             ORDER BY doc.created_at DESC LIMIT 100`
+             ORDER BY doc.document_id DESC LIMIT 100`
         );
         return res.json({ success: true, data: docs });
     } catch (err) {
