@@ -12,7 +12,12 @@ import {
   Briefcase,
   Search,
   RefreshCw,
-  Home
+  Home,
+  Archive,
+  Download,
+  Database,
+  CloudOff,
+  AlertCircle
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { Profile } from './Profile';
@@ -35,9 +40,16 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
   const [users, setUsers] = useState<any[]>([]);
   const [pendingDocs, setPendingDocs] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
+  const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [donations, setDonations] = useState<any[]>([]);
   const [donationStatus, setDonationStatus] = useState<'PENDING' | 'CONFIRMED' | 'REJECTED' | 'ALL'>('PENDING');
+
+  // Archive states
+  const [archives, setArchives] = useState<any[]>([]);
+  const [logStats, setLogStats] = useState<any>(null);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveMessage, setArchiveMessage] = useState<string | null>(null);
 
   const menuItems = [
     { id: 'overview', label: 'Overview', icon: Home },
@@ -61,9 +73,18 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
       } else if (activeTab === 'moderation') {
         const res: any = await api.get('/admin/documents/pending');
         setPendingDocs(res.data || []);
+      } else if (activeTab === 'reports') {
+        const res: any = await api.get('/admin/reports');
+        setReports(res.data || []);
       } else if (activeTab === 'logs') {
-        const res: any = await api.get('/admin/activity-logs?limit=50');
-        setLogs(res.data || []);
+        const [logsRes, archivesRes, statsRes]: any = await Promise.all([
+          api.get('/admin/activity-logs?limit=50'),
+          api.get('/admin/logs/archives'),
+          api.get('/admin/logs/stats')
+        ]);
+        setLogs(logsRes.data || []);
+        setArchives(archivesRes.data || []);
+        setLogStats(statsRes.data || null);
       } else if (activeTab === 'donations') {
         const query = donationStatus === 'ALL' ? '' : `?status=${donationStatus}`;
         const res: any = await api.get(`/donations/admin${query}`);
@@ -100,7 +121,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
 
   const handleModerateDoc = async (docId: number, action: 'verify' | 'reject') => {
     try {
-      await api.patch(`/documents/${docId}/${action}`);
+      await api.patch(`/admin/documents/${docId}/${action}`);
       setPendingDocs(pendingDocs.filter(d => d.document_id !== docId));
       if (activeTab === 'overview') fetchData(); // Refresh stats
     } catch (err) {
@@ -144,6 +165,30 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
       fetchData();
     } catch (err) {
       alert('Failed to reject donation');
+    }
+  };
+
+  const handleArchiveNow = async () => {
+    setArchiving(true);
+    setArchiveMessage(null);
+    try {
+      const res: any = await api.post('/admin/logs/archive-now', { retentionDays: 30 });
+      setArchiveMessage(res.message || 'Archiving complete.');
+      fetchData(); // Refresh archives and logs
+    } catch (err: any) {
+      setArchiveMessage(`Archiving failed: ${err.response?.data?.message || err.message}`);
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  const handleDownloadArchive = async (key: string) => {
+    try {
+      const res: any = await api.get(`/admin/logs/archives/download?key=${encodeURIComponent(key)}`);
+      const url = res.data?.url;
+      if (url) window.open(url, '_blank');
+    } catch (err) {
+      alert('Failed to get download URL');
     }
   };
 
@@ -354,41 +399,202 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
             </div>
           )}
 
-          {activeTab === 'logs' && (
+          {activeTab === 'reports' && (
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-               <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-                <h3 className="text-md font-semibold text-gray-700">Recent Activity Logs</h3>
+              <div className="p-4 border-b border-gray-100 flex justify-between items-center">
+                <h3 className="text-md font-semibold text-gray-700">Document Reports</h3>
               </div>
-              <div className="max-h-[600px] overflow-y-auto">
+              <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead>
-                    <tr className="bg-gray-50 border-b border-gray-100 sticky top-0">
-                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">User</th>
-                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Action</th>
-                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Target</th>
-                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Timestamp</th>
+                    <tr className="bg-gray-50 border-b border-gray-100">
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Document</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Reporter</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Reason</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Status</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {logs.map((log) => (
-                      <tr key={log.log_id} className="text-sm hover:bg-gray-50">
-                        <td className="p-4 text-gray-900 font-medium">{log.email || 'System'}</td>
-                        <td className="p-4">
+                  <tbody>
+                    {reports.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-8 text-center text-gray-400">No reports found.</td>
+                      </tr>
+                    ) : reports.map((report) => (
+                      <tr key={report.report_id} className="border-b border-gray-50 hover:bg-gray-50">
+                        <td className="py-3 px-4 font-medium text-sm">
+                          <div className="text-gray-900">{report.Document?.title || 'Unknown Document'}</div>
+                          <div className="text-[11px] text-gray-400 mt-0.5">ID: {report.document_id}</div>
+                        </td>
+                        <td className="py-3 px-4 text-sm">{report.reporter?.name || report.reporter?.email || 'Unknown'}</td>
+                        <td className="py-3 px-4 text-sm text-gray-700">{report.reason}</td>
+                        <td className="py-3 px-4 text-sm">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            log.action === 'LOGIN' ? 'bg-blue-100 text-blue-600' :
-                            log.action === 'UPLOAD' ? 'bg-green-100 text-green-600' :
-                            log.action === 'VERIFY' ? 'bg-purple-100 text-purple-600' :
+                            report.status === 'PENDING' ? 'bg-yellow-100 text-yellow-600' :
+                            report.status === 'RESOLVED' ? 'bg-green-100 text-green-600' :
                             'bg-gray-100 text-gray-600'
                           }`}>
-                            {log.action}
+                            {report.status}
                           </span>
                         </td>
-                        <td className="p-4 text-gray-500 max-w-xs truncate">{log.target_id || '-'}</td>
-                        <td className="p-4 text-gray-400 text-xs">{new Date(log.created_at).toLocaleString()}</td>
+                        <td className="py-3 px-4 text-right">
+                          {report.status === 'PENDING' && (
+                            <div className="flex justify-end gap-2">
+                              <button 
+                                onClick={async () => {
+                                  try {
+                                    await api.post(`/admin/reports/${report.report_id}/resolve`, { action: 'REMOVE_DOCUMENT' });
+                                    fetchData();
+                                  } catch (err) { alert('Action failed'); }
+                                }}
+                                className="flex items-center gap-1 px-2.5 py-1 bg-red-600 text-white rounded text-[11px] font-medium hover:bg-red-700 transition-colors"
+                              >
+                                <XCircle size={13} /> Remove Doc
+                              </button>
+                              <button 
+                                onClick={async () => {
+                                  try {
+                                    await api.post(`/admin/reports/${report.report_id}/resolve`, { action: 'IGNORE' });
+                                    fetchData();
+                                  } catch (err) { alert('Action failed'); }
+                                }}
+                                className="flex items-center gap-1 px-2.5 py-1 bg-gray-200 text-gray-700 rounded text-[11px] font-medium hover:bg-gray-300 transition-colors"
+                              >
+                                <CheckCircle size={13} /> Ignore
+                              </button>
+                            </div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'logs' && (
+            <div className="space-y-6">
+              {/* Log Stats & Archive Controls */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                  <div className="flex items-center gap-4">
+                    <div className="p-3 bg-blue-50 rounded-xl">
+                      <Database size={24} className="text-blue-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-md font-semibold text-gray-800">Activity Log Management</h3>
+                      <p className="text-sm text-gray-500">
+                        {logStats
+                          ? `${logStats.totalInDb} log(s) in database`
+                          : 'Loading stats...'}
+                        {logStats?.oldestLog && (
+                          <span> · Oldest: {new Date(logStats.oldestLog).toLocaleDateString()}</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleArchiveNow}
+                    disabled={archiving}
+                    className="flex items-center gap-2 px-4 py-2.5 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {archiving ? (
+                      <RefreshCw size={16} className="animate-spin" />
+                    ) : (
+                      <Archive size={16} />
+                    )}
+                    {archiving ? 'Archiving...' : 'Archive Now (30+ days)'}
+                  </button>
+                </div>
+                {archiveMessage && (
+                  <div className={`mt-3 px-4 py-2.5 rounded-lg text-sm ${
+                    archiveMessage.includes('failed') || archiveMessage.includes('Failed')
+                      ? 'bg-red-50 text-red-700 border border-red-200'
+                      : 'bg-green-50 text-green-700 border border-green-200'
+                  }`}>
+                    {archiveMessage}
+                  </div>
+                )}
+              </div>
+
+              {/* Archived Files on S3 */}
+              {archives.length > 0 && (
+                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                  <div className="p-4 border-b border-gray-100 bg-gray-50">
+                    <h3 className="text-md font-semibold text-gray-700 flex items-center gap-2">
+                      <Archive size={16} className="text-amber-600" />
+                      Archived Log Files ({archives.length})
+                    </h3>
+                  </div>
+                  <div className="max-h-[300px] overflow-y-auto">
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-100 sticky top-0">
+                          <th className="p-3 text-xs font-semibold text-gray-500 uppercase">File</th>
+                          <th className="p-3 text-xs font-semibold text-gray-500 uppercase">Date</th>
+                          <th className="p-3 text-xs font-semibold text-gray-500 uppercase">Size</th>
+                          <th className="p-3 text-xs font-semibold text-gray-500 uppercase">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {archives.map((a: any) => (
+                          <tr key={a.key} className="text-sm hover:bg-gray-50">
+                            <td className="p-3 text-gray-900 font-medium font-mono text-xs">{a.fileName}</td>
+                            <td className="p-3 text-gray-500 text-xs">{new Date(a.lastModified).toLocaleString()}</td>
+                            <td className="p-3 text-gray-500 text-xs">{a.sizeKB} KB</td>
+                            <td className="p-3">
+                              <button
+                                onClick={() => handleDownloadArchive(a.key)}
+                                className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 text-white rounded text-[11px] font-medium hover:bg-blue-700 transition-colors"
+                              >
+                                <Download size={13} /> Download
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Recent Logs Table */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                  <h3 className="text-md font-semibold text-gray-700">Recent Activity Logs (last 30 days)</h3>
+                </div>
+                <div className="max-h-[600px] overflow-y-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-100 sticky top-0">
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">User</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Action</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Details</th>
+                        <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Timestamp</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50">
+                      {logs.map((log) => (
+                        <tr key={log.log_id} className="text-sm hover:bg-gray-50">
+                          <td className="p-4 text-gray-900 font-medium">{log.email || 'System'}</td>
+                          <td className="p-4">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              log.action === 'login' ? 'bg-blue-100 text-blue-600' :
+                              log.action === 'upload_document' ? 'bg-green-100 text-green-600' :
+                              log.action === 'generate_quiz' ? 'bg-purple-100 text-purple-600' :
+                              'bg-gray-100 text-gray-600'
+                            }`}>
+                              {log.action}
+                            </span>
+                          </td>
+                          <td className="p-4 text-gray-500 max-w-xs truncate">{log.details || '-'}</td>
+                          <td className="p-4 text-gray-400 text-xs">{new Date(log.created_at).toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}

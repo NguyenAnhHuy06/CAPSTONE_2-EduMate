@@ -131,7 +131,8 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
   const lastMod = apiRow.lastModified ?? apiRow.created_at ?? apiRow.uploadedAt
   const categoryKey = normalizeMaterialCategoryKeyFromApi(apiRow.category)
   const type = mapCategoryToDocType(apiRow.category) ?? deriveMaterialType(apiRow)
-  const docId = apiRow.documentId != null ? Number(apiRow.documentId) : null
+  const rawDocId = apiRow.documentId ?? apiRow.id;
+  const docId = rawDocId != null ? Number(rawDocId) : null;
   const id = docId != null && Number.isFinite(docId) ? docId : String(apiRow.s3Key || apiRow.fileName || apiRow.title)
 
   const description =
