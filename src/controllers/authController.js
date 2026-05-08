@@ -152,6 +152,10 @@ const login = async (req, res) => {
             return res.status(403).json({ success: false, message: 'Please verify your email first' });
         }
 
+        if (user.is_active === false || user.is_active === 0) {
+            return res.status(403).json({ success: false, message: 'Your account has been deactivated by an administrator' });
+        }
+
         const isMatch = await bcrypt.compare(password, user.password_hash);
         if (!isMatch) {
             return res.status(400).json({ success: false, message: 'Incorrect email or password' });

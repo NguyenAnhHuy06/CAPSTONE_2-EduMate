@@ -71,6 +71,27 @@ router.get("/documents/pending", auth, rbac("ADMIN"), async (req, res) => {
     }
 });
 
+// Moderate document (verify/reject)
+router.patch("/documents/:id/:action(verify|reject)", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        const { action } = req.params;
+        const status = action === 'verify' ? 'verified' : 'rejected';
+        
+        const Document = require("../models/Document");
+        const doc = await Document.findByPk(req.params.id);
+        
+        if (!doc) return res.status(404).json({ success: false, message: "Document not found." });
+        
+        doc.status = status;
+        await doc.save();
+        
+        return res.json({ success: true, message: `Document marked as ${status}.` });
+    } catch (err) {
+        console.error("[Admin API Error /documents/moderate]", err);
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 // Activity logs (Design: activity_logs table)
 router.get("/activity-logs", auth, rbac("ADMIN"), async (req, res) => {
     try {

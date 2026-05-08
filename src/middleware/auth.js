@@ -101,6 +101,10 @@ const authMiddleware = async (req, res, next) => {
             return res.status(401).json({ success: false, message: 'User no longer exists.' });
         }
 
+        if (user.is_active === false || user.is_active === 0) {
+            return res.status(403).json({ success: false, message: 'Your account has been deactivated by an administrator.' });
+        }
+
         if (!user.is_verified) {
             return res.status(403).json({ success: false, message: 'Email not verified.' });
         }
