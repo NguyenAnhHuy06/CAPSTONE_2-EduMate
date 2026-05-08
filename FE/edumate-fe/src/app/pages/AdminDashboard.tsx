@@ -58,7 +58,6 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
     { id: 'donations', label: 'Donation Management', icon: Heart },
     { id: 'logs', label: 'Activity Logs', icon: Activity },
     { id: 'donate', label: 'Donate', icon: Heart },
-    { id: 'profile', label: 'Profile', icon: UserPlus },
   ];
 
   const fetchData = async () => {
