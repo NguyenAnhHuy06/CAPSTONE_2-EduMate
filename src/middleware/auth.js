@@ -93,7 +93,7 @@ const authMiddleware = async (req, res, next) => {
         }
 
         const user = await User.findByPk(normalizedUserId, {
-            attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
+            attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified', 'is_active']
         });
         console.log('[AuthMiddleware] Found user:', user ? user.user_id : 'null');
 
@@ -176,7 +176,7 @@ async function optionalAuthMiddleware(req, res, next) {
         if (!Number.isFinite(normalizedUserId) || normalizedUserId <= 0) return next();
 
         const user = await User.findByPk(normalizedUserId, {
-            attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified']
+            attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified', 'is_active']
         });
         if (!user || !user.is_verified) return next();
 

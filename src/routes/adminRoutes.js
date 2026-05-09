@@ -4,6 +4,7 @@ const auth = require("../middleware/auth");
 const rbac = require("../middleware/rbac");
 const User = require("../models/User");
 const ActivityLog = require("../models/ActivityLog");
+const { logActivity } = require("../middleware/activityLog");
 
 // All admin routes require ADMIN role (Design: E03 Administrator)
 
@@ -32,6 +33,9 @@ router.patch("/users/:id/role", auth, rbac("ADMIN"), async (req, res) => {
 
         user.role = role;
         await user.save();
+
+        logActivity(req.user.id, "update_user_role", `Updated role for ${user.email} to ${role}`, req.ip);
+
         return res.json({ success: true, message: `User role updated to ${role}.`, data: { user_id: user.user_id, role: user.role } });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
@@ -47,6 +51,9 @@ router.patch("/users/:id/activate", auth, rbac("ADMIN"), async (req, res) => {
         if (!user) return res.status(404).json({ success: false, message: "User not found." });
         user.is_active = is_active === true || is_active === "true" ? true : false;
         await user.save();
+
+        logActivity(req.user.id, user.is_active ? "activate_user" : "deactivate_user", `Admin ${user.is_active ? "activated" : "deactivated"} account ${user.email}`, req.ip);
+
         return res.json({ success: true, message: `User ${user.is_active ? "activated" : "deactivated"}.` });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
@@ -84,7 +91,9 @@ router.patch("/documents/:id/:action(verify|reject)", auth, rbac("ADMIN"), async
         
         doc.status = status;
         await doc.save();
-        
+
+        logActivity(req.user.id, `moderate_document_${action}`, `Document ${doc.document_id} marked as ${status}`, req.ip);
+
         return res.json({ success: true, message: `Document marked as ${status}.` });
     } catch (err) {
         console.error("[Admin API Error /documents/moderate]", err);
@@ -115,6 +124,69 @@ router.get("/activity-logs", auth, rbac("ADMIN"), async (req, res) => {
         });
 
         return res.json({ success: true, data: mappedLogs });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Log archives stub (Design: S3 or Local storage)
+router.get("/logs/archives", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        // Return empty for now or implement file listing
+        return res.json({ success: true, data: [] });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+router.get("/logs/archives/download", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        const { key } = req.query;
+        // Mock download URL
+        return res.json({ success: true, data: { url: `https://mock-s3-download.com/${key}` } });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Log stats
+router.get("/logs/stats", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        const totalLogs = await ActivityLog.count();
+        const oldest = await ActivityLog.findOne({
+            order: [['created_at', 'ASC']],
+            attributes: ['created_at']
+        });
+        return res.json({ 
+            success: true, 
+            data: { 
+                totalInDb: totalLogs, 
+                oldestLog: oldest ? oldest.created_at : null 
+            } 
+        });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// Archive now (Delete logs older than X days)
+router.post("/logs/archive-now", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        const { retentionDays = 30 } = req.body;
+        const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+        
+        const deletedCount = await ActivityLog.destroy({
+            where: {
+                created_at: {
+                    [require("sequelize").Op.lt]: cutoff
+                }
+            }
+        });
+
+        return res.json({ 
+            success: true, 
+            message: `Archiving completed. ${deletedCount} log(s) older than ${retentionDays} days have been removed from the database.` 
+        });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
