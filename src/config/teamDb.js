@@ -2,7 +2,7 @@
  * teamDb.js — Adapter mysql2 raw queries từ codebase team.
  * Đã điều chỉnh để tương thích hoàn toàn với schema eudmate.sql:
  *   - Primary key users: user_id (INT)
- *   - Column: full_name thay vì name
+ *   - Column: name (Note: Sequelize maps full_name to this column)
  *   - Role: ENUM viết HOA 'STUDENT'/'LECTURER' thay vì 'lecturer'/'teacher'
  */
 const path = require("path");
@@ -301,7 +301,7 @@ async function getMetaMapForS3Keys(keys) {
         d.download_count,
         c.course_code,
         c.course_name,
-        u.full_name AS uploader_name,
+        u.name AS uploader_name,
         u.role AS uploader_role,
         (SELECT COUNT(*)
          FROM document_segments s
@@ -430,7 +430,7 @@ async function listCompletedQuizAttemptsByQuizId(quizId) {
   const p = getPool();
   const [rows] = await p.execute(
     `SELECT qa.attempt_id, qa.user_id, qa.score, qa.correct_count, qa.total_questions, qa.completed_at,
-            u.full_name AS user_name, u.email AS user_email,
+            u.name AS user_name, u.email AS user_email,
             (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = qa.quiz_id) AS question_count_db
      FROM quiz_attempts qa
      LEFT JOIN users u ON u.user_id = qa.user_id
@@ -526,7 +526,7 @@ async function listPublishedQuizzes(limit = 20) {
   const sql = `SELECT q.quiz_id, q.title, q.created_at, q.published_at, c.course_code,
     (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
     (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
-    u.full_name AS creator_name
+    u.name AS creator_name
     FROM quizzes q LEFT JOIN courses c ON c.course_id = q.course_id
     LEFT JOIN users u ON u.user_id = q.created_by
     WHERE q.is_published = 1
@@ -1454,7 +1454,7 @@ async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
   const sql = `
     SELECT
       u.user_id                                     AS userId,
-      u.full_name                                        AS name,
+      u.name                                        AS name,
       u.email,
       COUNT(qa.attempt_id)                          AS totalAttempts,
       ROUND(AVG(IF(qa.total_questions > 0, (qa.correct_count / qa.total_questions) * 100, qa.score)))   AS avgScore,
@@ -1463,7 +1463,7 @@ async function getLeaderboard({ limit = 50, requestingUserId = null } = {}) {
     INNER JOIN users u ON u.user_id = qa.user_id
     WHERE qa.completed_at IS NOT NULL
       AND qa.user_id IS NOT NULL
-    GROUP BY u.user_id, u.full_name, u.email
+    GROUP BY u.user_id, u.name, u.email
     ORDER BY avgScore DESC, totalAttempts DESC
   `;
 
@@ -2141,7 +2141,7 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
       q.is_published,
       q.shared_from_student,
       q.shared_by_user_id,
-      u_shared.full_name AS shared_by_name,
+      u_shared.name AS shared_by_name,
       u_shared.email AS shared_by_email,
       q.document_id,
       q.source_file_url AS s3Key,
