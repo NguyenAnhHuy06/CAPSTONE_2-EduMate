@@ -297,7 +297,7 @@ router.get("/comments", auth, async (req, res) => {
            dc.file_url,
            dc.body,
            dc.created_at,
-           u.full_name,
+           u.name,
            u.email,
            u.role
          FROM document_comments dc
@@ -314,7 +314,7 @@ router.get("/comments", auth, async (req, res) => {
            dc.file_url,
            dc.body,
            dc.created_at,
-           u.full_name,
+           u.name,
            u.email,
            u.role
          FROM document_comments dc
@@ -332,8 +332,8 @@ router.get("/comments", auth, async (req, res) => {
       s3Key: r.file_url,
       text: r.body,
       body: r.body,
-      author: r.full_name || r.email || "Unknown user",
-      authorName: r.full_name || r.email || "Unknown user",
+      author: r.name || r.email || "Unknown user",
+      authorName: r.name || r.email || "Unknown user",
       role: String(r.role || "").toUpperCase() === "STUDENT" ? "student" : "instructor",
       date: r.created_at,
       createdAt: r.created_at
