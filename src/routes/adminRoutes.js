@@ -4,7 +4,9 @@ const auth = require("../middleware/auth");
 const rbac = require("../middleware/rbac");
 const User = require("../models/User");
 const ActivityLog = require("../models/ActivityLog");
+const Notification = require("../models/Notification");
 const { logActivity } = require("../middleware/activityLog");
+const { ensureIndexedForQuiz } = require("../services/documentPipeline");
 
 // All admin routes require ADMIN role (Design: E03 Administrator)
 
@@ -91,6 +93,31 @@ router.patch("/documents/:id/:action(verify|reject)", auth, rbac("ADMIN"), async
         
         doc.status = status;
         await doc.save();
+
+        // 1. If verified, trigger AI indexing
+        if (status === 'verified' && doc.file_url) {
+            try {
+                await ensureIndexedForQuiz(doc.file_url, { reindex: true });
+            } catch (indexErr) {
+                console.warn(`[Admin Moderation] Indexing failed for doc ${doc.document_id}:`, indexErr.message);
+            }
+        }
+
+        // 2. Send notification to uploader
+        if (doc.uploader_id) {
+            try {
+                await Notification.create({
+                    user_id: doc.uploader_id,
+                    type: status === 'verified' ? 'success' : 'error',
+                    title: status === 'verified' ? 'Document Verified' : 'Document Rejected',
+                    content: status === 'verified' 
+                        ? `Your document "${doc.title}" has been verified and is now available for AI study.`
+                        : `Your document "${doc.title}" was rejected by a moderator.`
+                });
+            } catch (notifErr) {
+                console.warn("[Admin Moderation] Failed to send notification:", notifErr.message);
+            }
+        }
 
         logActivity(req.user.id, `moderate_document_${action}`, `Document ${doc.document_id} marked as ${status}`, req.ip);
 
