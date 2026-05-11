@@ -129,11 +129,21 @@ router.get("/activity-logs", auth, rbac("ADMIN"), async (req, res) => {
     }
 });
 
-// Log archives stub (Design: S3 or Local storage)
+// Log archives listing
 router.get("/logs/archives", auth, rbac("ADMIN"), async (req, res) => {
     try {
-        // Return empty for now or implement file listing
-        return res.json({ success: true, data: [] });
+        const s3 = require("../services/s3Upload");
+        if (!s3.isS3Configured()) {
+            return res.json({ success: true, data: [] });
+        }
+        const archives = await s3.listLogArchives();
+        const mapped = archives.map(a => ({
+            key: a.key,
+            fileName: require("path").basename(a.key),
+            sizeKB: Math.round((a.size || 0) / 1024),
+            lastModified: a.lastModified
+        }));
+        return res.json({ success: true, data: mapped });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
@@ -142,8 +152,13 @@ router.get("/logs/archives", auth, rbac("ADMIN"), async (req, res) => {
 router.get("/logs/archives/download", auth, rbac("ADMIN"), async (req, res) => {
     try {
         const { key } = req.query;
-        // Mock download URL
-        return res.json({ success: true, data: { url: `https://mock-s3-download.com/${key}` } });
+        if (!key) return res.status(400).json({ success: false, message: "Key is required." });
+        const s3 = require("../services/s3Upload");
+        if (!s3.isS3Configured()) {
+            return res.status(503).json({ success: false, message: "S3 not configured." });
+        }
+        const url = await s3.buildSignedUrl(key);
+        return res.json({ success: true, data: { url } });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
@@ -169,12 +184,49 @@ router.get("/logs/stats", auth, rbac("ADMIN"), async (req, res) => {
     }
 });
 
-// Archive now (Delete logs older than X days)
+// Archive now (Export logs older than X days to S3, then delete from DB)
 router.post("/logs/archive-now", auth, rbac("ADMIN"), async (req, res) => {
     try {
         const { retentionDays = 30 } = req.body;
         const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
         
+        // 1. Fetch logs to archive
+        const logsToArchive = await ActivityLog.findAll({
+            where: {
+                created_at: {
+                    [require("sequelize").Op.lt]: cutoff
+                }
+            },
+            include: [{ model: require("../models/User"), attributes: ["email"] }],
+            order: [["created_at", "ASC"]]
+        });
+
+        if (logsToArchive.length === 0) {
+            return res.json({ 
+                success: true, 
+                message: `No logs older than ${retentionDays} days were found. Nothing to archive.` 
+            });
+        }
+
+        // 2. Format as JSON
+        const archiveData = JSON.stringify(logsToArchive, null, 2);
+        const timestamp = new Date().toISOString().replace(/T/, '_').replace(/\..+/, '').replace(/:/g, '-');
+        const fileName = `activity_logs_${timestamp}.json`;
+        const s3Key = `LOGS/archive/${fileName}`;
+
+        // 3. Upload to S3
+        const s3 = require("../services/s3Upload");
+        if (s3.isS3Configured()) {
+            await s3.uploadDocumentBuffer({
+                buffer: Buffer.from(archiveData),
+                key: s3Key,
+                contentType: "application/json"
+            });
+        } else {
+            console.warn("[ArchiveNow] S3 not configured, logs deleted from DB without backup.");
+        }
+
+        // 4. Delete from DB
         const deletedCount = await ActivityLog.destroy({
             where: {
                 created_at: {
@@ -185,9 +237,11 @@ router.post("/logs/archive-now", auth, rbac("ADMIN"), async (req, res) => {
 
         return res.json({ 
             success: true, 
-            message: `Archiving completed. ${deletedCount} log(s) older than ${retentionDays} days have been removed from the database.` 
+            message: `Archiving completed. ${deletedCount} log(s) exported to S3 and removed from database.`,
+            data: { fileName, s3Key, deletedCount }
         });
     } catch (err) {
+        console.error("[ArchiveNow] Error:", err);
         return res.status(500).json({ success: false, message: err.message });
     }
 });
