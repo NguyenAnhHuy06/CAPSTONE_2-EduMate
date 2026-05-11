@@ -13,22 +13,18 @@ const User = sequelize.define('User', {
         unique: true
     },
     password_hash: {
-        field: 'password_hash',
+        field: 'password',
         type: DataTypes.STRING,
         allowNull: false
     },
     full_name: {
-        field: 'full_name',
+        field: 'name',
         type: DataTypes.STRING,
         allowNull: true
     },
     role: {
         type: DataTypes.ENUM('STUDENT', 'LECTURER', 'ADMIN'),
         defaultValue: 'STUDENT'
-    },
-    user_code: {
-        type: DataTypes.STRING,
-        allowNull: true
     },
     phone: {
         type: DataTypes.STRING(50),
@@ -43,14 +39,6 @@ const User = sequelize.define('User', {
         type: DataTypes.STRING(255),
         allowNull: true
     },
-    is_active: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: true
-    },
-    is_verified: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false
-    },
     email_verified: {
         type: DataTypes.BOOLEAN,
         field: 'is_verified', // Map to same column if needed, or check DB
@@ -60,6 +48,26 @@ const User = sequelize.define('User', {
         type: DataTypes.STRING(255),
         allowNull: true
     },
+    user_code: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
+    department: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
+    bio: {
+        type: DataTypes.TEXT,
+        allowNull: true
+    },
+    is_active: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true
+    },
+    is_verified: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false
+    },
     otp_code: {
         type: DataTypes.STRING,
         allowNull: true
@@ -67,6 +75,10 @@ const User = sequelize.define('User', {
     otp_expires_at: {
         type: DataTypes.DATE,
         allowNull: true
+    },
+    created_at: {
+        type: DataTypes.DATE,
+        defaultValue: DataTypes.NOW
     }
 }, {
     tableName: 'users',
