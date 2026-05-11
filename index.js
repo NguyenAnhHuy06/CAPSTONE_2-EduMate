@@ -20,6 +20,7 @@ const { generateQuizWithAI } = require("./generateQuizWithAI");
 const { getQuiz } = require("./quizService");
 const s3 = require("./s3Upload");
 const db = require("./db");
+require("./src/models/associations");
 const { ensureIndexedForQuiz } = require("./documentPipeline");
 const { setAsyncJobHooks } = require("./src/services/asyncJobStore");
 const { initRealtimeHub, emitToUser } = require("./src/services/realtimeHub");
@@ -539,6 +540,8 @@ app.post("/api/auth/register", async (req, res) => {
     otpStore.set(email, { code, expiresAt, purpose: "register" });
     await sendOtpEmail({ toEmail: email, code, purpose: "register" });
 
+    activityLog.logActivity(null, "register_attempt", `Registration attempt for: ${email}`, req.ip);
+
     return res.status(201).json({
       success: true,
       data: { otpRequired: true, purpose: "register" },
@@ -610,6 +613,8 @@ app.post("/api/auth/verify-otp", async (req, res) => {
         await db.markUserEmailVerified(row.user_id);
       }
     }
+    activityLog.logActivity(null, "verify_otp", `OTP verified for: ${email} (purpose: ${saved.purpose})`, req.ip);
+
     return res.status(200).json({
       success: true,
       message: "Verification completed.",
@@ -676,6 +681,9 @@ app.post("/api/auth/login", async (req, res) => {
     const token = jwt.sign({ sub: user.user_id, role: user.role }, authJwtSecret(), {
       expiresIn: "7d",
     });
+
+    activityLog.logActivity(user.user_id, "login", `User logged in: ${user.email}`, req.ip);
+
     return res.status(200).json({ success: true, token, user });
   } catch (err) {
     console.error("[api/auth/login]", err);
@@ -731,6 +739,8 @@ app.patch("/api/profile", async (req, res) => {
     });
     const row = await db.getUserById(bodyUid);
     const user = mapUserForClient(row);
+    activityLog.logActivity(bodyUid, "update_profile", `Updated profile information`, req.ip);
+
     return res.status(200).json({ success: true, data: user, message: "Profile updated." });
   } catch (err) {
     console.error("[api/profile PATCH]", err);
@@ -1426,6 +1436,8 @@ app.get("/api/documents/download-url", async (req, res) => {
     const url = await s3.getPresignedDownloadUrl(s3Key, 300);
     const fileName = path.basename(s3Key) || "document";
     recordDocumentDownload(rawDocumentId, s3Key);
+    activityLog.logActivity(getBearerUserId(req), "download_document", `Requested download for: ${fileName}`, req.ip);
+
     return res.status(200).json({
       success: true,
       data: { url, fileName },
@@ -2664,6 +2676,8 @@ app.post("/api/quiz/attempts", async (req, res) => {
         // ignore
       }
     }
+    activityLog.logActivity(userId, "finish_quiz", `Finished quiz: ${quizId} (Score: ${score})`, req.ip);
+
     return res.status(201).json({
       success: true,
       message: "Attempt result saved.",
@@ -2984,6 +2998,8 @@ async function handleQuizGenerate(req, res) {
         navigateReplace: payload.navigateReplace !== false,
       });
     }
+
+    activityLog.logActivity(createdBy, "generate_quiz", `Generated AI quiz: ${quizTitle}`, req.ip);
 
     return res.status(200).json({
       success: true,
@@ -3501,6 +3517,8 @@ app.post(
         downloads: 0,
         uploadedAt: new Date().toISOString(),
       };
+
+      activityLog.logActivity(resolvedUploaderId, "upload_document", `Uploaded document: ${row.title} (${row.category})`, req.ip);
 
       return res.status(201).json({
         success: true,

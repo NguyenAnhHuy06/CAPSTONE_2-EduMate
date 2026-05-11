@@ -8,6 +8,7 @@ const s3 = require("../services/s3Upload");
 const { extractDocumentText } = require("../services/extractDocumentText");
 const { runAsyncJob, getAsyncJob } = require("../services/asyncJobStore");
 const db = require("../config/teamDb");
+const { activityLogMiddleware } = require("../middleware/activityLog");
 
 const GENERATION_FAIL_MESSAGE = "Generation failed. Please try again.";
 
@@ -375,8 +376,8 @@ async function getGenerateFlashcardsAsyncStatus(req, res) {
 
 // Generate flashcards using AI
 // Public endpoint by design: FE can request generation before auth state is fully ready.
-router.post("/generate", auth, generateFlashcardsHandler);
-router.post("/generate-async", auth, startGenerateFlashcardsAsync);
+router.post("/generate", auth, activityLogMiddleware("generate_flashcards"), generateFlashcardsHandler);
+router.post("/generate-async", auth, activityLogMiddleware("generate_flashcards_async"), startGenerateFlashcardsAsync);
 router.get("/generate-status/:jobId", getGenerateFlashcardsAsyncStatus);
 // Defensive compatibility for accidental GET from legacy FE code.
 router.get("/generate", (req, res) => {

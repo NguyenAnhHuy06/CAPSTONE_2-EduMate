@@ -264,6 +264,24 @@ async function ensureCoursesTable() {
   }
 }
 
+async function ensureActivityLogsTable() {
+  const p = getPool();
+  try {
+    await p.execute(`
+      CREATE TABLE IF NOT EXISTS activity_logs (
+        log_id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NULL,
+        action VARCHAR(100) NOT NULL,
+        details TEXT NULL,
+        ip_address VARCHAR(45) NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+  } catch (err) {
+    console.warn("Could not ensure activity_logs table:", err.message);
+  }
+}
+
 async function initDb() {
   const p = getPool();
   await p.execute("SELECT 1");
@@ -284,6 +302,7 @@ async function initDb() {
   }
   try {
     await ensureUserProfileColumns();
+    await ensureActivityLogsTable();
   } catch (e) {
     console.warn("ensureUserProfileColumns (init):", e.message);
   }
