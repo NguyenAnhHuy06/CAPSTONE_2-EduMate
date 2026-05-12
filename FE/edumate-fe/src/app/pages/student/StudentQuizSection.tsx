@@ -127,6 +127,21 @@ function quizMatchesSearchQuery(quiz: Record<string, unknown>, rawQuery: string)
     return words.every((w) => hay.includes(w));
 }
 
+function isQuizMarkedDeleted(raw: any): boolean {
+    if (raw == null || typeof raw !== 'object') return false;
+    const r = raw as Record<string, unknown>;
+    const deletedFlags = [r.isDeleted, r.is_deleted, r.deleted];
+    if (deletedFlags.some((v) => v === true || v === 1 || String(v ?? '').toLowerCase() === 'true')) return true;
+
+    const deletedAt = String(r.deletedAt ?? r.deleted_at ?? '').trim();
+    if (deletedAt) return true;
+
+    const status = String(r.status ?? r.quizStatus ?? '').trim().toLowerCase();
+    if (['deleted', 'removed', 'archived', 'inactive'].includes(status)) return true;
+
+    return false;
+}
+
 type NormQuestionType = 'multiple-choice' | 'true-false' | 'short-answer';
 
 /** Raw option strings without assuming question type (for inference when API omits type). */
@@ -348,6 +363,80 @@ function toDisplayableMediaUrl(raw: string): string {
     return `${base}/questions/media/file?s3Key=${encodeURIComponent(s)}`;
 }
 
+function parseYoutubeVideoId(url: unknown): string {
+    const raw = String(url ?? '').trim();
+    if (!raw) return '';
+    try {
+        const u = new URL(raw.startsWith('//') ? `https:${raw}` : raw);
+        const host = u.hostname.toLowerCase().replace(/^www\./, '');
+        if (host === 'youtu.be') {
+            const id = u.pathname.replace(/^\/+/, '').split('/')[0]?.trim() || '';
+            return /^[a-zA-Z0-9_-]{6,}$/.test(id) ? id : '';
+        }
+        if (host.endsWith('youtube.com') || host.endsWith('youtube-nocookie.com')) {
+            const v = String(u.searchParams.get('v') || '').trim();
+            if (/^[a-zA-Z0-9_-]{6,}$/.test(v)) return v;
+            const parts = u.pathname.split('/').filter(Boolean);
+            if (parts.length >= 2 && (parts[0] === 'shorts' || parts[0] === 'embed')) {
+                const id = parts[1];
+                return /^[a-zA-Z0-9_-]{6,}$/.test(id) ? id : '';
+            }
+            if (parts.length >= 2 && parts[0] === 'live') {
+                const id = String(parts[1] || '').split('?')[0].trim();
+                return /^[a-zA-Z0-9_-]{6,}$/.test(id) ? id : '';
+            }
+        }
+    } catch {
+        // ignore
+    }
+    return '';
+}
+
+/**
+ * Student quiz: show YouTube title (oEmbed) + embed with native controls (volume lives in the player UI).
+ * YouTube still injects some overlays (share/watch-later) — not removable via iframe parameters.
+ */
+function YoutubeStudentEmbed({ videoId, mediaUrl }: { videoId: string; mediaUrl: string }) {
+    const [title, setTitle] = useState('');
+    useEffect(() => {
+        let cancelled = false;
+        const pageUrl = /^https?:\/\//i.test(String(mediaUrl || '').trim())
+            ? String(mediaUrl).trim()
+            : `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+        const oembed = `https://www.youtube.com/oembed?url=${encodeURIComponent(pageUrl)}&format=json`;
+        void fetch(oembed)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+                if (cancelled || !data || typeof data.title !== 'string') return;
+                const t = data.title.trim();
+                if (t) setTitle(t);
+            })
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+        };
+    }, [videoId, mediaUrl]);
+
+    const embedUrl = `https://www.youtube-nocookie.com/embed/${videoId}?autoplay=0&playsinline=1&rel=0&modestbranding=1&controls=1&iv_load_policy=3`;
+
+    return (
+        <div className="w-full overflow-hidden rounded border border-gray-200 bg-black">
+            <div className="border-b border-gray-800 bg-gray-950 px-3 py-2 text-sm font-medium leading-snug text-white">
+                <span className="line-clamp-2">{title || 'YouTube video'}</span>
+            </div>
+            <div className="bg-black">
+                <iframe
+                    title={title || 'YouTube video'}
+                    src={embedUrl}
+                    className="aspect-video min-h-[280px] w-full"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                    allowFullScreen
+                />
+            </div>
+        </div>
+    );
+}
+
 /** Some backends require Authorization for media; <img> cannot send headers — retry with fetch + blob. */
 function QuizQuestionMediaImg({ src }: { src: string }) {
     const [displaySrc, setDisplaySrc] = useState(src);
@@ -371,6 +460,9 @@ function QuizQuestionMediaImg({ src }: { src: string }) {
             const path = src.startsWith('http')
                 ? src
                 : `${typeof window !== 'undefined' ? window.location.origin : ''}${src.startsWith('/') ? '' : '/'}${src}`;
+            // Never fetch YouTube links from the browser (CORS). Use embed/thumbnail instead.
+            const youtubeId = parseYoutubeVideoId(path);
+            if (youtubeId) throw new Error('youtube');
             // Bearer on cross-origin S3 triggers CORS preflight; S3 does not answer it — never attach here for aws hosts.
             const isAwsHost = /^https?:\/\//i.test(path) && /amazonaws\.com/i.test(path);
             const isOurApiMedia =
@@ -410,6 +502,11 @@ function QuizQuestionMediaImg({ src }: { src: string }) {
                 attachment or check the server media configuration.
             </div>
         );
+    }
+
+    const youtubeId = parseYoutubeVideoId(src);
+    if (youtubeId) {
+        return <YoutubeStudentEmbed videoId={youtubeId} mediaUrl={String(src).trim()} />;
     }
 
     return (
@@ -893,7 +990,6 @@ export function StudentQuizSection({
     const [editedQuizzes, setEditedQuizzes] = useState<any[]>([]);
     const [practiceQuizzes, setPracticeQuizzes] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-    const [sharingResult, setSharingResult] = useState(false);
     const [resultComments, setResultComments] = useState<any[]>([]);
     const [highlightedS3Key, setHighlightedS3Key] = useState('');
     const availableCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -986,6 +1082,7 @@ export function StudentQuizSection({
             const cacheRows = readQuizResultCache();
             const uidStr = uid != null ? String(uid) : '';
             const rows = rowsRaw.filter((h: any) => {
+                if (isQuizMarkedDeleted(h)) return false;
                 if (!uidStr) return true;
                 const owner = h?.userId ?? h?.user_id ?? h?.ownerId ?? h?.studentId ?? h?.createdBy;
                 if (owner == null || owner === '') return true; // keep legacy rows with no owner info
@@ -1134,7 +1231,7 @@ export function StudentQuizSection({
             }
 
             const pubRows = Array.isArray(publishedData?.data) ? publishedData.data : [];
-            const mappedPublished = pubRows.map((h: any) => ({
+            const mappedPublished = pubRows.filter((h: any) => !isQuizMarkedDeleted(h)).map((h: any) => ({
                 id: h?.quizId || h?.id,
                 title: h?.title || 'Published Quiz',
                 subject: h?.courseCode || 'DOC',
@@ -1171,6 +1268,9 @@ export function StudentQuizSection({
             try {
                 const raw = localStorage.getItem(STUDENT_QUIZ_AUTOSTART_KEY);
                 if (!raw) return;
+                // Disable silent auto-open on page load; only start quiz when user clicks Take Quiz.
+                localStorage.removeItem(STUDENT_QUIZ_AUTOSTART_KEY);
+                return;
                 const payload = JSON.parse(raw);
                 const quizId = Number(payload?.quizId);
                 if (!Number.isFinite(quizId) || quizId <= 0) {
@@ -1454,20 +1554,6 @@ export function StudentQuizSection({
                 questions: finalQuestions,
                 passPercentage: Number(quiz.passPercentage ?? 70),
             };
-            try {
-                localStorage.setItem(
-                    STUDENT_QUIZ_AUTOSTART_KEY,
-                    JSON.stringify({
-                        quizId: persistedQuizId,
-                        title: generatedQuiz.title,
-                        duration: Number(generatedQuiz.duration || 10),
-                        passPercentage: Number(generatedQuiz.passPercentage ?? 70),
-                        updatedAt: Date.now(),
-                    })
-                );
-            } catch {
-                // ignore storage failures
-            }
 
             void recordAttemptStart(generatedQuiz.id);
             setSelectedQuiz(generatedQuiz);
@@ -1695,7 +1781,9 @@ export function StudentQuizSection({
                 phase: 'complete',
             });
             const payload = attemptRes?.data ?? attemptRes;
-            const serverGraded = payload?.result;
+            const responseData =
+                payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+            const serverGraded = responseData?.result ?? payload?.result;
             if (serverGraded && typeof serverGraded.score === 'number') {
                 const srvScore = Number(serverGraded.score);
                 const srvCorrect = Number(serverGraded.correct_count ?? result.correctAnswers);
@@ -1724,7 +1812,11 @@ export function StudentQuizSection({
                     return next;
                 });
             }
-            const createdAttemptId = payload?.attemptId ?? attemptRes?.attemptId ?? null;
+            const createdAttemptId =
+                responseData?.attemptId ??
+                payload?.attemptId ??
+                attemptRes?.attemptId ??
+                null;
             if (createdAttemptId != null) {
                 upsertQuizResultCache({
                     attemptId: Number(createdAttemptId),
@@ -2125,11 +2217,18 @@ export function StudentQuizSection({
                                 const fallbackDetailedAnswers = Array.isArray((quiz as any)?.answersSnapshot)
                                     ? (quiz as any).answersSnapshot
                                     : [];
+                                const fallbackStateAnswers =
+                                    Number((quizResult as any)?.quizId) === Number(quizId) &&
+                                    Array.isArray((quizResult as any)?.answers)
+                                        ? (quizResult as any).answers
+                                        : [];
                                 const normalizedAnswersResolved =
                                     normalizedAnswers.length > 0
                                         ? normalizedAnswers
                                         : fallbackDetailedAnswers.length > 0
                                             ? normalizeReviewAnswers(fallbackDetailedAnswers)
+                                            : fallbackStateAnswers.length > 0
+                                                ? normalizeReviewAnswers(fallbackStateAnswers)
                                             : fallbackUserAnswers
                                                 .map((sel: any, i: number) => ({
                                                     questionId: String((fullQuiz as any)?.questions?.[i]?.id ?? `q-${i + 1}`),
@@ -2140,6 +2239,7 @@ export function StudentQuizSection({
 
                                 if (
                                     normalizedAnswersResolved.length === 0 &&
+                                    (!Array.isArray((fullQuiz as any)?.questions) || (fullQuiz as any).questions.length === 0) &&
                                     (attemptId == null || attemptId === '') &&
                                     !resultUrl
                                 ) {
@@ -2508,78 +2608,6 @@ export function StudentQuizSection({
                 ? quizResult.answers
                 : answers;
 
-        const handleShareQuiz = async () => {
-            const qid = Number(selectedQuiz?.id);
-            const alreadyShared = Boolean((selectedQuiz as any)?.sharedForReview) || Boolean((selectedQuiz as any)?.sharedAt);
-            if (alreadyShared) {
-                showNotification({
-                    type: 'info',
-                    title: 'Share Quiz',
-                    message: 'This quiz has already been shared with lecturer.',
-                });
-                return;
-            }
-            if (!Number.isFinite(qid) || qid <= 0) {
-                showNotification({
-                    type: 'warning',
-                    title: 'Share Quiz',
-                    message: 'This quiz cannot be shared yet.',
-                });
-                return;
-            }
-            setSharingResult(true);
-            try {
-                const res: any = await api.post(`/quizzes/${qid}/share`, {});
-                if (res?.success === false) {
-                    showNotification({
-                        type: 'warning',
-                        title: 'Share Quiz',
-                        message: String(res?.message || 'Could not share quiz.'),
-                    });
-                    return;
-                }
-                showNotification({
-                    type: 'success',
-                    title: 'Quiz Shared',
-                    message: 'Đã share thành công.',
-                });
-                setSelectedQuiz((prev: any) =>
-                    prev
-                        ? {
-                            ...prev,
-                            sharedForReview: true,
-                            sharedAt: new Date().toISOString(),
-                        }
-                        : prev
-                );
-            } catch (err: any) {
-                const status = Number(err?.response?.status || 0);
-                if (status === 409) {
-                    showNotification({
-                        type: 'info',
-                        title: 'Share Quiz',
-                        message: 'Quiz này đã được share trước đó.',
-                    });
-                    setSelectedQuiz((prev: any) =>
-                        prev
-                            ? {
-                                ...prev,
-                                sharedForReview: true,
-                            }
-                            : prev
-                    );
-                    return;
-                }
-                showNotification({
-                    type: 'warning',
-                    title: 'Share Quiz',
-                    message: String(err?.response?.data?.message || 'Could not share quiz.'),
-                });
-            } finally {
-                setSharingResult(false);
-            }
-        };
-
         return (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                 <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
@@ -2813,19 +2841,6 @@ export function StudentQuizSection({
                     </div>
 
                     <div className="p-6 border-t border-gray-200 flex items-center gap-3">
-                        {(() => {
-                            const alreadyShared = Boolean((selectedQuiz as any)?.sharedForReview) || Boolean((selectedQuiz as any)?.sharedAt);
-                            return (
-                        <button
-                            type="button"
-                            onClick={handleShareQuiz}
-                            disabled={sharingResult || alreadyShared}
-                            className="flex-1 bg-white border border-blue-600 text-blue-600 py-3 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                            {alreadyShared ? 'Already Shared' : sharingResult ? 'Sharing...' : 'Share'}
-                        </button>
-                            );
-                        })()}
                         <button
                             onClick={() => {
                                 setShowResults(false);

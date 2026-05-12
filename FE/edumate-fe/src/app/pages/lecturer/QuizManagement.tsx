@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
     FileText,
@@ -16,7 +16,6 @@ import {
     X,
     Save,
     ArrowLeft,
-    ClipboardCheck,
     Lightbulb,
 } from 'lucide-react';
 import api, { getApiBaseUrl, getApiErrorMessage, getStoredAuthToken } from '@/services/api';
@@ -28,6 +27,84 @@ import {
 import { useNotification } from '../NotificationContext';
 import { formatDateTimeWithSeconds } from '@/utils/formatDateTime';
 const LETTERS = ['A', 'B', 'C', 'D'];
+
+function questionKeyForAttemptRow(q: any, idx: number): string {
+    return String(q?.id ?? q?.question_id ?? q?.questionId ?? `q-${idx + 1}`);
+}
+
+/** PATCH /grade keys must match `quiz_answers.question_id` — prefer id from the parallel answer row. */
+function gradeMarkKeyForUiRow(q: any, idx: number, answersArr: any[]): string {
+    const byIdx = Array.isArray(answersArr) ? answersArr[idx] : undefined;
+    const fromIdx = String(byIdx?.questionId ?? byIdx?.question_id ?? '').trim();
+    if (fromIdx) return fromIdx;
+    const want = String(q?.id ?? q?.question_id ?? q?.questionId ?? '').trim();
+    const byMatch =
+        want &&
+        (answersArr || []).find(
+            (a: any) => String(a?.questionId ?? a?.question_id ?? '').trim() === want
+        );
+    const fromMatch = String(byMatch?.questionId ?? byMatch?.question_id ?? '').trim();
+    if (fromMatch) return fromMatch;
+    return questionKeyForAttemptRow(q, idx);
+}
+
+/** Attempt id from GET /quizzes/:quizId/attempts row (camelCase or snake_case). */
+function resolvedAttemptListRowId(row: unknown): number | null {
+    if (row == null || typeof row !== 'object') return null;
+    const r = row as Record<string, unknown>;
+    const n = Number(r.attemptId ?? r.attempt_id ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function isShortAnswerAttemptQ(q: any): boolean {
+    const t = String(q?.type ?? q?.question_type ?? q?.questionType ?? '')
+        .toLowerCase()
+        .replace(/_/g, '-');
+    return t === 'short-answer' || t === 'shortanswer' || t === 'essay';
+}
+
+/** Initial Correct/Incorrect toggles from lecturer review payload. */
+function buildGradingMarksFromPayload(payload: any): Record<string, boolean> {
+    const questions = Array.isArray(payload?.questions) ? payload.questions : [];
+    const answersArr = Array.isArray(payload?.attempt?.answers)
+        ? payload.attempt.answers
+        : Array.isArray(payload?.answers)
+          ? payload.answers
+          : [];
+    const qMarks =
+        payload?.questionMarks != null &&
+        typeof payload.questionMarks === 'object' &&
+        !Array.isArray(payload.questionMarks)
+            ? (payload.questionMarks as Record<string, unknown>)
+            : {};
+    const next: Record<string, boolean> = {};
+    if (answersArr.length) {
+        answersArr.forEach((a: any) => {
+            const k = String(a?.questionId ?? a?.question_id ?? '').trim();
+            if (!k) return;
+            if (Object.prototype.hasOwnProperty.call(qMarks, k)) {
+                next[k] = Boolean(qMarks[k]);
+                return;
+            }
+            const ic = a?.is_correct ?? a?.isCorrect;
+            next[k] = ic === true || ic === 1 || ic === '1' || ic === 'true';
+        });
+        return next;
+    }
+    questions.forEach((q: any, idx: number) => {
+        const k = questionKeyForAttemptRow(q, idx);
+        if (Object.prototype.hasOwnProperty.call(qMarks, k)) {
+            next[k] = Boolean(qMarks[k]);
+            return;
+        }
+        const ans = answersArr.find(
+            (a: any) => String(a?.questionId ?? a?.question_id ?? '') === k
+        );
+        const ic = ans?.is_correct ?? ans?.isCorrect;
+        next[k] = ic === true || ic === 1 || ic === '1' || ic === 'true';
+    });
+    return next;
+}
 
 const LECTURER_QUIZ_GENERATING_KEY = 'edumate_lecturer_quiz_generating';
 const LECTURER_QUIZ_AUTOSTART_KEY = 'edumate_lecturer_quiz_autostart';
@@ -298,6 +375,35 @@ interface Quiz {
     sharedByEmail?: string;
 }
 
+/** If history refresh misses a quiz we just created (mock RAM / filter edge), keep the Draft tab non-empty. */
+function buildPlaceholderQuizAfterCreate(opts: {
+    id: number;
+    title: string;
+    subject: string;
+    status: 'draft' | 'published';
+    questionCount: number;
+}): Quiz {
+    const now = new Date().toISOString();
+    return {
+        id: opts.id,
+        title: String(opts.title || 'Quiz').trim() || 'Quiz',
+        subject: String(opts.subject || 'DOC').trim() || 'DOC',
+        documentTypeLabel: '',
+        documentCategory: '',
+        status: opts.status === 'published' ? 'published' : 'draft',
+        questions: Array.from({ length: Math.max(0, opts.questionCount) }),
+        duration: 10,
+        passPercentage: 70,
+        attemptsAllowed: '1',
+        participants: 0,
+        averageScore: 0,
+        createdDate: now,
+        publishedDate: opts.status === 'published' ? now.slice(0, 10) : undefined,
+        sharedForReview: false,
+        s3Key: '',
+    };
+}
+
 interface Question {
     id: number;
     question: string;
@@ -445,7 +551,6 @@ type QuizTab =
     | 'published'
     | 'shared'
     | 'analytics'
-    | 'grading'
     | 'question-bank'
     | 'create'
     | 'edit';
@@ -472,7 +577,6 @@ export function QuizManagement({
         'published',
         'shared',
         'analytics',
-        'grading',
         'question-bank',
         'create',
         'edit',
@@ -558,6 +662,7 @@ export function QuizManagement({
     const [editingQuestionId, setEditingQuestionId] = useState<number | null>(null);
     const [aiGeneratingQuizId, setAiGeneratingQuizId] = useState<number | null>(null);
     const [savingQuiz, setSavingQuiz] = useState(false);
+    const [savingQuizAction, setSavingQuizAction] = useState<'' | 'draft' | 'published'>('');
     const [loadingCloudData, setLoadingCloudData] = useState(false);
     const [loadingQuestionBank, setLoadingQuestionBank] = useState(false);
     const [loadingAnalytics, setLoadingAnalytics] = useState(false);
@@ -584,6 +689,8 @@ export function QuizManagement({
         {}
     );
     const [savingAttemptDetailGradeKey, setSavingAttemptDetailGradeKey] = useState<string>('');
+    const [attemptDetailMarks, setAttemptDetailMarks] = useState<Record<string, boolean>>({});
+    const [savingAttemptDetailMarks, setSavingAttemptDetailMarks] = useState(false);
     const [deletingQuiz, setDeletingQuiz] = useState(false);
     const [uploadingQuestionMedia, setUploadingQuestionMedia] = useState(false);
     const questionMediaInputRef = useRef<HTMLInputElement | null>(null);
@@ -605,17 +712,6 @@ export function QuizManagement({
         performance: [],
         challengingQuestions: [],
     });
-
-    /** Grading tab: load by attemptId, mark Correct/Incorrect, save via PATCH /quiz/attempts/:id/grade */
-    const [gradingAttemptInput, setGradingAttemptInput] = useState(() =>
-        String(initialParams.get('attemptId') || '').trim()
-    );
-    const [gradingDetail, setGradingDetail] = useState<any>(null);
-    const [gradingMarks, setGradingMarks] = useState<Record<string, boolean>>({});
-    const [loadingGrading, setLoadingGrading] = useState(false);
-    const [savingGrading, setSavingGrading] = useState(false);
-    /** Dedupe auto-load from URL vs manual «Load submission» / Analytics. */
-    const lastAutoLoadedGradingAttemptRef = useRef<number | null>(null);
 
     const setLecturerQuizGeneratingStatus = (
         status: 'running' | 'completed' | 'failed',
@@ -713,24 +809,37 @@ export function QuizManagement({
 
     const loadLecturerQuizzes = async () => {
         if (lecturerUserId == null || lecturerUserId === '') return;
+        const historyUserParam = (() => {
+            const raw = String(lecturerUserId ?? '').trim();
+            if (!raw) return lecturerUserId;
+            const n = Number(raw);
+            return Number.isFinite(n) ? n : lecturerUserId;
+        })();
         setLoadingCloudData(true);
         setLoadingAnalytics(true);
         try {
-            const [historyRes, sharedHistoryRes, publishedRes, docsRes, analyticsRes]: any[] = await Promise.all([
+            const settled = await Promise.allSettled([
                 api.get('/quizzes/history', {
-                    params: { userId: lecturerUserId, limit: 500, ownerOnly: true },
+                    params: { userId: historyUserParam, limit: 500, ownerOnly: true },
                 }),
                 api.get('/quizzes/history', {
                     params: { limit: 500 },
                 }),
                 api.get('/quizzes/published', {
-                    params: { userId: lecturerUserId, ownerOnly: true },
+                    params: { userId: historyUserParam, ownerOnly: true },
                 }),
                 api.get('/documents/for-quiz'),
                 api.get('/quizzes/analytics', {
-                    params: { userId: lecturerUserId, topQuestions: 5 },
+                    params: { userId: historyUserParam, topQuestions: 5 },
                 }),
             ]);
+            const pick = (i: number, fallback: any) =>
+                settled[i]?.status === 'fulfilled' ? (settled[i] as PromiseFulfilledResult<any>).value : fallback;
+            const historyRes = pick(0, { data: [] });
+            const sharedHistoryRes = pick(1, { data: [] });
+            const publishedRes = pick(2, { data: [] });
+            const docsRes = pick(3, { data: [] });
+            const analyticsRes = pick(4, {});
             const historyRowsRaw = Array.isArray(historyRes?.data) ? historyRes.data : [];
             const sharedHistoryRowsRaw = Array.isArray(sharedHistoryRes?.data) ? sharedHistoryRes.data : [];
             const publishedRowsRaw = Array.isArray(publishedRes?.data) ? publishedRes.data : [];
@@ -752,11 +861,29 @@ export function QuizManagement({
                     : [],
             });
             const s3ByNormalizedTitle = new Map<string, string>();
+            const s3ByDocumentId = new Map<number, string>();
             docs.forEach((d: any) => {
                 const k = String(d?.title || d?.fileName || '').trim().toLowerCase();
-                const v = String(d?.s3Key || '').trim();
+                const v = String(d?.s3Key || d?.storedFileName || '').trim();
                 if (k && v && !s3ByNormalizedTitle.has(k)) s3ByNormalizedTitle.set(k, v);
+                const id = Number(d?.id ?? d?.documentId ?? d?.document_id ?? 0);
+                if (Number.isFinite(id) && id > 0 && v && !s3ByDocumentId.has(id)) s3ByDocumentId.set(id, v);
             });
+            const resolveListRowS3Key = (q: any): string => {
+                const direct = String(q?.s3Key || q?.sourceKey || q?.storedFileName || '').trim();
+                if (direct) return direct;
+                const titleK = String(q?.title || '').trim().toLowerCase();
+                if (titleK) {
+                    const hit = s3ByNormalizedTitle.get(titleK);
+                    if (hit) return hit;
+                }
+                const did = Number(q?.documentId ?? q?.document_id ?? 0);
+                if (Number.isFinite(did) && did > 0) {
+                    const hit = s3ByDocumentId.get(did);
+                    if (hit) return hit;
+                }
+                return '';
+            };
             const mappedHistory: Quiz[] = rows.map((q: any) => ({
                 id: Number(q?.quizId || q?.id || 0),
                 title: String(q?.title || 'Quiz'),
@@ -767,10 +894,7 @@ export function QuizManagement({
                         ? String(q.documentCategory).trim()
                         : '',
                 documentId: Number(q?.documentId || 0) || undefined,
-                s3Key:
-                    String(q?.s3Key || q?.sourceKey || '').trim() ||
-                    s3ByNormalizedTitle.get(String(q?.title || '').trim().toLowerCase()) ||
-                    '',
+                s3Key: resolveListRowS3Key(q),
                 status: q?.isPublished || q?.publishedAt ? 'published' : 'draft',
                 questions: Array.from({ length: Number(q?.questionCount || 0) }),
                 duration: 10,
@@ -845,7 +969,7 @@ export function QuizManagement({
                         ? String(q.documentCategory).trim()
                         : '',
                 documentId: Number(q?.documentId || 0) || undefined,
-                s3Key: String(q?.s3Key || q?.sourceKey || '').trim(),
+                s3Key: resolveListRowS3Key(q),
                 status: q?.isPublished || q?.publishedAt ? 'published' : 'draft',
                 questions: Array.from({ length: Number(q?.questionCount || 0) }),
                 duration: 10,
@@ -918,7 +1042,7 @@ export function QuizManagement({
                         ? String(q.documentCategory).trim()
                         : '',
                 documentId: Number(q?.documentId || 0) || undefined,
-                s3Key: String(q?.s3Key || q?.sourceKey || '').trim(),
+                s3Key: resolveListRowS3Key(q),
                 status: 'published',
                 questions: Array.from({ length: Number(q?.questionCount || 0) }),
                 duration: 10,
@@ -1097,16 +1221,6 @@ export function QuizManagement({
         }
     };
 
-    const isShortAnswerAttemptQ = (q: any) => {
-        const t = String(q?.type ?? q?.question_type ?? q?.questionType ?? '')
-            .toLowerCase()
-            .replace(/_/g, '-');
-        return t === 'short-answer' || t === 'shortanswer' || t === 'essay';
-    };
-
-    const questionKeyForAttemptRow = (q: any, idx: number) =>
-        String(q?.id ?? q?.question_id ?? q?.questionId ?? `q-${idx + 1}`);
-
     const openStudentAttemptsModal = async (quizId: number, title: string) => {
         if (lecturerUserId == null || lecturerUserId === '') {
             showNotification({
@@ -1122,6 +1236,7 @@ export function QuizManagement({
         setStudentAttemptDetail(null);
         setStudentAttemptDetailId(null);
         setAttemptDetailGrades({});
+        setAttemptDetailMarks({});
         setStudentAttemptsOpen(true);
         setLoadingStudentAttempts(true);
         try {
@@ -1154,6 +1269,7 @@ export function QuizManagement({
         setStudentAttemptDetail(null);
         setStudentAttemptDetailId(null);
         setAttemptDetailGrades({});
+        setAttemptDetailMarks({});
     };
 
     const openStudentAttemptDetail = async (attemptId: number) => {
@@ -1171,12 +1287,14 @@ export function QuizManagement({
                 if (k) next[k] = { score: String(g?.score ?? ''), feedback: String(g?.feedback ?? '') };
             });
             setAttemptDetailGrades(next);
+            setAttemptDetailMarks(buildGradingMarksFromPayload(payload));
         } catch {
             showNotification({
                 type: 'error',
                 title: 'Attempt detail',
                 message: 'Could not load this attempt.',
             });
+            setAttemptDetailMarks({});
             setStudentAttemptsStep('list');
         } finally {
             setLoadingStudentAttemptDetail(false);
@@ -1228,122 +1346,62 @@ export function QuizManagement({
         }
     };
 
-    const loadGradingReview = useCallback(
-        async (attemptIdNum: number) => {
-            if (lecturerUserId == null || lecturerUserId === '') {
-                showNotification({
-                    type: 'warning',
-                    title: 'Grading',
-                    message: 'Lecturer account is not available. Please sign in again.',
-                });
-                return;
-            }
-            setLoadingGrading(true);
-            try {
-                const payload = await fetchLecturerReviewForGrading(attemptIdNum, lecturerUserId);
-                lastAutoLoadedGradingAttemptRef.current = attemptIdNum;
-                setGradingDetail(payload);
-                const questions = Array.isArray(payload?.questions) ? payload.questions : [];
-                const answersArr = Array.isArray(payload?.attempt?.answers) ? payload.attempt.answers : [];
-                const qMarks =
-                    payload?.questionMarks != null &&
-                    typeof payload.questionMarks === 'object' &&
-                    !Array.isArray(payload.questionMarks)
-                        ? (payload.questionMarks as Record<string, unknown>)
-                        : {};
-                const next: Record<string, boolean> = {};
-                questions.forEach((q: any, idx: number) => {
-                    const k = questionKeyForAttemptRow(q, idx);
-                    if (Object.prototype.hasOwnProperty.call(qMarks, k)) {
-                        next[k] = Boolean(qMarks[k]);
-                        return;
-                    }
-                    const ans = answersArr.find(
-                        (a: any) => String(a?.questionId ?? a?.question_id ?? '') === k
-                    );
-                    const ic = ans?.is_correct ?? ans?.isCorrect;
-                    next[k] = ic === true || ic === 1 || ic === '1' || ic === 'true';
-                });
-                setGradingMarks(next);
-            } catch {
-                setGradingDetail(null);
-                setGradingMarks({});
-                showNotification({
-                    type: 'error',
-                    title: 'Grading',
-                    message: 'Could not load this submission. Check the attempt ID and try again.',
-                });
-            } finally {
-                setLoadingGrading(false);
-            }
-        },
-        [lecturerUserId, showNotification]
-    );
-
-    const saveGradingMarks = async () => {
-        const attemptId = Number(String(gradingAttemptInput || '').trim());
+    const saveAttemptDetailMarks = async () => {
+        const attemptId = Number(studentAttemptDetailId || 0);
         if (!Number.isFinite(attemptId) || attemptId <= 0) {
             showNotification({
                 type: 'warning',
-                title: 'Grading',
-                message: 'Enter a valid numeric attempt ID.',
+                title: 'Question marks',
+                message: 'No attempt loaded.',
             });
             return;
         }
         if (lecturerUserId == null || lecturerUserId === '') return;
-        const items = Object.entries(gradingMarks).map(([questionId, markedCorrect]) => ({
-            questionId,
-            markedCorrect,
-        }));
+        const attempt = studentAttemptDetail?.attempt;
+        const answersForAllow = Array.isArray(attempt?.answers) ? attempt.answers : [];
+        const allowedQuestionKeys = new Set<string>();
+        for (const a of answersForAllow) {
+            const k = String(a?.questionId ?? a?.question_id ?? '').trim();
+            if (k) allowedQuestionKeys.add(k);
+        }
+        if (!allowedQuestionKeys.size) {
+            const questions = Array.isArray(studentAttemptDetail?.questions) ? studentAttemptDetail.questions : [];
+            questions.forEach((q: any, idx: number) => {
+                allowedQuestionKeys.add(questionKeyForAttemptRow(q, idx));
+            });
+        }
+        const items = Object.entries(attemptDetailMarks)
+            .filter(([qid]) => allowedQuestionKeys.has(String(qid).trim()))
+            .map(([questionId, markedCorrect]) => ({ questionId, markedCorrect }));
         if (!items.length) {
             showNotification({
                 type: 'warning',
-                title: 'Grading',
-                message: 'Load a submission before saving.',
+                title: 'Question marks',
+                message: 'No marks to save for the loaded questions. Open the attempt again if the list was empty.',
             });
             return;
         }
-        setSavingGrading(true);
+        setSavingAttemptDetailMarks(true);
         try {
             await patchQuizAttemptGrade(attemptId, items, lecturerUserId);
             showNotification({
                 type: 'success',
-                title: 'Grading',
+                title: 'Question marks',
                 message: 'Marks saved successfully.',
             });
-            await loadGradingReview(attemptId);
+            const payload = await fetchLecturerReviewForGrading(attemptId, lecturerUserId);
+            setStudentAttemptDetail(payload);
+            setAttemptDetailMarks(buildGradingMarksFromPayload(payload));
         } catch {
             showNotification({
                 type: 'error',
-                title: 'Grading',
+                title: 'Question marks',
                 message: 'Could not save grades. Please try again.',
             });
         } finally {
-            setSavingGrading(false);
+            setSavingAttemptDetailMarks(false);
         }
     };
-
-    const openGradingTabForAttempt = (attemptId: number) => {
-        lastAutoLoadedGradingAttemptRef.current = attemptId;
-        setGradingAttemptInput(String(attemptId));
-        setActiveTab('grading');
-        closeStudentAttemptsModal();
-        void loadGradingReview(attemptId);
-    };
-
-    useEffect(() => {
-        if (activeTab !== 'grading') {
-            lastAutoLoadedGradingAttemptRef.current = null;
-            return;
-        }
-        const params = new URLSearchParams(location.search);
-        const id = Number(String(params.get('attemptId') || '').trim());
-        if (!Number.isFinite(id) || id <= 0) return;
-        if (lastAutoLoadedGradingAttemptRef.current === id) return;
-        lastAutoLoadedGradingAttemptRef.current = id;
-        setGradingAttemptInput(String(id));
-        void loadGradingReview(id);
-    }, [activeTab, location.search, loadGradingReview]);
 
     const mapApiRowToQuestion = (row: any, i: number): Question => {
         const t = String(row?.type || 'multiple-choice');
@@ -1399,12 +1457,12 @@ export function QuizManagement({
     };
 
     const loadQuestionBankFromApi = async (opts?: { merge?: boolean }): Promise<Question[]> => {
-        if (lecturerUserId == null || lecturerUserId === '') return [];
         const merge = opts?.merge === true;
+        const bankUserId = Number(String(lecturerUserId ?? '').trim());
         setLoadingQuestionBank(true);
         try {
             const res: any = await api.get('/questions/bank', {
-                params: { userId: lecturerUserId },
+                params: Number.isFinite(bankUserId) ? { userId: bankUserId } : {},
             });
             const rows = Array.isArray(res?.data) ? res.data : [];
             const mapped = rows.map((row: any, i: number) => mapApiRowToQuestion(row, i));
@@ -1484,6 +1542,23 @@ export function QuizManagement({
         return `${yyyy}-${p(mm)}-${p(dd)}T${p(hh)}:${p(mi)}`;
     };
 
+    const formatScheduleInput = (raw: string): string => {
+        const t = String(raw || '');
+        if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(t.trim())) return t.trim().slice(0, 16);
+        const digits = t.replace(/[^\d]/g, '').slice(0, 12); // ddmmyyyyhhmm
+        const dd = digits.slice(0, 2);
+        const mm = digits.slice(2, 4);
+        const yyyy = digits.slice(4, 8);
+        const hh = digits.slice(8, 10);
+        const mi = digits.slice(10, 12);
+        let out = dd;
+        if (digits.length > 2) out += `/${mm}`;
+        if (digits.length > 4) out += `/${yyyy}`;
+        if (digits.length > 8) out += ` ${hh}`;
+        if (digits.length > 10) out += `:${mi}`;
+        return out;
+    };
+
     const validateQuizFormMeta = (): string | null => {
         if (!quizForm.title?.trim()) {
             return 'Quiz title is required.';
@@ -1554,14 +1629,10 @@ export function QuizManagement({
         else params.delete('page');
         if (selectedId && selectedId > 0) params.set('selectedId', String(selectedId));
         else params.delete('selectedId');
-        if (activeTab === 'grading' && gradingAttemptInput.trim()) {
-            params.set('attemptId', gradingAttemptInput.trim());
-        } else {
-            params.delete('attemptId');
-        }
+        params.delete('attemptId');
         const next = `${window.location.pathname}?${params.toString()}${window.location.hash || ''}`;
         window.history.replaceState(null, '', next);
-    }, [activeTab, searchQuery, filterSubject, filterStatus, sortBy, page, selectedId, gradingAttemptInput]);
+    }, [activeTab, searchQuery, filterSubject, filterStatus, sortBy, page, selectedId]);
 
     useEffect(() => {
         if (restoreScrollYRef.current == null) return;
@@ -1582,6 +1653,7 @@ export function QuizManagement({
             showNotification({ type: 'warning', title: 'Quiz form', message: metaErr });
             return;
         }
+        setSavingQuizAction(status);
         const payloadQuestions = buildBackendQuestionsFromSelection();
         if (!payloadQuestions.length) {
             showNotification({
@@ -1597,11 +1669,10 @@ export function QuizManagement({
             const createdRes: any = await api.post('/quizzes', {
                 userId: lecturerUserId,
                 title: quizForm.title,
+                courseCode: quizForm.subject?.trim() || undefined,
                 questions: payloadQuestions,
                 status,
             });
-            await loadLecturerQuizzes();
-            await loadQuestionBankFromApi({ merge: true });
             const newQuizId = Number(
                 createdRes?.id ??
                     createdRes?.quizId ??
@@ -1609,6 +1680,23 @@ export function QuizManagement({
                     createdRes?.data?.quizId ??
                     0
             );
+            await loadLecturerQuizzes();
+            if (Number.isFinite(newQuizId) && newQuizId > 0) {
+                setQuizzes((prev) => {
+                    if (prev.some((q) => Number(q.id) === newQuizId)) return prev;
+                    return [
+                        buildPlaceholderQuizAfterCreate({
+                            id: newQuizId,
+                            title: quizForm.title,
+                            subject: quizForm.subject || 'DOC',
+                            status,
+                            questionCount: payloadQuestions.length,
+                        }),
+                        ...prev,
+                    ];
+                });
+            }
+            await loadQuestionBankFromApi({ merge: true });
             resetQuizForm();
             setEditingQuizId(null);
             showNotification({
@@ -1639,14 +1727,15 @@ export function QuizManagement({
                     navigate('/?tab=draft', { replace: true, state: { instructorMainTab: 'quizzes' as const } });
                 }
             }
-        } catch {
+        } catch (err: unknown) {
             showNotification({
                 type: 'error',
                 title: 'Create quiz',
-                message: 'Unable to create quiz right now.',
+                message: getApiErrorMessage(err) || 'Unable to create quiz right now.',
             });
         } finally {
             setSavingQuiz(false);
+            setSavingQuizAction('');
         }
     };
 
@@ -1712,6 +1801,7 @@ export function QuizManagement({
             showNotification({ type: 'warning', title: 'Quiz form', message: metaErr });
             return;
         }
+        setSavingQuizAction(status);
 
         const payloadQuestions = buildBackendQuestionsFromSelection();
         if (!payloadQuestions.length) {
@@ -1730,6 +1820,7 @@ export function QuizManagement({
             await api.patch(`/quizzes/${editingQuizId}`, {
                 userId: lecturerUserId,
                 title: quizForm.title,
+                courseCode: quizForm.subject?.trim() || undefined,
                 questions: payloadQuestions,
             });
             if (status === 'published') {
@@ -1768,14 +1859,15 @@ export function QuizManagement({
                 title: 'Update quiz',
                 message: status === 'published' ? 'Quiz updated and published successfully!' : 'Draft updated successfully!',
             });
-        } catch {
+        } catch (err: unknown) {
             showNotification({
                 type: 'error',
                 title: 'Update quiz',
-                message: 'Unable to save quiz changes right now.',
+                message: getApiErrorMessage(err) || 'Unable to save quiz changes right now.',
             });
         } finally {
             setSavingQuiz(false);
+            setSavingQuizAction('');
         }
     };
 
@@ -2218,14 +2310,6 @@ export function QuizManagement({
     const handleGenerateAndEditWithAI = async (quiz: Quiz) => {
         try {
             const s3Key = String(quiz?.s3Key || '').trim();
-            if (!s3Key) {
-                showNotification({
-                    type: 'warning',
-                    title: 'Generate AI quiz',
-                    message: 'This document is not ready for AI generation right now.',
-                });
-                return;
-            }
             const createdBy = Number(lecturerUserId);
             if (!Number.isFinite(createdBy) || createdBy <= 0) {
                 showNotification({
@@ -2244,7 +2328,7 @@ export function QuizManagement({
                 const res: any = await api.post(
                     '/quiz/generate',
                     {
-                        s3Key,
+                        ...(s3Key ? { s3Key } : {}),
                         quizId: quiz.id > 0 ? quiz.id : undefined,
                         documentId: quiz.documentId,
                         persist: true,
@@ -2619,15 +2703,24 @@ export function QuizManagement({
 
     // Question CRUD Operations
     const handleAddQuestion = async () => {
+        if (!String(questionForm.question || '').trim()) {
+            showNotification({
+                type: 'warning',
+                title: 'Question bank',
+                message: 'Enter the question text.',
+            });
+            return;
+        }
+        const bankUid = Number(String(lecturerUserId ?? '').trim());
         try {
             await api.post('/questions/bank', {
-                userId: lecturerUserId,
+                ...(Number.isFinite(bankUid) ? { userId: bankUid } : {}),
                 question: questionForm.question,
                 type: questionForm.type,
                 topic: questionForm.topic,
                 category: questionForm.category || undefined,
                 difficulty: questionForm.difficulty,
-                options: questionForm.type === 'multiple-choice' ? questionForm.options.filter(o => o) : undefined,
+                options: questionForm.type === 'multiple-choice' ? questionForm.options.filter((o) => o) : undefined,
                 correctAnswer: normalizeCorrectAnswerForSubmit(questionForm),
                 mediaUrl: String(questionForm.mediaUrl || '').trim() || undefined,
                 explanation: String(questionForm.explanation || '').trim() || undefined,
@@ -2640,11 +2733,11 @@ export function QuizManagement({
                 title: 'Question bank',
                 message: 'Question added successfully!',
             });
-        } catch {
+        } catch (err: unknown) {
             showNotification({
                 type: 'error',
                 title: 'Question bank',
-                message: 'Unable to add question right now.',
+                message: getApiErrorMessage(err) || 'Unable to add question right now.',
             });
         }
     };
@@ -2682,15 +2775,16 @@ export function QuizManagement({
             });
             return;
         }
+        const bankUid = Number(String(lecturerUserId ?? '').trim());
         try {
             await api.patch(`/questions/bank/${editingQuestionId}`, {
-                userId: lecturerUserId,
+                ...(Number.isFinite(bankUid) ? { userId: bankUid } : {}),
                 question: questionForm.question,
                 type: questionForm.type,
                 topic: questionForm.topic,
                 category: questionForm.category || undefined,
                 difficulty: questionForm.difficulty,
-                options: questionForm.type === 'multiple-choice' ? questionForm.options.filter(o => o) : undefined,
+                options: questionForm.type === 'multiple-choice' ? questionForm.options.filter((o) => o) : undefined,
                 correctAnswer: normalizeCorrectAnswerForSubmit(questionForm),
                 mediaUrl: String(questionForm.mediaUrl || '').trim() || undefined,
                 explanation: String(questionForm.explanation || '').trim() || undefined,
@@ -2704,11 +2798,11 @@ export function QuizManagement({
                 title: 'Question bank',
                 message: 'Question updated successfully!',
             });
-        } catch {
+        } catch (err: unknown) {
             showNotification({
                 type: 'error',
                 title: 'Question bank',
-                message: 'Unable to update question right now.',
+                message: getApiErrorMessage(err) || 'Unable to update question right now.',
             });
         }
     };
@@ -2730,9 +2824,10 @@ export function QuizManagement({
             });
             return;
         }
+        const bankUid = Number(String(lecturerUserId ?? '').trim());
         try {
             await api.delete(`/questions/bank/${selectedItem.id}`, {
-                params: { userId: lecturerUserId },
+                params: Number.isFinite(bankUid) ? { userId: bankUid } : {},
             });
             setQuestionBank((prev) => prev.filter((q) => q.id !== selectedItem.id));
             // After deletion, replace local list with server truth (no merge),
@@ -2873,8 +2968,9 @@ export function QuizManagement({
     };
 
     const updateScheduleField = (field: 'startDate' | 'endDate', displayValue: string) => {
-        setScheduleDisplay((prev) => ({ ...prev, [field]: displayValue }));
-        const parsed = parseDisplayDateTimeToIso(displayValue);
+        const formatted = formatScheduleInput(displayValue);
+        setScheduleDisplay((prev) => ({ ...prev, [field]: formatted }));
+        const parsed = parseDisplayDateTimeToIso(formatted);
         if (parsed === '') {
             setQuizForm((prev) => ({ ...prev, [field]: '' }));
             return;
@@ -3581,6 +3677,25 @@ export function QuizManagement({
                                             }}
                                         />
                                     </div>
+                                    <p className="text-xs text-gray-500 mb-1">
+                                        Or paste a YouTube link or a direct URL to an image or video file.
+                                    </p>
+                                    <input
+                                        type="text"
+                                        value={questionForm.mediaUrl}
+                                        onChange={(e) => {
+                                            const mediaUrl = e.target.value;
+                                            setQuestionForm({ ...questionForm, mediaUrl });
+                                            setQuestionMediaPreviewUrl((prev) => {
+                                                if (prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+                                                return '';
+                                            });
+                                        }}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                        placeholder="https://www.youtube.com/watch?v=… or https://youtu.be/…"
+                                        autoComplete="off"
+                                        spellCheck={false}
+                                    />
                                     {String(questionMediaPreviewUrl || questionForm.mediaUrl || '').trim() && (
                                         <div className="mt-3 rounded-lg border border-gray-200 p-3 bg-gray-50">
                                             <p className="text-xs text-gray-500 mb-2">Preview</p>
@@ -3657,6 +3772,10 @@ export function QuizManagement({
                                 {questionForm.type === 'multiple-choice' && (
                                     <div>
                                         <label className="block text-gray-700 mb-2">Options</label>
+                                        <p className="text-xs text-gray-500 mb-2">
+                                            Only the question text is required. If you leave blanks, the server fills at
+                                            least two choices and defaults the correct answer to A until you edit them.
+                                        </p>
                                         <div className="space-y-2">
                                             {questionForm.options.map((option, idx) => (
                                                 <div key={idx} className="flex items-center gap-2">
@@ -3811,6 +3930,66 @@ export function QuizManagement({
                                                     </span>
                                                 </div>
                                                 <p className="text-gray-900">{question?.question ?? ''}</p>
+                                                {(() => {
+                                                    const mediaRaw = String(
+                                                        question?.mediaUrl ?? (question as { media_url?: string })?.media_url ?? ''
+                                                    ).trim();
+                                                    if (!mediaRaw) return null;
+                                                    const mediaSrc = normalizeMediaPreviewUrl(mediaRaw);
+                                                    const youtubeId = parseYoutubeVideoId(mediaRaw);
+                                                    return (
+                                                        <div className="mt-2 max-w-md rounded-lg border border-gray-200 bg-gray-50 p-2">
+                                                            <p className="text-[11px] text-gray-500 mb-1">Media</p>
+                                                            {youtubeId ? (
+                                                                <a
+                                                                    href={mediaRaw}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    aria-label="Open YouTube preview"
+                                                                    className="block overflow-hidden rounded-md border border-gray-200 bg-black"
+                                                                >
+                                                                    <img
+                                                                        src={`https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg`}
+                                                                        alt="YouTube thumbnail"
+                                                                        className="h-20 w-full object-cover opacity-95 hover:opacity-100"
+                                                                    />
+                                                                </a>
+                                                            ) : isLikelyImageMedia(mediaRaw) ? (
+                                                                <img
+                                                                    src={mediaSrc}
+                                                                    alt="Question media"
+                                                                    className="max-h-24 w-auto rounded border border-gray-200 object-contain bg-white"
+                                                                    onError={(e) => {
+                                                                        const img = e.currentTarget;
+                                                                        const cur = String(img.getAttribute('src') || '').trim();
+                                                                        if (mediaRaw && cur !== mediaRaw) {
+                                                                            img.setAttribute('src', mediaRaw);
+                                                                            return;
+                                                                        }
+                                                                        img.style.display = 'none';
+                                                                    }}
+                                                                />
+                                                            ) : isLikelyVideoMedia(mediaRaw) ? (
+                                                                <video
+                                                                    src={mediaSrc}
+                                                                    controls
+                                                                    muted
+                                                                    playsInline
+                                                                    className="max-h-24 w-full rounded border border-gray-200 bg-black"
+                                                                />
+                                                            ) : (
+                                                                <a
+                                                                    href={mediaRaw}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    className="text-sm text-blue-600 hover:underline break-all"
+                                                                >
+                                                                    {mediaRaw.length > 80 ? `${mediaRaw.slice(0, 80)}…` : mediaRaw}
+                                                                </a>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         </div>
                                     </div>
@@ -4368,207 +4547,6 @@ export function QuizManagement({
         );
     };
 
-    const renderGrading = () => {
-        const detail = gradingDetail;
-        const attempt = detail?.attempt;
-        const questions = Array.isArray(detail?.questions) ? detail.questions : [];
-        const answersArr = Array.isArray(attempt?.answers) ? attempt.answers : [];
-        return (
-            <div>
-                <h2 className="mb-2">Grade by attempt</h2>
-                <p className="text-sm text-gray-600 mb-4 max-w-3xl">
-                    Load a student&apos;s submitted quiz, choose <strong>Correct</strong> or <strong>Incorrect</strong>{' '}
-                    for each question, then save. Your choices update how this attempt is marked.
-                </p>
-                <ol className="text-sm text-gray-600 mb-6 max-w-3xl list-decimal list-inside space-y-2">
-                    <li>
-                        Easiest: go to <strong>Analytics</strong>, pick a quiz, click <strong>View / grade</strong>, then{' '}
-                        <strong>Open Grading tab</strong> next to a student — the attempt loads here automatically.
-                    </li>
-                    <li>
-                        Or type the <strong>attempt number</strong> yourself (the ID shown when a student finishes the
-                        quiz, or that someone shares with you), then click <strong>Load submission</strong>.
-                    </li>
-                    <li>
-                        This screen stays blank until you load an attempt. That&apos;s normal if you haven&apos;t entered
-                        an ID yet or clicked load from Analytics.
-                    </li>
-                </ol>
-
-                <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 flex flex-wrap items-end gap-3">
-                    <div className="min-w-[200px] flex-1">
-                        <label htmlFor="grading-attempt-id" className="block text-sm font-medium text-gray-700 mb-1">
-                            Attempt ID
-                        </label>
-                        <input
-                            id="grading-attempt-id"
-                            type="text"
-                            inputMode="numeric"
-                            placeholder="e.g. 12"
-                            value={gradingAttemptInput}
-                            onChange={(e) => setGradingAttemptInput(e.target.value)}
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-                        />
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => {
-                            const id = Number(String(gradingAttemptInput || '').trim());
-                            if (!Number.isFinite(id) || id <= 0) {
-                                showNotification({
-                                    type: 'warning',
-                                    title: 'Grading',
-                                    message: 'Enter a valid numeric attempt ID.',
-                                });
-                                return;
-                            }
-                            void loadGradingReview(id);
-                        }}
-                        disabled={loadingGrading}
-                        className="px-5 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-60"
-                    >
-                        {loadingGrading ? 'Loading…' : 'Load submission'}
-                    </button>
-                </div>
-
-                {loadingGrading && (
-                    <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-blue-700">
-                        Loading grading data…
-                    </div>
-                )}
-
-                {attempt && !loadingGrading ? (
-                    <div className="space-y-4">
-                        <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 text-sm">
-                            <p className="font-medium text-gray-900">{String(detail?.quizTitle || 'Quiz')}</p>
-                            <p className="mt-1 text-gray-600">
-                                Score: <strong>{Number(attempt?.scorePercent ?? 0)}%</strong>
-                                {' · '}
-                                Correct / total:{' '}
-                                <strong>
-                                    {Number(attempt?.correctCount ?? 0)} / {Number(attempt?.totalQuestions ?? 0)}
-                                </strong>
-                            </p>
-                        </div>
-
-                        <div className="flex flex-wrap justify-end gap-2 mb-2">
-                            <button
-                                type="button"
-                                onClick={() => void saveGradingMarks()}
-                                disabled={savingGrading || !questions.length}
-                                className="px-5 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-60"
-                            >
-                                {savingGrading ? 'Saving…' : 'Save grades'}
-                            </button>
-                        </div>
-
-                        {questions.map((q: any, idx: number) => {
-                            const qKey = questionKeyForAttemptRow(q, idx);
-                            const ans = answersArr.find(
-                                (a: any) => String(a?.questionId ?? a?.question_id ?? '') === qKey
-                            );
-                            const studentText = formatStudentAnswerForLecturerDisplay(ans);
-                            const marked = gradingMarks[qKey] === true;
-                            return (
-                                <div
-                                    key={qKey}
-                                    className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
-                                >
-                                    <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
-                                        <p className="text-sm font-medium text-gray-900">
-                                            Question {idx + 1}
-                                            <span className="ml-2 font-normal text-gray-500">
-                                                ({String(q?.type ?? q?.question_type ?? 'mcq').replace(/_/g, '-')})
-                                            </span>
-                                        </p>
-                                        <div className="flex rounded-lg border border-gray-300 overflow-hidden shrink-0">
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    setGradingMarks((prev) => ({ ...prev, [qKey]: true }))
-                                                }
-                                                className={`px-4 py-2 text-sm font-medium transition-colors ${
-                                                    marked
-                                                        ? 'bg-emerald-600 text-white'
-                                                        : 'bg-white text-gray-600 hover:bg-gray-50'
-                                                }`}
-                                            >
-                                                Correct
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() =>
-                                                    setGradingMarks((prev) => ({ ...prev, [qKey]: false }))
-                                                }
-                                                className={`px-4 py-2 text-sm font-medium border-l border-gray-300 transition-colors ${
-                                                    !marked
-                                                        ? 'bg-red-600 text-white'
-                                                        : 'bg-white text-gray-600 hover:bg-gray-50'
-                                                }`}
-                                            >
-                                                Incorrect
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <p className="text-gray-800 mb-2">{String(q?.question ?? q?.question_text ?? '')}</p>
-                                    <p className="text-sm text-gray-600">
-                                        Student answer:{' '}
-                                        <span className="text-gray-900">{studentText || '—'}</span>
-                                    </p>
-                                    {String(q?.explanation ?? q?.Explanation ?? '').trim() ? (
-                                        <details className="mt-4 overflow-hidden rounded-r-lg border border-slate-200/90 border-l-[3px] border-l-indigo-500 bg-gradient-to-br from-slate-50/90 to-white shadow-sm ring-1 ring-slate-900/[0.06] [&[open]_summary_.expl-chevron]:rotate-90">
-                                            <summary className="cursor-pointer list-none px-4 py-3.5 transition-colors hover:bg-slate-50/80 [&::-webkit-details-marker]:hidden">
-                                                <div className="flex items-start gap-3">
-                                                    <span
-                                                        className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 ring-1 ring-indigo-600/10"
-                                                        aria-hidden
-                                                    >
-                                                        <Lightbulb className="h-4 w-4" strokeWidth={2} />
-                                                    </span>
-                                                    <div className="min-w-0 flex-1 pt-1">
-                                                        <span className="text-sm font-semibold tracking-tight text-slate-900">
-                                                            Explanation
-                                                        </span>
-                                                    </div>
-                                                    <span
-                                                        className="expl-chevron mt-1.5 inline-block shrink-0 text-slate-400 transition-transform duration-200"
-                                                        aria-hidden
-                                                    >
-                                                        ▶
-                                                    </span>
-                                                </div>
-                                            </summary>
-                                            <div className="border-t border-slate-100 bg-white/70 px-4 py-3.5 pl-[4.25rem]">
-                                                <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
-                                                    {String(q.explanation ?? q.Explanation)}
-                                                </p>
-                                            </div>
-                                        </details>
-                                    ) : null}
-                                </div>
-                            );
-                        })}
-                        {questions.length === 0 ? (
-                            <p className="text-sm text-gray-500">No question snapshot available for this quiz.</p>
-                        ) : null}
-                    </div>
-                ) : null}
-
-                {!attempt && !loadingGrading ? (
-                    <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-sm text-gray-600">
-                        <p className="font-medium text-gray-800 mb-2">Nothing loaded yet</p>
-                        <p>
-                            Enter an <strong>attempt number</strong> above and click{' '}
-                            <strong>Load submission</strong>, or open a submission from{' '}
-                            <strong>Analytics → View / grade</strong>. If nothing appears, check that the student has
-                            finished the quiz and that you&apos;re grading a quiz you manage.
-                        </p>
-                    </div>
-                ) : null}
-            </div>
-        );
-    };
-
     // Render Question Bank
     const renderQuestionBank = () => (
         <div>
@@ -4661,6 +4639,66 @@ export function QuizManagement({
                                         ) : null}
                                     </div>
                                     <p className="text-gray-900 mb-3">{question.question}</p>
+                                    {(() => {
+                                        const mediaRaw = String(
+                                            question.mediaUrl ?? (question as { media_url?: string }).media_url ?? ''
+                                        ).trim();
+                                        if (!mediaRaw) return null;
+                                        const mediaSrc = normalizeMediaPreviewUrl(mediaRaw);
+                                        const youtubeId = parseYoutubeVideoId(mediaRaw);
+                                        return (
+                                            <div className="mb-3 max-w-md rounded-lg border border-gray-200 bg-gray-50 p-2">
+                                                <p className="text-xs text-gray-500 mb-1.5">Media</p>
+                                                {youtubeId ? (
+                                                    <a
+                                                        href={mediaRaw}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        aria-label="Open YouTube preview"
+                                                        className="block overflow-hidden rounded-md border border-gray-200 bg-black"
+                                                    >
+                                                        <img
+                                                            src={`https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg`}
+                                                            alt="YouTube thumbnail"
+                                                            className="h-28 w-full object-cover opacity-95 hover:opacity-100"
+                                                        />
+                                                    </a>
+                                                ) : isLikelyImageMedia(mediaRaw) ? (
+                                                    <img
+                                                        src={mediaSrc}
+                                                        alt="Question media"
+                                                        className="max-h-32 w-auto rounded border border-gray-200 object-contain bg-white"
+                                                        onError={(e) => {
+                                                            const img = e.currentTarget;
+                                                            const cur = String(img.getAttribute('src') || '').trim();
+                                                            if (mediaRaw && cur !== mediaRaw) {
+                                                                img.setAttribute('src', mediaRaw);
+                                                                return;
+                                                            }
+                                                            img.style.display = 'none';
+                                                        }}
+                                                    />
+                                                ) : isLikelyVideoMedia(mediaRaw) ? (
+                                                    <video
+                                                        src={mediaSrc}
+                                                        controls
+                                                        muted
+                                                        playsInline
+                                                        className="max-h-32 w-full rounded border border-gray-200 bg-black"
+                                                    />
+                                                ) : (
+                                                    <a
+                                                        href={mediaRaw}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-sm text-blue-600 hover:underline break-all"
+                                                    >
+                                                        {mediaRaw.length > 80 ? `${mediaRaw.slice(0, 80)}…` : mediaRaw}
+                                                    </a>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
                                     {question.type !== 'short-answer' && question.options && (
                                         <div className="space-y-1 text-sm text-gray-600">
                                             {(question.type === 'true-false'
@@ -5065,9 +5103,11 @@ export function QuizManagement({
                                                                             explanation: e.target.value,
                                                                         })
                                                                     }
+                                                                    onWheel={(e) => e.stopPropagation()}
+                                                                    onTouchMove={(e) => e.stopPropagation()}
                                                                     rows={3}
                                                                     placeholder="e.g. Why the correct option matches the source material…"
-                                                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                                                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600 overscroll-contain"
                                                                 />
                                                             </div>
                                                         </div>
@@ -5145,9 +5185,16 @@ export function QuizManagement({
                                             }
                                         }}
                                         disabled={savingQuiz}
-                                        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                                        className={`px-6 py-2 rounded-lg transition-colors ${savingQuiz
+                                            ? 'bg-blue-300 text-white cursor-not-allowed'
+                                            : 'bg-blue-600 text-white hover:bg-blue-700'
+                                            }`}
                                     >
-                                        {savingQuiz ? 'Saving...' : isEdit ? 'Update & Publish' : 'Publish Quiz'}
+                                        {savingQuizAction === 'published'
+                                            ? 'Saving...'
+                                            : isEdit
+                                                ? 'Update & Publish'
+                                                : 'Publish Quiz'}
                                     </button>
                                     <button
                                         type="button"
@@ -5159,10 +5206,17 @@ export function QuizManagement({
                                             }
                                         }}
                                         disabled={savingQuiz}
-                                        className="px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+                                        className={`px-6 py-2 rounded-lg transition-colors ${savingQuiz
+                                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                                            : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                            }`}
                                     >
                                         <Save size={18} className="inline mr-2" />
-                                        {savingQuiz ? 'Saving...' : isEdit ? 'Update Draft' : 'Save as Draft'}
+                                        {savingQuizAction === 'draft'
+                                            ? 'Saving...'
+                                            : isEdit
+                                                ? 'Update Draft'
+                                                : 'Save as Draft'}
                                     </button>
                                 </>
                             )}
@@ -5197,7 +5251,7 @@ export function QuizManagement({
                     <div className="p-6 border-b border-gray-200 flex items-start justify-between gap-3">
                         <div>
                             <h3 className="text-lg font-semibold text-gray-900">
-                                {studentAttemptsStep === 'list' ? 'Student attempts' : 'Grade attempt'}
+                                {studentAttemptsStep === 'list' ? 'Student attempts' : 'View & grade attempt'}
                             </h3>
                             <p className="text-sm text-gray-600 mt-1">{studentAttemptsTitle}</p>
                         </div>
@@ -5230,8 +5284,10 @@ export function QuizManagement({
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-gray-100">
-                                                {studentAttemptsList.map((row: any) => (
-                                                    <tr key={String(row?.attemptId)}>
+                                                {studentAttemptsList.map((row: any, rowIdx: number) => {
+                                                    const attemptRef = resolvedAttemptListRowId(row);
+                                                    return (
+                                                    <tr key={attemptRef != null ? `a-${attemptRef}` : `row-${rowIdx}`}>
                                                         <td className="px-4 py-3">
                                                             <span className="text-gray-900">{String(row?.studentName || 'Student')}</span>
                                                             {row?.studentEmail ? (
@@ -5245,27 +5301,23 @@ export function QuizManagement({
                                                             {formatDateTimeWithSeconds(row?.completedAt) || '—'}
                                                         </td>
                                                         <td className="px-4 py-3 text-right">
-                                                            <div className="flex flex-wrap justify-end gap-2">
+                                                            {attemptRef != null ? (
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => void openStudentAttemptDetail(Number(row?.attemptId))}
+                                                                    onClick={() => void openStudentAttemptDetail(attemptRef)}
                                                                     className="text-blue-600 hover:underline font-medium"
                                                                 >
-                                                                    Open / grade
+                                                                    View & grade
                                                                 </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() =>
-                                                                        openGradingTabForAttempt(Number(row?.attemptId))
-                                                                    }
-                                                                    className="text-emerald-700 hover:underline font-medium text-sm"
-                                                                >
-                                                                    Open Grading tab
-                                                                </button>
-                                                            </div>
+                                                            ) : (
+                                                                <span className="text-sm text-gray-400" title="Missing attempt id from server">
+                                                                    —
+                                                                </span>
+                                                            )}
                                                         </td>
                                                     </tr>
-                                                ))}
+                                                    );
+                                                })}
                                             </tbody>
                                         </table>
                                     </div>
@@ -5283,6 +5335,7 @@ export function QuizManagement({
                                             setStudentAttemptDetail(null);
                                             setStudentAttemptDetailId(null);
                                             setAttemptDetailGrades({});
+                                            setAttemptDetailMarks({});
                                         }}
                                         className="text-sm text-blue-600 hover:underline"
                                     >
@@ -5294,6 +5347,9 @@ export function QuizManagement({
                                 ) : attempt ? (
                                     <div className="space-y-4">
                                         <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-3 text-sm">
+                                            {String(detail?.quizTitle || '').trim() ? (
+                                                <p className="font-medium text-gray-900 mb-1">{String(detail.quizTitle)}</p>
+                                            ) : null}
                                             <p>
                                                 <span className="text-gray-500">Score: </span>
                                                 <strong>{Number(attempt?.scorePercent ?? 0)}%</strong>
@@ -5304,29 +5360,166 @@ export function QuizManagement({
                                                 </strong>
                                             </p>
                                         </div>
+                                        <div className="flex flex-wrap justify-end gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => void saveAttemptDetailMarks()}
+                                                disabled={savingAttemptDetailMarks || !questions.length}
+                                                className="px-5 py-2 rounded-lg bg-emerald-600 text-white text-sm hover:bg-emerald-700 disabled:opacity-60"
+                                            >
+                                                {savingAttemptDetailMarks ? 'Saving…' : 'Save question marks'}
+                                            </button>
+                                        </div>
                                         {questions.map((q: any, idx: number) => {
-                                            const qKey = questionKeyForAttemptRow(q, idx);
+                                            const qKey = gradeMarkKeyForUiRow(q, idx, answersArr);
                                             const ans = answersArr.find(
-                                                (a: any) => String(a?.questionId ?? a?.question_id ?? '') === qKey
+                                                (a: any) =>
+                                                    String(a?.questionId ?? a?.question_id ?? '').trim() === qKey
                                             );
                                             const studentText = formatStudentAnswerForLecturerDisplay(ans);
                                             const short = isShortAnswerAttemptQ(q);
+                                            const marked = attemptDetailMarks[qKey] === true;
                                             return (
                                                 <div
                                                     key={qKey}
                                                     className={`rounded-lg border p-4 ${short ? 'border-amber-200 bg-amber-50/40' : 'border-gray-200 bg-white'}`}
                                                 >
-                                                    <p className="text-sm font-medium text-gray-900 mb-1">
-                                                        Question {idx + 1}
-                                                        {short ? (
-                                                            <span className="ml-2 text-xs font-normal uppercase text-amber-800">Short answer</span>
-                                                        ) : null}
-                                                    </p>
+                                                    <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
+                                                        <p className="text-sm font-medium text-gray-900">
+                                                            Question {idx + 1}
+                                                            <span className="ml-2 text-xs font-normal text-gray-500">
+                                                                ({String(q?.type ?? q?.question_type ?? 'mcq').replace(/_/g, '-')})
+                                                            </span>
+                                                            {short ? (
+                                                                <span className="ml-2 text-xs font-normal uppercase text-amber-800">
+                                                                    Short answer
+                                                                </span>
+                                                            ) : null}
+                                                        </p>
+                                                        <div className="flex rounded-lg border border-gray-300 overflow-hidden shrink-0">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    setAttemptDetailMarks((prev) => ({ ...prev, [qKey]: true }))
+                                                                }
+                                                                className={`px-3 py-2 text-sm font-medium transition-colors ${
+                                                                    marked
+                                                                        ? 'bg-emerald-600 text-white'
+                                                                        : 'bg-white text-gray-600 hover:bg-gray-50'
+                                                                }`}
+                                                            >
+                                                                Correct
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    setAttemptDetailMarks((prev) => ({ ...prev, [qKey]: false }))
+                                                                }
+                                                                className={`px-3 py-2 text-sm font-medium border-l border-gray-300 transition-colors ${
+                                                                    !marked
+                                                                        ? 'bg-red-600 text-white'
+                                                                        : 'bg-white text-gray-600 hover:bg-gray-50'
+                                                                }`}
+                                                            >
+                                                                Incorrect
+                                                            </button>
+                                                        </div>
+                                                    </div>
                                                     <p className="text-gray-800 mb-2">{String(q?.question ?? q?.question_text ?? '')}</p>
+                                                    {(() => {
+                                                        const mediaRaw = String(q?.mediaUrl ?? q?.media_url ?? '').trim();
+                                                        if (!mediaRaw) return null;
+                                                        const mediaSrc = normalizeMediaPreviewUrl(mediaRaw);
+                                                        const youtubeId = parseYoutubeVideoId(mediaRaw);
+                                                        return (
+                                                            <div className="mb-3 rounded-lg border border-gray-200 bg-white p-2">
+                                                                {youtubeId ? (
+                                                                    <iframe
+                                                                        src={`https://www.youtube.com/embed/${youtubeId}`}
+                                                                        title={`Question ${idx + 1} media`}
+                                                                        className="w-full max-w-xl h-56 rounded border border-gray-200"
+                                                                        allowFullScreen
+                                                                    />
+                                                                ) : isLikelyImageMedia(mediaRaw) ? (
+                                                                    <img
+                                                                        src={mediaSrc}
+                                                                        alt={`Question ${idx + 1} media`}
+                                                                        className="max-h-64 rounded border border-gray-200 object-contain bg-gray-50"
+                                                                        onError={(e) => {
+                                                                            const img = e.currentTarget;
+                                                                            const cur = String(img.getAttribute('src') || '').trim();
+                                                                            if (mediaRaw && cur !== mediaRaw) {
+                                                                                img.setAttribute('src', mediaRaw);
+                                                                                return;
+                                                                            }
+                                                                            img.style.display = 'none';
+                                                                        }}
+                                                                    />
+                                                                ) : isLikelyVideoMedia(mediaRaw) ? (
+                                                                    <video
+                                                                        src={mediaSrc}
+                                                                        controls
+                                                                        className="max-h-64 w-full max-w-xl rounded border border-gray-200 bg-black"
+                                                                        onError={(e) => {
+                                                                            const video = e.currentTarget;
+                                                                            const cur = String(video.getAttribute('src') || '').trim();
+                                                                            if (mediaRaw && cur !== mediaRaw) {
+                                                                                video.setAttribute('src', mediaRaw);
+                                                                                video.load();
+                                                                                return;
+                                                                            }
+                                                                        }}
+                                                                    />
+                                                                ) : (
+                                                                    <p className="text-sm text-gray-500">
+                                                                        Attachment:{' '}
+                                                                        <a
+                                                                            href={mediaSrc}
+                                                                            target="_blank"
+                                                                            rel="noopener noreferrer"
+                                                                            className="text-blue-600 underline break-all"
+                                                                        >
+                                                                            {mediaRaw}
+                                                                        </a>
+                                                                    </p>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })()}
                                                     <p className="text-sm text-gray-600">
                                                         Student answer:{' '}
                                                         <span className="text-gray-900">{studentText || '—'}</span>
                                                     </p>
+                                                    {String(q?.explanation ?? q?.Explanation ?? '').trim() ? (
+                                                        <details className="mt-3 overflow-hidden rounded-r-lg border border-slate-200/90 border-l-[3px] border-l-indigo-500 bg-gradient-to-br from-slate-50/90 to-white shadow-sm ring-1 ring-slate-900/[0.06] [&[open]_summary_.expl-chevron]:rotate-90">
+                                                            <summary className="cursor-pointer list-none px-3 py-2.5 transition-colors hover:bg-slate-50/80 [&::-webkit-details-marker]:hidden">
+                                                                <div className="flex items-start gap-2">
+                                                                    <span
+                                                                        className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 ring-1 ring-indigo-600/10"
+                                                                        aria-hidden
+                                                                    >
+                                                                        <Lightbulb className="h-3.5 w-3.5" strokeWidth={2} />
+                                                                    </span>
+                                                                    <div className="min-w-0 flex-1 pt-0.5">
+                                                                        <span className="text-sm font-semibold text-slate-900">
+                                                                            Explanation
+                                                                        </span>
+                                                                    </div>
+                                                                    <span
+                                                                        className="expl-chevron mt-1 inline-block shrink-0 text-slate-400 transition-transform duration-200"
+                                                                        aria-hidden
+                                                                    >
+                                                                        ▶
+                                                                    </span>
+                                                                </div>
+                                                            </summary>
+                                                            <div className="border-t border-slate-100 bg-white/70 px-3 py-2.5 pl-[3.25rem]">
+                                                                <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
+                                                                    {String(q.explanation ?? q.Explanation)}
+                                                                </p>
+                                                            </div>
+                                                        </details>
+                                                    ) : null}
                                                     {short ? (
                                                         <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2">
                                                             <input
@@ -5403,8 +5596,6 @@ export function QuizManagement({
                 return renderSharedQuizzes();
             case 'analytics':
                 return renderAnalytics();
-            case 'grading':
-                return renderGrading();
             case 'question-bank':
                 return renderQuestionBank();
             case 'create':
@@ -5470,16 +5661,6 @@ export function QuizManagement({
                         >
                             <BarChart3 size={18} />
                             Analytics
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('grading')}
-                            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${activeTab === 'grading'
-                                ? 'bg-blue-600 text-white'
-                                : 'text-gray-600 hover:bg-gray-100'
-                                }`}
-                        >
-                            <ClipboardCheck size={18} />
-                            Grading
                         </button>
                         <button
                             onClick={() => setActiveTab('question-bank')}

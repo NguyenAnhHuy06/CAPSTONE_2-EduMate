@@ -282,22 +282,51 @@ function isLecturerUserId(userId) {
   return String(userRow?.role || "").toUpperCase() === "LECTURER";
 }
 
+/** Mock: allow lecturer actions when row exists in `users`, or Bearer JWT is LECTURER and matches `userId`. */
+function assertLecturerCanActAsUserId(req, userId) {
+  if (!Number.isFinite(Number(userId))) return false;
+  if (isLecturerUserId(userId)) return true;
+  const bearer = getBearerUserIdMock(req);
+  if (bearer == null || Number(bearer) !== Number(userId)) return false;
+  try {
+    const h = req.headers.authorization || req.headers.Authorization || "";
+    const m = /^Bearer\s+(.+)$/i.exec(String(h));
+    if (!m) return false;
+    const decoded = jwt.verify(String(m[1]).trim(), JWT_SECRET);
+    return String(decoded.role || "").toUpperCase() === "LECTURER";
+  } catch {
+    return false;
+  }
+}
+
 function normalizeQuestionInput(payload) {
   const question = String(payload?.question || "").trim();
   const mediaUrl = String(payload?.mediaUrl ?? payload?.media_url ?? "").trim();
   const typeRaw = String(payload?.type || "multiple-choice").trim().toLowerCase();
   const topic = String(payload?.topic || "General").trim() || "General";
   const difficultyRaw = String(payload?.difficulty || "medium").trim().toLowerCase();
-  const correctAnswer = payload?.correctAnswer != null ? String(payload.correctAnswer).trim() : "";
+  let correctAnswer = payload?.correctAnswer != null ? String(payload.correctAnswer).trim() : "";
   const type = ["multiple-choice", "true-false", "short-answer"].includes(typeRaw)
     ? typeRaw
     : "multiple-choice";
   const difficulty = ["easy", "medium", "hard"].includes(difficultyRaw)
     ? difficultyRaw
     : "medium";
-  const options = Array.isArray(payload?.options)
+  let options = Array.isArray(payload?.options)
     ? payload.options.map((x) => String(x || "").trim()).filter(Boolean)
     : [];
+
+  if (type === "multiple-choice") {
+    const padLabels = ["Choice A", "Choice B", "Choice C", "Choice D"];
+    while (options.length < 2) {
+      const i = options.length;
+      options.push(String(padLabels[i] || `Option ${i + 1}`));
+    }
+    if (!correctAnswer) correctAnswer = "A";
+  }
+  if (type === "true-false" && !correctAnswer) {
+    correctAnswer = "A";
+  }
 
   const explanation =
     payload?.explanation != null
@@ -314,6 +343,49 @@ function normalizeQuestionInput(payload) {
     options,
     correctAnswer,
     explanation,
+  };
+}
+
+/** FE `buildBackendQuestionsFromSelection` → same in-memory shape as `/api/quiz/generate` with `persist`. */
+function normalizeIncomingQuizPayloadQuestion(q) {
+  const typeRaw = String(q?.type || "multiple-choice").trim().toLowerCase();
+  const type =
+    typeRaw === "short-answer" ? "short-answer" : typeRaw === "true-false" ? "true-false" : "multiple-choice";
+  const media = String(q?.mediaUrl ?? q?.media_url ?? "").trim();
+  const explanation = String(q?.explanation ?? "").trim();
+  /** @type {Record<string, string>} */
+  const extra = {};
+  if (media) extra.media_url = media;
+  if (explanation) extra.explanation = explanation;
+
+  if (type === "short-answer") {
+    return {
+      question: String(q?.question || "").trim(),
+      type: "short-answer",
+      correct_answer: String(q?.correctAnswer ?? q?.correct_answer ?? "").trim(),
+      ...extra,
+    };
+  }
+  const opt = q?.options && typeof q.options === "object" && !Array.isArray(q.options) ? q.options : {};
+  const A = String(opt.A ?? "").trim() || (type === "true-false" ? "True" : "Option A");
+  const B = String(opt.B ?? "").trim() || (type === "true-false" ? "False" : "Option B");
+  const C = String(opt.C ?? "").trim();
+  const D = String(opt.D ?? "").trim();
+  const rawCorrect = q?.correctAnswer ?? q?.correct_answer ?? "A";
+  let letter = "A";
+  const num = Number(rawCorrect);
+  if (Number.isFinite(num) && num >= 0 && num <= 3) {
+    letter = ["A", "B", "C", "D"][num];
+  } else {
+    const ch = String(rawCorrect).trim().toUpperCase().slice(0, 1);
+    if (["A", "B", "C", "D"].includes(ch)) letter = ch;
+  }
+  return {
+    question: String(q?.question || "").trim(),
+    type,
+    options: { A, B, C, D },
+    correct_answer: letter,
+    ...extra,
   };
 }
 
@@ -926,6 +998,30 @@ function getBearerUserIdMock(req) {
   }
 }
 
+function firstScalarQueryValue(val) {
+  if (val == null) return undefined;
+  if (Array.isArray(val)) return val[0];
+  return val;
+}
+
+/**
+ * Resolves lecturer user id for question-bank routes. Express may expose duplicate query keys as arrays;
+ * the client may omit `userId` when the dev server can infer it from `Authorization: Bearer`.
+ */
+function resolveQuestionBankUserId(req, preferQuery) {
+  const raw = preferQuery
+    ? firstScalarQueryValue(req.query?.userId)
+    : req.body?.userId != null
+      ? req.body.userId
+      : firstScalarQueryValue(req.query?.userId);
+  let uid = toNum(raw, NaN);
+  if (!Number.isFinite(uid)) {
+    const fromJwt = getBearerUserIdMock(req);
+    uid = fromJwt != null ? Number(fromJwt) : NaN;
+  }
+  return Number.isFinite(uid) ? uid : NaN;
+}
+
 app.get("/api/documents/comments", (req, res) => {
   const documentId = req.query.documentId ?? req.query.document_id;
   const s3Key = String(req.query.s3Key ?? req.query.s3_key ?? "").trim();
@@ -973,8 +1069,22 @@ app.post("/api/documents/comments", (req, res) => {
  * Quiz generate — mock handler for local FE (no external AI).
  */
 app.post("/api/quiz/generate", (req, res) => {
-  const { content, numQuestions, language, persist, quizTitle, s3Key, createdBy } =
-    req.body || {};
+  const {
+    content,
+    numQuestions,
+    language,
+    persist,
+    quizTitle,
+    s3Key: s3KeyRaw,
+    createdBy,
+    documentId: documentIdRaw,
+  } = req.body || {};
+  let s3Key = String(s3KeyRaw || "").trim();
+  const docId = Number(documentIdRaw ?? req.body?.document_id);
+  if (!s3Key && Number.isFinite(docId) && docId > 0) {
+    const hit = recentUploads.find((d) => Number(d.id) === docId);
+    if (hit?.storedFileName) s3Key = String(hit.storedFileName).trim();
+  }
   const uidFromBearer = getBearerUserIdMock(req);
   const ownerId = Number.isFinite(Number(uidFromBearer))
     ? Number(uidFromBearer)
@@ -1056,6 +1166,17 @@ app.post("/api/quiz/generate", (req, res) => {
   });
 });
 
+function historyOwnerMatchesQuery(uid, createdBy) {
+  if (uid == null || String(uid).trim() === "") return true;
+  const uStr = String(uid).trim();
+  const cStr = String(createdBy ?? "").trim();
+  if (cStr === uStr) return true;
+  const uNum = Number(uStr);
+  const cNum = Number(createdBy);
+  if (Number.isFinite(uNum) && Number.isFinite(cNum) && uNum === cNum) return true;
+  return false;
+}
+
 /**
  * Quiz history list (in-memory).
  * Shape matches FE usage in Generate-Quizz.html.
@@ -1079,7 +1200,7 @@ app.get("/api/quizzes/history", (req, res) => {
       // Keep published list behavior as before (shared/global),
       // only restrict non-published rows to owner.
       if (Boolean(q.isPublished)) return true;
-      return String(q.createdBy ?? "") === uid;
+      return historyOwnerMatchesQuery(uid, q.createdBy);
     })
     .map((q) => {
       const sharedByUserId = Number(q.sharedByUserId ?? 0) || null;
@@ -1293,7 +1414,7 @@ app.delete("/api/quizzes/:id", (req, res) => {
   if (uidFromBearer == null) {
     return res.status(401).json({ success: false, message: "Unauthorized." });
   }
-  if (!isLecturerUserId(uidFromBearer)) {
+  if (!assertLecturerCanActAsUserId(req, uidFromBearer)) {
     return res.status(403).json({ success: false, message: "Only lecturers can delete quizzes." });
   }
   const idx = quizzes.findIndex((q) => Number(q.id) === Number(qid));
@@ -1325,6 +1446,98 @@ app.delete("/api/quizzes/:id", (req, res) => {
     success: true,
     message: "Quiz deleted successfully.",
     data: { quizId: Number(qid) },
+  });
+});
+
+app.post("/api/quizzes", (req, res) => {
+  const ownerId = resolveQuestionBankUserId(req, false);
+  if (!Number.isFinite(ownerId)) {
+    return res.status(400).json({ success: false, message: "Invalid userId." });
+  }
+  if (!assertLecturerCanActAsUserId(req, ownerId)) {
+    return res.status(403).json({ success: false, message: "Only lecturers can create quizzes." });
+  }
+  const title = String(req.body?.title || "").trim();
+  const questionsRaw = Array.isArray(req.body?.questions) ? req.body.questions : [];
+  if (!title) {
+    return res.status(400).json({ success: false, message: "Title is required." });
+  }
+  if (!questionsRaw.length) {
+    return res.status(400).json({ success: false, message: "At least one question is required." });
+  }
+  const statusRaw = String(req.body?.status || "draft").toLowerCase();
+  const asPublished = statusRaw === "published";
+  const now = new Date().toISOString();
+  const quizId = Date.now();
+  const courseCode = String(req.body?.courseCode ?? req.body?.subject ?? "").trim() || "DOC";
+  const normalized = questionsRaw.map((row) => normalizeIncomingQuizPayloadQuestion(row));
+  quizzes.unshift({
+    id: quizId,
+    title,
+    sourceKey: null,
+    createdBy: ownerId,
+    createdAt: now,
+    lastAttemptAt: null,
+    scorePercent: null,
+    questionsCount: normalized.length,
+    questions: normalized,
+    attemptsCount: 0,
+    courseCode,
+    isPublished: asPublished,
+    publishedAt: asPublished ? now : null,
+    sharedForReview: false,
+    sharedAt: null,
+    sharedByUserId: null,
+    sharedByName: null,
+    sharedByUserCode: null,
+    sharedAttemptId: null,
+    lecturerEdited: false,
+    lecturerEditedAt: null,
+  });
+  return res.status(201).json({
+    success: true,
+    message: asPublished ? "Quiz published." : "Quiz saved.",
+    id: quizId,
+    quizId,
+    data: { id: quizId, quizId },
+  });
+});
+
+app.patch("/api/quizzes/:id", (req, res) => {
+  const qid = toNum(req.params.id, NaN);
+  if (!Number.isFinite(qid)) {
+    return res.status(400).json({ success: false, message: "Invalid quiz id." });
+  }
+  const ownerId = resolveQuestionBankUserId(req, false);
+  if (!Number.isFinite(ownerId)) {
+    return res.status(400).json({ success: false, message: "Invalid userId." });
+  }
+  if (!assertLecturerCanActAsUserId(req, ownerId)) {
+    return res.status(403).json({ success: false, message: "Only lecturers can update quizzes." });
+  }
+  const idx = quizzes.findIndex((q) => Number(q.id) === Number(qid));
+  if (idx < 0) {
+    return res.status(404).json({ success: false, message: "Quiz not found." });
+  }
+  if (String(quizzes[idx]?.createdBy ?? "") !== String(ownerId)) {
+    return res.status(403).json({ success: false, message: "You do not have permission to edit this quiz." });
+  }
+  const title = String(req.body?.title ?? "").trim();
+  const questionsRaw = Array.isArray(req.body?.questions) ? req.body.questions : null;
+  const courseCodeRaw = String(req.body?.courseCode ?? req.body?.subject ?? "").trim();
+  if (title) quizzes[idx].title = title;
+  if (courseCodeRaw) quizzes[idx].courseCode = courseCodeRaw;
+  if (questionsRaw && questionsRaw.length) {
+    const normalized = questionsRaw.map((row) => normalizeIncomingQuizPayloadQuestion(row));
+    quizzes[idx].questions = normalized;
+    quizzes[idx].questionsCount = normalized.length;
+  }
+  quizzes[idx].lecturerEdited = true;
+  quizzes[idx].lecturerEditedAt = new Date().toISOString();
+  return res.status(200).json({
+    success: true,
+    message: "Quiz updated.",
+    data: { quizId: qid, id: qid },
   });
 });
 
@@ -1655,10 +1868,9 @@ app.post("/api/quizzes/:id/comments", (req, res) => {
 });
 
 app.get("/api/questions/bank", async (req, res) => {
-  const userId = req.query?.userId;
-  const uid = toNum(userId, NaN);
+  const uid = resolveQuestionBankUserId(req, true);
   if (!Number.isFinite(uid)) {
-    return res.status(400).json({ success: false, message: "Invalid userId." });
+    return res.status(200).json({ success: true, total: 0, data: [] });
   }
 
   try {
@@ -1702,24 +1914,17 @@ app.get("/api/questions/bank", async (req, res) => {
 });
 
 app.post("/api/questions/bank", async (req, res) => {
-  const userId = req.body?.userId;
-  const uid = toNum(userId, NaN);
+  const uid = resolveQuestionBankUserId(req, false);
   if (!Number.isFinite(uid)) {
     return res.status(400).json({ success: false, message: "Invalid userId." });
   }
-  if (!isLecturerUserId(uid)) {
+  if (!assertLecturerCanActAsUserId(req, uid)) {
     return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
   }
 
   const payload = normalizeQuestionInput(req.body || {});
   if (!payload.question) {
     return res.status(400).json({ success: false, message: "Question is required." });
-  }
-  if (payload.type === "multiple-choice" && payload.options.length < 2) {
-    return res.status(400).json({
-      success: false,
-      message: "Multiple-choice questions need at least 2 options.",
-    });
   }
 
   try {
@@ -1757,14 +1962,14 @@ app.post("/api/questions/bank", async (req, res) => {
 
 app.patch("/api/questions/bank/:id", async (req, res) => {
   const qid = toNum(req.params.id, NaN);
-  const uid = toNum(req.body?.userId, NaN);
+  const uid = resolveQuestionBankUserId(req, false);
   if (!Number.isFinite(qid)) {
     return res.status(400).json({ success: false, message: "Invalid question id." });
   }
   if (!Number.isFinite(uid)) {
     return res.status(400).json({ success: false, message: "Invalid userId." });
   }
-  if (!isLecturerUserId(uid)) {
+  if (!assertLecturerCanActAsUserId(req, uid)) {
     return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
   }
 
@@ -1808,14 +2013,14 @@ app.patch("/api/questions/bank/:id", async (req, res) => {
 
 app.delete("/api/questions/bank/:id", async (req, res) => {
   const qid = toNum(req.params.id, NaN);
-  const uid = toNum(req.query?.userId, NaN);
+  const uid = resolveQuestionBankUserId(req, true);
   if (!Number.isFinite(qid)) {
     return res.status(400).json({ success: false, message: "Invalid question id." });
   }
   if (!Number.isFinite(uid)) {
     return res.status(400).json({ success: false, message: "Invalid userId." });
   }
-  if (!isLecturerUserId(uid)) {
+  if (!assertLecturerCanActAsUserId(req, uid)) {
     return res.status(403).json({ success: false, message: "Only lecturers can manage question bank." });
   }
 

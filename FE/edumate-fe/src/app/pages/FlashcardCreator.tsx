@@ -144,7 +144,10 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     });
 
     try {
-      const res: any = await api.post('/flashcards/generate', { s3Key });
+      const res: any = await api.post('/flashcards/generate', {
+        s3Key,
+        ...(documentId != null ? { documentId } : {}),
+      });
 
       if (res?.success === false) {
         setFlashcardGeneratingStatus('failed', {
