@@ -14,6 +14,7 @@ interface UploadDocumentProps {
 export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocumentProps) {
   const [formData, setFormData] = useState({
     type: 'general',
+    year: '',
     courseCode: '',
     courseName: '',
     topicTitle: '',
@@ -59,10 +60,11 @@ const handleSubmit = async (e: React.FormEvent) => {
 
     form.append("title", formData.topicTitle);
     form.append("category", formData.type);
+    form.append("year", formData.year);
     form.append("subjectCode", formData.courseCode);
     form.append("subjectName", formData.courseName);
-    form.append("tags", formData.courseCode); 
-    form.append("description", formData.description);
+    form.append("tags", formData.courseCode);
+    form.append("description", formData.description || "");
 
     const uploaderId = user?.user_id ?? user?.id ?? user?.userId;
     if (uploaderId != null && String(uploaderId).trim() !== '') {
@@ -106,6 +108,7 @@ const handleSubmit = async (e: React.FormEvent) => {
       setUploadSuccess(false);
       setFormData({
         type: 'general',
+        year: '',
         courseCode: '',
         courseName: '',
         topicTitle: '',
@@ -150,7 +153,7 @@ const handleSubmit = async (e: React.FormEvent) => {
       <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6">
         {/* File Upload */}
         <div className="mb-6">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Document File *
           </label>
           <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-600 transition-colors">
@@ -181,7 +184,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Type */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Document Type
           </label>
           <select
@@ -198,9 +201,30 @@ const handleSubmit = async (e: React.FormEvent) => {
           </select>
         </div>
 
+        {/* Year */}
+        <div className="mb-4">
+          <label className="block text-gray-700 text-lg mb-2">
+            Year *
+          </label>
+          <select
+            name="year"
+            aria-label="Select academic year"
+            value={formData.year}
+            onChange={handleInputChange}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+            required
+          >
+            <option value="">Select year</option>
+            <option value="NĂM 1 (2022-2023)">NĂM 1 (2022-2023)</option>
+            <option value="NĂM 2 (2023-2024)">NĂM 2 (2023-2024)</option>
+            <option value="NĂM 3 (2024-2025)">NĂM 3 (2024-2025)</option>
+            <option value="NĂM 4 (2025-2026)">NĂM 4 (2025-2026)</option>
+          </select>
+        </div>
+
         {/* Course Code */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Course Code *
           </label>
           <input
@@ -216,7 +240,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Course Name */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Course Name *
           </label>
           <input
@@ -232,7 +256,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Topic Title */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Topic Title *
           </label>
           <input
@@ -248,8 +272,8 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Description */}
         <div className="mb-6">
-          <label className="block text-gray-700 mb-2">
-            Description *
+          <label className="block text-gray-700 text-lg mb-2">
+            Description 
           </label>
           <textarea
             name="description"
@@ -258,7 +282,6 @@ const handleSubmit = async (e: React.FormEvent) => {
             placeholder="Provide a brief description of the document content..."
             rows={4}
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-            required
           />
         </div>
 

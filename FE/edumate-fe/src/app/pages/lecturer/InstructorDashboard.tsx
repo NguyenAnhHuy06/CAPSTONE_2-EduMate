@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { BookOpen, Upload, FileText, CheckCircle, TrendingUp, User, Home, ClipboardList, Loader2, XCircle } from 'lucide-react';
+import { BookOpen, Upload, FileText, CheckCircle, TrendingUp, User, Home, ClipboardList, Loader2, XCircle, Heart } from 'lucide-react';
 import { Sidebar } from '../Sidebar';
 import { DocumentLibrary } from '../DocumentLibrary';
 import { UploadDocument } from '../UploadDocument';
 import { Profile } from '../Profile';
 import { QuizManagement, type InitialAiDocumentPayload } from '../lecturer/QuizManagement';
 import api from '@/services/api';
+import { NotificationBell } from '@/app/components/NotificationBell';
 
 const LECTURER_QUIZ_GENERATING_KEY = 'edumate_lecturer_quiz_generating';
 const LECTURER_QUIZ_AUTOSTART_KEY = 'edumate_lecturer_quiz_autostart';
@@ -30,7 +31,7 @@ interface InstructorDashboardProps {
   user: any;
   onLogout: () => void;
   onUserUpdate?: (user: any) => void;
-  /** When set (e.g. `/quiz/:id` or `/lecturer/quiz/:id` deep link), open Quizzes and focus this quiz in the editor. */
+  onOpenDonate?: () => void;
   focusQuizId?: number | null;
   initialMainTab?: InstructorMainTab;
 }
@@ -39,6 +40,7 @@ export function InstructorDashboard({
   user,
   onLogout,
   onUserUpdate,
+  onOpenDonate,
   focusQuizId = null,
   initialMainTab,
 }: InstructorDashboardProps) {
@@ -72,6 +74,7 @@ export function InstructorDashboard({
     { id: 'documents', label: 'Documents', icon: FileText },
     { id: 'upload', label: 'Upload', icon: Upload },
     { id: 'quizzes', label: 'Quizzes', icon: ClipboardList },
+    { id: 'donate', label: 'Donate', icon: Heart },
     { id: 'profile', label: 'Profile', icon: User },
   ];
 
@@ -274,7 +277,13 @@ export function InstructorDashboard({
       <Sidebar
         menuItems={menuItems}
         activeItem={activeTab}
-        onMenuItemClick={(id) => setActiveTab(id as any)}
+        onMenuItemClick={(id) => {
+          if (id === 'donate') {
+            onOpenDonate?.();
+            return;
+          }
+          setActiveTab(id as any);
+        }}
         onLogout={onLogout}
         userRole="Instructor"
         userName={user.name}
@@ -285,9 +294,13 @@ export function InstructorDashboard({
       <div className="flex-1 overflow-auto">
         {/* Top Bar for Mobile and User Info */}
         <div className="bg-white border-b border-gray-200 p-4 lg:flex lg:justify-end hidden">
-          <div className="text-right">
-            <p className="text-gray-900">{user.name}</p>
-            <p className="text-gray-500 text-xs">{user.email}</p>
+          <div className="flex items-center gap-3">
+            <NotificationBell />
+
+            <div className="text-right">
+              <p className="text-gray-900">{user.name}</p>
+              <p className="text-gray-500 text-xs">{user.email}</p>
+            </div>
           </div>
         </div>
 
