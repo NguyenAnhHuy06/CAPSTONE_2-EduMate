@@ -43,7 +43,17 @@ function optionalBodyNumber(value) {
 const uploadDocument = [
   upload.single("documentFile"),
   async (req, res) => {
-    const { title, category, subjectCode, subjectName, tags, description = "", courseId, uploaderId } = req.body;
+    const {
+      title,
+      category,
+      year,
+      subjectCode,
+      subjectName,
+      tags,
+      description = "",
+      courseId,
+      uploaderId
+    } = req.body;
     try {
       if (!s3.isS3Configured()) {
         return res.status(503).json({ success: false, message: "S3 chưa cấu hình (AWS_*, S3_BUCKET)." });
@@ -51,8 +61,18 @@ const uploadDocument = [
       if (!req.file || !req.file.buffer) {
         return res.status(400).json({ success: false, message: "Bạn chưa chọn file tài liệu." });
       }
-      if (isEmpty(title) || isEmpty(category) || isEmpty(subjectCode) || isEmpty(subjectName) || isEmpty(tags)) {
-        return res.status(400).json({ success: false, message: "Vui lòng nhập đầy đủ các trường bắt buộc." });
+      if (
+        isEmpty(title) ||
+        isEmpty(category) ||
+        isEmpty(year) ||
+        isEmpty(subjectCode) ||
+        isEmpty(subjectName) ||
+        isEmpty(tags)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Vui lòng nhập đầy đủ các trường bắt buộc."
+        });
       }
 
       const key = s3.buildDocumentKey(req.file.originalname);
@@ -64,12 +84,17 @@ const uploadDocument = [
 
       let documentId = null, dbNote = "";
       if (db.isConfigured()) {
-        documentId = await db.upsertDocument({ 
-          s3Key: key, 
-          title: title.trim(), 
-          courseId, 
+        documentId = await db.upsertDocument({
+          s3Key: key,
+          title: title.trim(),
+          category: category.trim(),
+          year: year.trim(),
+          courseCode: subjectCode.trim(),
+          courseName: subjectName.trim(),
+          description: String(description || "").trim(),
+          courseId,
           uploaderId: req.user.id,
-          status 
+          status
         });
         dbNote = ` Đã ghi vào bảng documents (MySQL) với trạng thái: ${status}.`;
       } else {
@@ -97,9 +122,13 @@ const uploadDocument = [
         message: `Đã upload lên S3.${dbNote}`,
         data: {
           id: documentId != null ? documentId : key,
-          title: title.trim(), category: category.trim(),
-          subjectCode: subjectCode.trim(), subjectName: subjectName.trim(),
-          tags: normalizeTags(tags), description: description.trim(),
+          title: title.trim(),
+          category: category.trim(),
+          year: year.trim(),
+          subjectCode: subjectCode.trim(),
+          subjectName: subjectName.trim(),
+          tags: normalizeTags(tags),
+          description: String(description || "").trim(),
           courseId: optionalBodyNumber(courseId), uploaderId: optionalBodyNumber(uploaderId),
           storage: "s3", s3Key: key,
           originalFileName: req.file.originalname,
@@ -125,7 +154,12 @@ const getRecentDocuments = async (req, res) => {
     const data = rows.map(row => ({
       id: row.document_id, title: row.title, s3Key: row.file_url,
       courseId: row.course_id, uploaderId: row.uploader_id,
-      uploadedAt: row.created_at, chunkCount: Number(row.chunk_count || 0), downloads: 0,
+      uploadedAt: row.created_at,
+      chunkCount: Number(row.chunk_count || 0),
+      commentsCount: Number(row.comments_count || 0),
+      comments: Number(row.comments_count || 0),
+      downloadCount: Number(row.download_count || 0),
+      downloads: Number(row.download_count || 0),
     }));
     return res.status(200).json({ success: true, total: data.length, data });
   } catch (err) {
@@ -171,17 +205,39 @@ const getDocumentsForQuiz = async (req, res) => {
           storage: "s3",
           s3Key: o.key,
           fileName: path.basename(o.key),
+
           title: m?.title || path.basename(o.key),
+          category: m?.category || null,
+          year: m?.year || null,
+          semester: m?.semester || null,
+          description: m?.description || "",
+
           subjectCode: m?.course_code || ext,
           courseCode: m?.course_code || ext,
+          subjectName: m?.course_name || "",
+          courseName: m?.course_name || "",
           courseId: m?.course_id ?? null,
+
           documentId,
+          uploaderId: m?.uploader_id ?? null,
+          uploader_id: m?.uploader_id ?? null,
+          uploaderName: m?.uploader_name || "",
+          uploaderRole: m?.uploader_role || "",
+
+          status: m?.status || null,
           size: o.size,
           lastModified: o.lastModified || m?.created_at,
           fileUrl: s3.buildObjectPublicUrl(o.key),
           inDatabase: true,
           chunkCount: chunks,
           estimatedQuestions,
+
+          commentsCount: Number(m?.comments_count || 0),
+          commentCount: Number(m?.comments_count || 0),
+          comments: Number(m?.comments_count || 0),
+
+          downloadCount: Number(m?.download_count || 0),
+          downloads: Number(m?.download_count || 0),
         };
       })
       .filter(Boolean);

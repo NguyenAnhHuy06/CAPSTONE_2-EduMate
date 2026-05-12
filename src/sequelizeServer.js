@@ -20,6 +20,8 @@ const flashcardRoutes = require('./routes/flashcardRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const progressRoutes = require('./routes/progressRoutes');
+const donateRoutes = require('./routes/donateRoutes');
+const donationRoutes = require('./routes/donationRoutes');
 
 // Initialize Associations
 require('./models/associations');
@@ -45,6 +47,8 @@ app.use('/api/ai/flashcards', flashcardRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/progress', progressRoutes);
+app.use('/api/donate', donateRoutes);
+app.use('/api/donations', donationRoutes);
 
 // 404 handler
 app.use((req, res) => {
