@@ -252,31 +252,35 @@ async function resolveDocumentIdByS3KeyForFlashcards(s3Key, userId) {
     return Number(createdId);
 }
 
-async function saveGeneratedFlashcardsForUser({ userId, s3Key, cards }) {
+async function saveGeneratedFlashcardsForUser({ userId, s3Key, documentId, cards }) {
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) throw new Error("Invalid user for saving flashcards.");
     if (!db.isConfigured()) throw new Error("MySQL chưa cấu hình.");
 
-    const documentId = await resolveDocumentIdByS3KeyForFlashcards(s3Key, uid);
-    if (!Number.isFinite(documentId) || documentId <= 0) {
+    const providedDocumentId = Number(documentId);
+    const resolvedDocumentId =
+        Number.isFinite(providedDocumentId) && providedDocumentId > 0
+            ? providedDocumentId
+            : await resolveDocumentIdByS3KeyForFlashcards(s3Key, uid);
+    if (!Number.isFinite(resolvedDocumentId) || resolvedDocumentId <= 0) {
         throw new Error("Cannot resolve document_id for flashcard saving.");
     }
 
     const records = (Array.isArray(cards) ? cards : [])
         .map((c) => ({
             user_id: uid,
-            document_id: documentId,
+            document_id: resolvedDocumentId,
             front_text: String(c?.front ?? c?.front_text ?? "").trim(),
             back_text: String(c?.back ?? c?.back_text ?? "").trim(),
         }))
         .filter((r) => r.front_text && r.back_text);
 
-    if (!records.length) return { documentId, savedCount: 0 };
+    if (!records.length) return { documentId: resolvedDocumentId, savedCount: 0 };
 
     // Replace old generated cards for this user+document to keep reusable set fresh.
     const transaction = await Flashcard.sequelize.transaction();
     try {
-        await Flashcard.destroy({ where: { user_id: uid, document_id: documentId }, transaction });
+        await Flashcard.destroy({ where: { user_id: uid, document_id: resolvedDocumentId }, transaction });
         let savedCount = 0;
         for (const record of records) {
             const createdCard = await Flashcard.create(
@@ -297,7 +301,7 @@ async function saveGeneratedFlashcardsForUser({ userId, s3Key, cards }) {
             savedCount += 1;
         }
         await transaction.commit();
-        return { documentId, savedCount };
+        return { documentId: resolvedDocumentId, savedCount };
     } catch (err) {
         await transaction.rollback();
         throw err;
@@ -311,6 +315,7 @@ async function generateFlashcardsHandler(req, res) {
         const saved = await saveGeneratedFlashcardsForUser({
             userId,
             s3Key: req.body?.s3Key,
+            documentId: req.body?.documentId ?? req.body?.document_id,
             cards,
         });
         return res.json({
@@ -336,6 +341,7 @@ async function startGenerateFlashcardsAsync(req, res) {
             const saved = await saveGeneratedFlashcardsForUser({
                 userId: req.user?.id ?? req.user?.user_id,
                 s3Key: req.body?.s3Key,
+                documentId: req.body?.documentId ?? req.body?.document_id,
                 cards,
             });
             return { success: true, data: cards, saved };
@@ -477,21 +483,27 @@ router.get("/document/:documentId", async (req, res) => {
             where.user_id = requestedUserId;
         }
 
-        const cards = await Flashcard.findAll({
-            where,
-            include: [
-                {
-                    model: FlashcardContent,
-                    required: false,
-                    attributes: ["content_id", "front_text", "back_text"],
-                },
-            ],
-            order: [["created_at", "DESC"]],
-        });
+        const cards = await Flashcard.findAll({ where, order: [["created_at", "DESC"]] });
+        const cardIds = cards
+            .map((card) => Number(card?.flashcard_id))
+            .filter((id) => Number.isFinite(id) && id > 0);
+        const contents = cardIds.length
+            ? await FlashcardContent.findAll({
+                  where: { flashcard_id: cardIds },
+                  attributes: ["content_id", "flashcard_id", "front_text", "back_text"],
+                  order: [["content_id", "ASC"]],
+              })
+            : [];
+        const byFlashcardId = new Map();
+        for (const c of contents) {
+            const row = typeof c.toJSON === "function" ? c.toJSON() : c;
+            const fid = Number(row?.flashcard_id);
+            if (!Number.isFinite(fid) || byFlashcardId.has(fid)) continue;
+            byFlashcardId.set(fid, row);
+        }
         const data = cards.map((card) => {
             const row = typeof card.toJSON === "function" ? card.toJSON() : card;
-            const contents = Array.isArray(row?.FlashcardContents) ? row.FlashcardContents : [];
-            const firstContent = contents[0] || null;
+            const firstContent = byFlashcardId.get(Number(row?.flashcard_id)) || null;
             return {
                 ...row,
                 front_text: String(firstContent?.front_text || ""),

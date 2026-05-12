@@ -76,22 +76,27 @@ router.get("/activity-logs", auth, rbac("ADMIN"), async (req, res) => {
     try {
         const limit = Math.min(Number(req.query.limit) || 100, 500);
         const logs = await ActivityLog.findAll({
-            include: [{
-                model: User,
-                attributes: ['email']
-            }],
             order: [["created_at", "DESC"]],
             limit,
         });
-
-        // Map email to the flat object for the frontend
-        const mappedLogs = logs.map(l => {
-            const raw = l.toJSON();
-            return {
-                ...raw,
-                email: raw.User ? raw.User.email : null
-            };
-        });
+        const rows = logs.map((l) => (typeof l.toJSON === "function" ? l.toJSON() : l));
+        const userIds = [...new Set(rows.map((r) => Number(r?.user_id)).filter((id) => Number.isFinite(id) && id > 0))];
+        const users = userIds.length
+            ? await User.findAll({
+                  where: { user_id: userIds },
+                  attributes: ["user_id", "email"],
+              })
+            : [];
+        const emailByUserId = new Map(
+            users.map((u) => {
+                const row = typeof u.toJSON === "function" ? u.toJSON() : u;
+                return [Number(row.user_id), row.email || null];
+            })
+        );
+        const mappedLogs = rows.map((raw) => ({
+            ...raw,
+            email: Number.isFinite(Number(raw?.user_id)) ? emailByUserId.get(Number(raw.user_id)) || null : null,
+        }));
 
         return res.json({ success: true, data: mappedLogs });
     } catch (err) {

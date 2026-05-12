@@ -64,6 +64,7 @@ async function ensureQuizLifecycleColumns() {
     "ALTER TABLE quiz_questions MODIFY COLUMN correct_answer VARCHAR(2048) NOT NULL",
     "ALTER TABLE quiz_answers MODIFY COLUMN user_answer VARCHAR(2048) NULL DEFAULT NULL",
     "ALTER TABLE quiz_questions ADD COLUMN explanation TEXT NULL",
+    "ALTER TABLE question_bank_items ADD COLUMN explanation TEXT NULL",
   ];
   for (const sql of stmts) {
     try { await p.execute(sql); }
@@ -383,12 +384,23 @@ function optionLetterFromAnswer(answer) {
   return ["A", "B", "C", "D"].includes(s) ? s : null;
 }
 
-async function listQuizHistory(limit = 20, userId = null) {
+async function listQuizHistory(limit = 20, userId = null, publishStatus = null) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
   const uid = parseOptionalInt(userId);
+  const pub =
+    publishStatus === 0 || publishStatus === 1 || publishStatus === "0" || publishStatus === "1"
+      ? Number(publishStatus)
+      : null;
 
   if (uid == null) return [];
+
+  let wherePub = "";
+  const execParams = [uid];
+  if (pub === 0 || pub === 1) {
+    wherePub = " AND q.is_published = ?";
+    execParams.push(pub);
+  }
 
   const sql = `
     SELECT
@@ -416,11 +428,12 @@ async function listQuizHistory(limit = 20, userId = null) {
     LEFT JOIN courses c ON c.course_id = q.course_id
     WHERE qa.user_id = ?
       AND qa.completed_at IS NOT NULL
+      ${wherePub}
     ORDER BY qa.completed_at DESC, qa.attempt_id DESC
     LIMIT ${lim}
   `;
 
-  const [rows] = await p.execute(sql, [uid]);
+  const [rows] = await p.execute(sql, execParams);
 
   return rows.map(row => ({
     attemptId: row.attempt_id != null ? Number(row.attempt_id) : null,
@@ -1617,9 +1630,11 @@ async function listQuestionBankItems(ownerUserId) {
 
   const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
   const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
+  const supportExplanation = await hasTableColumn("question_bank_items", "explanation");
   const mediaColumns = supportMediaType && supportMediaUrl
     ? ", qbi.media_type, qbi.media_url"
     : "";
+  const explanationColumn = supportExplanation ? ", qbi.explanation" : "";
   const sql = `
     SELECT
       qbi.item_id,
@@ -1640,7 +1655,7 @@ async function listQuestionBankItems(ownerUserId) {
       qbi.is_active,
       qbi.created_at,
       qbi.updated_at
-      ${mediaColumns}
+      ${mediaColumns}${explanationColumn}
     FROM question_bank_items qbi
     WHERE qbi.owner_user_id = ?
       AND qbi.is_active = 1
@@ -1662,6 +1677,7 @@ async function listQuestionBankItems(ownerUserId) {
     correctAnswer: r.correct_answer || "A",
     mediaType: r.media_type || null,
     mediaUrl: r.media_url || null,
+    explanation: r.explanation != null ? String(r.explanation) : null,
     versionNo: Number(r.version_no || 1),
     version: Number(r.version || 1),
     createdAt: r.created_at || null,
@@ -1678,6 +1694,7 @@ async function insertQuestionBankItem({
   difficulty,
   options,
   correctAnswer,
+  explanation,
   mediaType,
   mediaUrl,
 }) {
@@ -1702,13 +1719,15 @@ async function insertQuestionBankItem({
 
   const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
   const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
-  const [hdr] = supportMediaType && supportMediaUrl
+  const supportExplanation = await hasTableColumn("question_bank_items", "explanation");
+  const safeExplanation = explanation != null && String(explanation).trim() ? String(explanation).trim() : null;
+  const [hdr] = supportMediaType && supportMediaUrl && supportExplanation
     ? await p.execute(
       `INSERT INTO question_bank_items (
         bank_id, owner_user_id, question_text,
         option_a, option_b, option_c, option_d,
-        correct_answer, question_type, topic, category, difficulty, media_type, media_url
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        correct_answer, question_type, topic, category, difficulty, media_type, media_url, explanation
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         bankId,
         uid,
@@ -1724,8 +1743,33 @@ async function insertQuestionBankItem({
         safeDifficulty,
         normalized.media_type,
         normalized.media_url,
+        safeExplanation,
       ]
     )
+    : supportMediaType && supportMediaUrl
+      ? await p.execute(
+        `INSERT INTO question_bank_items (
+          bank_id, owner_user_id, question_text,
+          option_a, option_b, option_c, option_d,
+          correct_answer, question_type, topic, category, difficulty, media_type, media_url
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          bankId,
+          uid,
+          normalized.question,
+          trunc255(normalized.options.A),
+          trunc255(normalized.options.B),
+          trunc255(normalized.options.C),
+          trunc255(normalized.options.D),
+          normalized.correct_answer,
+          safeType,
+          safeTopic,
+          safeCategory,
+          safeDifficulty,
+          normalized.media_type,
+          normalized.media_url,
+        ]
+      )
     : await p.execute(
       `INSERT INTO question_bank_items (
         bank_id, owner_user_id, question_text,
@@ -1759,7 +1803,7 @@ async function insertQuestionBankItem({
 async function updateQuestionBankItem(
   itemId,
   ownerUserId,
-  { question, type, topic, category, difficulty, options, correctAnswer, mediaType, mediaUrl }
+  { question, type, topic, category, difficulty, options, correctAnswer, explanation, mediaType, mediaUrl }
 ) {
   const p = getPool();
   const id = Number(itemId);
@@ -1791,7 +1835,47 @@ async function updateQuestionBankItem(
 
   const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
   const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
-  if (supportMediaType && supportMediaUrl) {
+  const supportExplanation = await hasTableColumn("question_bank_items", "explanation");
+  const safeExplanation =
+    explanation != null ? String(explanation).trim() || null : (base.explanation != null ? String(base.explanation) : null);
+  if (supportMediaType && supportMediaUrl && supportExplanation) {
+    await p.execute(
+      `UPDATE question_bank_items
+       SET question_text = ?,
+           option_a = ?,
+           option_b = ?,
+           option_c = ?,
+           option_d = ?,
+           correct_answer = ?,
+           question_type = ?,
+           topic = ?,
+           category = ?,
+           difficulty = ?,
+           media_type = ?,
+           media_url = ?,
+           explanation = ?,
+           version_no = version_no + 1,
+           version = version + 1
+       WHERE item_id = ? AND owner_user_id = ?`,
+      [
+        normalized.question,
+        trunc255(normalized.options.A),
+        trunc255(normalized.options.B),
+        trunc255(normalized.options.C),
+        trunc255(normalized.options.D),
+        normalized.correct_answer,
+        String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+        trunc255(topic || base.topic || "General") || "General",
+        String(category ?? base.category ?? "").trim() || null,
+        String(difficulty || base.difficulty || "medium").trim() || "medium",
+        normalized.media_type,
+        normalized.media_url,
+        safeExplanation,
+        id,
+        uid,
+      ]
+    );
+  } else if (supportMediaType && supportMediaUrl) {
     await p.execute(
       `UPDATE question_bank_items
        SET question_text = ?,
@@ -2043,14 +2127,26 @@ async function getQuizAnalyticsByOwner(ownerUserId, topQuestions = 5) {
   };
 }
 
-async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
+async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null, publishStatus = null) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 500);
   const uid = parseOptionalInt(ownerUserId);
   if (uid == null) return [];
 
+  const pub =
+    publishStatus === 0 || publishStatus === 1 || publishStatus === "0" || publishStatus === "1"
+      ? Number(publishStatus)
+      : null;
+
   const role = await getUserRole(uid);
   const includeShared = isLecturerRole(role) || isAdminRole(role);
+  let wherePub = "";
+  const execParams = [uid];
+  if (pub === 0 || pub === 1) {
+    wherePub = " AND q.is_published = ?";
+    execParams.push(pub);
+  }
+
   const sql = `
     SELECT
       q.quiz_id,
@@ -2088,12 +2184,12 @@ async function listOwnedQuizzesHistory(limit = 20, ownerUserId = null) {
     LEFT JOIN courses c ON c.course_id = q.course_id
     LEFT JOIN documents d ON d.document_id = q.document_id
     LEFT JOIN users u_shared ON u_shared.user_id = COALESCE(q.shared_by_user_id, q.created_by)
-    WHERE (q.created_by = ? ${includeShared ? "OR q.shared_from_student = 1" : ""})
+    WHERE (q.created_by = ? ${includeShared ? "OR q.shared_from_student = 1" : ""})${wherePub}
     ORDER BY q.created_at DESC
     LIMIT ${lim}
   `;
 
-  const [rows] = await p.execute(sql, [uid]);
+  const [rows] = await p.execute(sql, execParams);
 
   return rows.map((row) => ({
     quizId: Number(row.quiz_id),

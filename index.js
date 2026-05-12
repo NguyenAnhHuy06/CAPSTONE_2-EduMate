@@ -28,6 +28,7 @@ const {
   QUIZ_NAVIGATE_REPLACE_DEFAULT,
 } = require("./src/utils/quizNavigatePath");
 const { normalizeQuestionsForClient } = require("./src/utils/normalizeQuizClientPayload");
+require("./src/models/associations");
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
@@ -1773,6 +1774,8 @@ app.get("/api/progress/summary", async (req, res) => {
 });
 
 app.get("/api/quizzes/history", async (req, res) => {
+  // Avoid 304 caching in instructor portal; this list changes right after Save Draft.
+  res.setHeader("Cache-Control", "no-store");
   try {
     if (!db.isConfigured()) {
       return res.status(200).json({
@@ -1781,7 +1784,22 @@ app.get("/api/quizzes/history", async (req, res) => {
         message: MSG_DATA_UNAVAILABLE,
       });
     }
-    const limit = req.query.limit;
+    const publishStatus = (() => {
+      const raw =
+        req.query.status ??
+        req.query.is_published ??
+        req.query.isPublished ??
+        req.query.published;
+      if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+      const s = String(raw).trim().toLowerCase();
+      if (["draft", "unpublished", "false", "0", "no"].includes(s)) return 0;
+      if (["published", "true", "1", "yes"].includes(s)) return 1;
+      const n = Number(raw);
+      if (n === 0) return 0;
+      if (n === 1) return 1;
+      return null;
+    })();
+    const rawLimit = req.query.limit ?? req.query.pageSize;
     const userId =
       req.query.userId ??
       req.query.user_id ??
@@ -1795,14 +1813,31 @@ app.get("/api/quizzes/history", async (req, res) => {
       ownerOnlyParam === "true" ||
       ownerOnlyParam === 1 ||
       ownerOnlyParam === "1";
+    let isLecturerOrAdmin = false;
     if ((ownerOnlyParam == null || String(ownerOnlyParam).trim() === "") && userId != null && String(userId).trim() !== "") {
       try {
         const role = await db.getUserRole(userId);
-        const isLecturerOrAdmin = ["LECTURER", "TEACHER", "ADMIN"].includes(String(role || "").trim().toUpperCase());
+        isLecturerOrAdmin = ["LECTURER", "TEACHER", "ADMIN"].includes(String(role || "").trim().toUpperCase());
         if (isLecturerOrAdmin) ownerOnly = true;
       } catch (_) {}
+    } else if (userId != null && String(userId).trim() !== "") {
+      try {
+        const role = await db.getUserRole(userId);
+        isLecturerOrAdmin = ["LECTURER", "TEACHER", "ADMIN"].includes(String(role || "").trim().toUpperCase());
+      } catch (_) {}
     }
-    const data = await db.listQuizHistory(limit, userId, ownerOnly);
+    const hasExplicitLimit =
+      rawLimit != null &&
+      String(rawLimit).trim() !== "" &&
+      Number.isFinite(Number(rawLimit)) &&
+      Number(rawLimit) > 0;
+    const limit =
+      hasExplicitLimit
+        ? rawLimit
+        : ownerOnly && isLecturerOrAdmin
+          ? 200
+          : undefined;
+    const data = await db.listQuizHistory(limit, userId, ownerOnly, publishStatus);
     let merged = Array.isArray(data) ? data.slice() : [];
 
     // Lecturer/Admin "ownerOnly" view should also include student-shared quizzes.
@@ -1812,6 +1847,9 @@ app.get("/api/quizzes/history", async (req, res) => {
         const isLecturerOrAdmin = ["LECTURER", "TEACHER", "ADMIN"].includes(String(role || "").trim().toUpperCase());
         if (isLecturerOrAdmin && db.isConfigured()) {
           const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
+          const pubClause =
+            publishStatus === 0 || publishStatus === 1 ? " AND q.is_published = ?" : "";
+          const sharedParams = publishStatus === 0 || publishStatus === 1 ? [publishStatus] : [];
           const [sharedRows] = await db.getPool().execute(
             `SELECT q.quiz_id, q.title, q.created_at, q.published_at, q.is_published, q.source_file_url, q.document_id,
                     c.course_code,
@@ -1830,9 +1868,10 @@ app.get("/api/quizzes/history", async (req, res) => {
              FROM quizzes q
              LEFT JOIN courses c ON c.course_id = q.course_id
              LEFT JOIN users u ON u.user_id = COALESCE(q.shared_by_user_id, q.created_by)
-             WHERE COALESCE(q.shared_for_review, 0) = 1
+             WHERE COALESCE(q.shared_for_review, 0) = 1${pubClause}
              ORDER BY COALESCE(q.shared_at, q.created_at) DESC
-             LIMIT ${lim}`
+             LIMIT ${lim}`,
+            sharedParams
           );
           const sharedMapped = (sharedRows || []).map((row) => ({
             quizId: row.quiz_id,
@@ -1870,6 +1909,7 @@ app.get("/api/quizzes/history", async (req, res) => {
 
     const withShareFlags = merged.map((row) => ({
       ...row,
+      is_published: row?.isPublished ? 1 : 0,
       sharedForReview: Boolean(
         row?.sharedForReview ??
         row?.shared_from_student ??
@@ -2877,11 +2917,13 @@ async function handleQuizGenerate(req, res) {
         });
       }
       const requestedQuizId = Number(req.body.quizId ?? req.body.quiz_id);
+      const status = String(req.body.status ?? "").trim().toLowerCase();
       const autoPublish =
-        req.body.autoPublish !== false &&
-        req.body.autoPublish !== "false" &&
-        req.body.publish !== false &&
-        req.body.publish !== "false";
+        status === "published" ||
+        req.body.publish === true ||
+        req.body.publish === "true" ||
+        req.body.autoPublish === true ||
+        req.body.autoPublish === "true";
       if (Number.isFinite(requestedQuizId) && requestedQuizId > 0) {
         const canManage = await db.canUserManageQuiz(requestedQuizId, createdBy);
         if (!canManage) {
@@ -3024,6 +3066,8 @@ app.post("/api/quizzes/generate", handleQuizGenerate);
 app.post("/api/quiz/generate", handleQuizGenerate);
 
 app.get("/api/quizzes/published", async (req, res) => {
+  // Published list can update during session; keep dev UX consistent.
+  res.setHeader("Cache-Control", "no-store");
   try {
     const lim = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
     const fromS3 = s3.isS3Configured() ? await listPublishedQuizzesFromS3(lim * 2) : [];
@@ -3097,6 +3141,14 @@ app.patch("/api/quizzes/:id", async (req, res) => {
     if (Array.isArray(req.body.questions)) {
       await db.replaceQuizQuestions(quizId, req.body.questions);
     }
+    // Support FE "Save draft" toggle (draft=0, published=1).
+    // Publishing still requires the dedicated /publish endpoint (S3 sync + rollback).
+    try {
+      const st = String(req.body?.status ?? "").trim().toLowerCase();
+      if (st === "draft" || st === "unpublished" || st === "0" || st === "false") {
+        await db.setQuizPublished(quizId, false);
+      }
+    } catch (_) {}
     row = await db.getQuizWithQuestions(quizId);
     try {
       const role = await db.getUserRole(userId);
@@ -3135,7 +3187,12 @@ app.post("/api/quizzes", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const userId = req.body.userId ?? req.body.user_id ?? req.body.createdBy ?? req.body.created_by;
+    const userId =
+      getBearerUserId(req) ??
+      req.body.userId ??
+      req.body.user_id ??
+      req.body.createdBy ??
+      req.body.created_by;
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) {
       return res.status(403).json({ success: false, message: "Only lecturers can create quizzes." });

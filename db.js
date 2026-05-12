@@ -1200,10 +1200,14 @@ function normalizeAttemptScorePercent(score, totalQuestions, correctCount) {
   return 0;
 }
 
-async function listQuizHistory(limit = 20, userId = null, ownerOnly = false) {
+async function listQuizHistory(limit = 20, userId = null, ownerOnly = false, publishStatus = null) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 200);
   const uid = parseOptionalInt(userId);
+  const pub =
+    publishStatus === 0 || publishStatus === 1 || publishStatus === "0" || publishStatus === "1"
+      ? Number(publishStatus)
+      : null;
 
   const docCategoryLine = `      (SELECT dcat.category FROM documents dcat WHERE dcat.document_id = q.document_id LIMIT 1) AS document_category,
 `;
@@ -1230,6 +1234,16 @@ ${docCategoryLine}      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id
         SELECT 1 FROM quiz_attempts qa2 WHERE qa2.quiz_id = q.quiz_id AND qa2.user_id = ?)`;
       sql += `)`;
       params.push(uid, uid);
+    }
+  }
+  if (pub === 0 || pub === 1) {
+    try {
+      if (await hasTableColumn("quizzes", "is_published")) {
+        sql += ` AND q.is_published = ?`;
+        params.push(pub);
+      }
+    } catch (_) {
+      /* ignore */
     }
   }
   sql += ` ORDER BY COALESCE(
@@ -1813,6 +1827,7 @@ async function ensureQuestionBankTables() {
       difficulty VARCHAR(32) NOT NULL DEFAULT 'medium',
       media_type VARCHAR(16) NULL DEFAULT NULL,
       media_url VARCHAR(1024) NULL DEFAULT NULL,
+      explanation TEXT NULL DEFAULT NULL,
       version INT NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1834,6 +1849,7 @@ async function ensureQuestionBankTables() {
     "ALTER TABLE question_bank_items ADD COLUMN difficulty VARCHAR(32) NOT NULL DEFAULT 'medium'",
     "ALTER TABLE question_bank_items ADD COLUMN media_type VARCHAR(16) NULL DEFAULT NULL",
     "ALTER TABLE question_bank_items ADD COLUMN media_url VARCHAR(1024) NULL DEFAULT NULL",
+    "ALTER TABLE question_bank_items ADD COLUMN explanation TEXT NULL DEFAULT NULL",
     "ALTER TABLE question_bank_items ADD COLUMN version INT NOT NULL DEFAULT 1",
   ];
   for (const sql of itemAlterStmts) {
@@ -1925,7 +1941,7 @@ async function listQuestionBank(limit = 2000, userId = null) {
   try {
     [rows] = await getPool().execute(
       `SELECT qbi.item_id, qbi.bank_id, qbi.question_text, qbi.option_a, qbi.option_b, qbi.option_c, qbi.option_d,
-              qbi.correct_answer, qbi.question_type, qbi.topic, qbi.difficulty, qbi.category, qbi.media_type, qbi.media_url, qb.title AS bank_title
+              qbi.correct_answer, qbi.question_type, qbi.topic, qbi.difficulty, qbi.category, qbi.media_type, qbi.media_url, qbi.explanation, qb.title AS bank_title
        FROM question_bank_items qbi
        INNER JOIN question_bank qb ON qb.bank_id = qbi.bank_id
        WHERE qb.owner_user_id = ?
@@ -1937,7 +1953,7 @@ async function listQuestionBank(limit = 2000, userId = null) {
     if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
     [rows] = await getPool().execute(
       `SELECT qbi.item_id, qbi.bank_id, qbi.question_text, qbi.option_a, qbi.option_b, qbi.option_c, qbi.option_d,
-              qbi.correct_answer, qbi.question_type, qbi.topic, qbi.difficulty, qbi.category, NULL AS media_type, NULL AS media_url, qb.title AS bank_title
+              qbi.correct_answer, qbi.question_type, qbi.topic, qbi.difficulty, qbi.category, NULL AS media_type, NULL AS media_url, NULL AS explanation, qb.title AS bank_title
        FROM question_bank_items qbi
        INNER JOIN question_bank qb ON qb.bank_id = qbi.bank_id
        WHERE qb.owner_user_id = ?
@@ -1957,6 +1973,7 @@ async function listQuestionBank(limit = 2000, userId = null) {
     category: r.category != null && String(r.category).trim() ? String(r.category).trim() : "",
     mediaType: r.media_type ? String(r.media_type) : null,
     mediaUrl: r.media_url ? String(r.media_url) : null,
+    explanation: r.explanation != null && String(r.explanation).trim() ? String(r.explanation) : null,
     options: [r.option_a, r.option_b, r.option_c, r.option_d].map((x) => String(x || "")),
     correctAnswer: String(r.correct_answer || ""),
   }));
@@ -1980,13 +1997,17 @@ async function createQuestionBankItem(userId, payload) {
   const mediaType = ["image", "video", "audio", "youtube"].includes(mediaTypeRaw) ? mediaTypeRaw : null;
   const mediaUrlRaw = payload?.mediaUrl ?? payload?.media_url ?? payload?.youtubeUrl ?? "";
   const mediaUrl = String(mediaUrlRaw || "").trim() || null;
+  const explanation =
+    payload?.explanation != null && String(payload.explanation).trim()
+      ? String(payload.explanation).trim()
+      : null;
   let hdr;
   try {
     [hdr] = await getPool().execute(
       `INSERT INTO question_bank_items
-        (bank_id, owner_user_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, topic, difficulty, category, media_type, media_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [bankId, uid, norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl]
+        (bank_id, owner_user_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, topic, difficulty, category, media_type, media_url, explanation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [bankId, uid, norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl, explanation]
     );
   } catch (e) {
     if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
@@ -2052,13 +2073,22 @@ async function updateQuestionBankItem(questionId, userId, payload) {
   const mediaUrl = hasMediaUrlInput
     ? (String(mediaUrlRaw || "").trim() || null)
     : (existing.media_url ? String(existing.media_url) : null);
+  const supportExplanation = await hasTableColumn("question_bank_items", "explanation");
+  const explanation =
+    payload?.explanation != null
+      ? (String(payload.explanation).trim() || null)
+      : (existing.explanation != null ? String(existing.explanation) : null);
   try {
     await getPool().execute(
       `UPDATE question_bank_items
        SET question_text = ?, option_a = ?, option_b = ?, option_c = ?, option_d = ?, correct_answer = ?,
-          question_type = ?, topic = ?, difficulty = ?, category = ?, media_type = ?, media_url = ?, version = version + 1
+          question_type = ?, topic = ?, difficulty = ?, category = ?, media_type = ?, media_url = ?${
+            supportExplanation ? ", explanation = ?" : ""
+          }, version = version + 1
        WHERE item_id = ?`,
-      [norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl, qid]
+      supportExplanation
+        ? [norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl, explanation, qid]
+        : [norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl, qid]
     );
   } catch (e) {
     if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
@@ -2766,12 +2796,17 @@ async function manualRegradeQuizAttempt({ attemptId, staffUserId, grades }) {
       const isCorrect = !!(g.isCorrect ?? g.is_correct);
       if (!Number.isFinite(qid)) continue;
 
-      const [qBelongs] = await conn.execute(
-        `SELECT 1 FROM quiz_questions WHERE quiz_id = ? AND question_id = ? LIMIT 1`,
-        [quizId, qid]
+      // Authoritative check: this attempt must have an answer row for `question_id`.
+      // Do not require `quiz_questions` membership — quiz edits / bank ids can leave answers
+      // that no longer appear on the current quiz definition; regrade still targets stored rows.
+      const [ansBelongs] = await conn.execute(
+        `SELECT 1 FROM quiz_answers WHERE attempt_id = ? AND question_id = ? LIMIT 1`,
+        [aid, qid]
       );
-      if (!qBelongs.length) {
-        const err = new Error(`Question ${qid} does not belong to this quiz.`);
+      if (!ansBelongs.length) {
+        const err = new Error(
+          `Question ${qid} is not part of this attempt (no stored answer row for this submission).`
+        );
         err.statusCode = 400;
         throw err;
       }

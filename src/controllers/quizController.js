@@ -227,13 +227,33 @@ const getGenerateQuizAsyncStatus = async (req, res) => {
   });
 };
 
+/** Query: status=draft|published, or is_published / isPublished / published = 0|1 */
+function parseHistoryPublishStatus(req) {
+  const raw =
+    req.query?.status ??
+    req.query?.is_published ??
+    req.query?.isPublished ??
+    req.query?.published;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  const s = String(raw).trim().toLowerCase();
+  if (["draft", "unpublished", "false", "0", "no"].includes(s)) return 0;
+  if (["published", "true", "1", "yes"].includes(s)) return 1;
+  const n = Number(raw);
+  if (n === 0) return 0;
+  if (n === 1) return 1;
+  return null;
+}
+
 const getQuizHistory = async (req, res) => {
+  // Prevent 304/ETag caching; UI expects immediate refresh after Save Draft.
+  res.setHeader("Cache-Control", "no-store");
   try {
     if (!db.isConfigured()) {
       return res.status(200).json({ success: true, data: [], message: "MySQL chưa cấu hình." });
     }
 
-    const limit = req.query.limit;
+    const publishStatus = parseHistoryPublishStatus(req);
+    const rawLimit = req.query.limit ?? req.query.pageSize;
     const userId =
       req.query.userId ??
       req.query.user_id ??
@@ -252,9 +272,28 @@ const getQuizHistory = async (req, res) => {
       ? ownerOnlyParam === "true" || ownerOnlyParam === "1"
       : isLecturerOrAdmin;
 
-    const data = ownerOnly
-      ? await db.listOwnedQuizzesHistory(limit, userId)
-      : await db.listQuizHistory(limit, userId);
+    const hasExplicitLimit =
+      rawLimit != null &&
+      String(rawLimit).trim() !== "" &&
+      Number.isFinite(Number(rawLimit)) &&
+      Number(rawLimit) > 0;
+    // Instructor UI often filters Draft vs Published client-side from one list.
+    // Default 20 can hide older drafts when the newest rows are all published.
+    const limit =
+      hasExplicitLimit
+        ? rawLimit
+        : ownerOnly && isLecturerOrAdmin
+          ? 200
+          : undefined;
+
+    let data = ownerOnly
+      ? await db.listOwnedQuizzesHistory(limit ?? 20, userId, publishStatus)
+      : await db.listQuizHistory(limit ?? 20, userId, publishStatus);
+
+    data = (Array.isArray(data) ? data : []).map((row) => ({
+      ...row,
+      is_published: row?.isPublished ? 1 : 0,
+    }));
 
     return res.status(200).json({ success: true, data });
   } catch (err) {
@@ -618,6 +657,12 @@ const createQuestionBankItem = async (req, res) => {
     }
     const ownerUserId = req.user?.id ?? req.user?.user_id ?? req.body.userId ?? req.body.user_id;
 
+    const explanation =
+      req.body.explanation ??
+      req.body.explain ??
+      req.body.explaination ??
+      req.body.explanationText ??
+      req.body.explanation_text;
     const row = await db.insertQuestionBankItem({
       ownerUserId,
       question: req.body.question,
@@ -627,6 +672,7 @@ const createQuestionBankItem = async (req, res) => {
       difficulty: req.body.difficulty,
       options: req.body.options,
       correctAnswer: req.body.correctAnswer,
+      explanation,
       mediaType: req.body.mediaType ?? req.body.media_type,
       mediaUrl: req.body.mediaUrl ?? req.body.media_url ?? req.body.youtubeUrl,
     });
@@ -645,6 +691,12 @@ const updateQuestionBankItem = async (req, res) => {
     }
     const ownerUserId = req.user?.id ?? req.user?.user_id ?? req.body.userId ?? req.body.user_id;
 
+    const explanation =
+      req.body.explanation ??
+      req.body.explain ??
+      req.body.explaination ??
+      req.body.explanationText ??
+      req.body.explanation_text;
     const row = await db.updateQuestionBankItem(req.params.id, ownerUserId, {
       question: req.body.question,
       type: req.body.type,
@@ -653,6 +705,7 @@ const updateQuestionBankItem = async (req, res) => {
       difficulty: req.body.difficulty,
       options: req.body.options,
       correctAnswer: req.body.correctAnswer,
+      explanation,
       mediaType: req.body.mediaType ?? req.body.media_type,
       mediaUrl: req.body.mediaUrl ?? req.body.media_url ?? req.body.youtubeUrl,
     });
