@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   Sparkles,
@@ -11,12 +11,43 @@ import {
 } from 'lucide-react';
 import { useNotification } from './NotificationContext';
 import api, { getStoredAuthToken } from '../../services/api';
+import { getCurrentUserId, upsertLocalFlashcardSet } from '../../utils/flashcardLocalSets';
+import {
+  flashcardGenerateLanguageFields,
+  inferFlashcardOutputLanguage,
+} from '../../utils/inferFlashcardOutputLanguage';
+
 const STUDENT_FLASHCARD_GENERATING_KEY = 'edumate_student_flashcard_generating';
+const FLASHCARD_GEN_LANG_KEY = 'edumate_flashcard_gen_language';
+/** Fired after flashcards are persisted so lists (e.g. Study My Flashcards) can refetch. */
+export const EDUMATE_FLASHCARDS_SAVED_EVENT = 'edumate:flashcards-saved';
+
+function emitFlashcardsSaved(documentId: number) {
+  window.dispatchEvent(
+    new CustomEvent(EDUMATE_FLASHCARDS_SAVED_EVENT, { detail: { documentId } })
+  );
+}
+
+/** New set on each manual save (create flow). Edit flow uses `initialEdit.setId` instead. */
+function newFlashcardSaveSetId() {
+  return `flashcard-save-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 type StudentFlashcardJobStatus = 'idle' | 'running' | 'completed' | 'failed';
+
+export type FlashcardInitialEdit = {
+  setId: string;
+  cards: Array<{ id: string; front: string; back: string }>;
+};
 
 interface FlashcardCreatorProps {
   document: any;
+  user?: any;
   onBack: () => void;
+  /** When set, creator opens with these cards (e.g. from Study My Flashcards → Edit). */
+  initialEdit?: FlashcardInitialEdit | null;
+  /** Extra text (e.g. AI summary on document page) to infer output language when mode is Auto. */
+  contentLanguageHint?: string;
 }
 
 interface Flashcard {
@@ -25,16 +56,48 @@ interface Flashcard {
   back: string;
 }
 
-export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
+type FlashcardLanguageMode = 'auto' | 'vi' | 'en';
+
+export function FlashcardCreator({
+  document,
+  user,
+  onBack,
+  initialEdit = null,
+  contentLanguageHint = '',
+}: FlashcardCreatorProps) {
   const { showNotification } = useNotification();
 
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [flashcardSetId, setFlashcardSetId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
   const [authBlocked, setAuthBlocked] = useState(false);
+  const [languageMode, setLanguageMode] = useState<FlashcardLanguageMode>(() => {
+    try {
+      const v = localStorage.getItem(FLASHCARD_GEN_LANG_KEY);
+      if (v === 'vi' || v === 'en' || v === 'auto') return v;
+    } catch {
+      /* ignore */
+    }
+    return 'auto';
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FLASHCARD_GEN_LANG_KEY, languageMode);
+    } catch {
+      /* ignore */
+    }
+  }, [languageMode]);
+
+  const resolvedGenLanguage = useMemo(() => {
+    if (languageMode === 'vi' || languageMode === 'en') return languageMode;
+    return inferFlashcardOutputLanguage(document, contentLanguageHint);
+  }, [languageMode, document, contentLanguageHint]);
+
   const setFlashcardGeneratingStatus = (
     status: StudentFlashcardJobStatus,
     extra?: { jobId?: string; title?: string; error?: string; documentId?: number | null; s3Key?: string }
@@ -75,7 +138,22 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     
   const s3Key = document?.s3Key;
 
-  const persistFlashcards = async (cards: Flashcard[]) => {
+  useEffect(() => {
+    if (!initialEdit?.cards?.length) return;
+    setFlashcards(
+      initialEdit.cards.map((c) => ({
+        id: String(c.id),
+        front: String(c.front || ''),
+        back: String(c.back || ''),
+      }))
+    );
+    setFlashcardSetId(initialEdit.setId);
+    setSaved(false);
+    setEditingId(null);
+    setFlippedCards(new Set());
+  }, [initialEdit]);
+
+  const persistFlashcards = async (cards: Flashcard[], setId?: string | null) => {
     if (!documentId) {
       return { ok: false, message: 'Missing document ID, so flashcards could not be saved automatically.' };
     }
@@ -85,6 +163,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     }
     const payload = {
       document_id: documentId,
+      ...(setId ? { flashcard_set_id: setId } : {}),
       flashcards: validFlashcards.map((card) => ({
         front_text: card.front,
         back_text: card.back,
@@ -136,6 +215,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     }
 
     setGenerating(true);
+    setFlashcardSetId(newJobId);
     setFlashcardGeneratingStatus('running', {
       jobId: newJobId,
       title: jobTitle,
@@ -147,6 +227,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
       const res: any = await api.post('/flashcards/generate', {
         s3Key,
         ...(documentId != null ? { documentId } : {}),
+        ...flashcardGenerateLanguageFields(resolvedGenLanguage),
       });
 
       if (res?.success === false) {
@@ -176,7 +257,7 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
 
       // Auto-save right after generation so cards appear in "Study My Flashcards".
       setSaving(true);
-      const saveResult = await persistFlashcards(mapped);
+      const saveResult = await persistFlashcards(mapped, newJobId);
       setSaving(false);
 
       if (saveResult.ok) {
@@ -184,6 +265,17 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
           jobId: newJobId,
           title: jobTitle,
         });
+        if (documentId != null) emitFlashcardsSaved(documentId);
+        if (documentId != null) {
+          const uid = getCurrentUserId(user) ?? 0;
+          upsertLocalFlashcardSet({
+            documentId,
+            userId: uid,
+            setId: newJobId,
+            savedAt: new Date().toISOString(),
+            cards: mapped.map((c) => ({ id: c.id, front: c.front, back: c.back })),
+          });
+        }
         showNotification({
           type: 'success',
           title: 'Flashcards generated',
@@ -286,7 +378,14 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
     setSaving(true);
 
     try {
-      const saveResult = await persistFlashcards(flashcards);
+      const editingSetId =
+        initialEdit?.setId != null && String(initialEdit.setId).trim() !== ''
+          ? String(initialEdit.setId).trim()
+          : null;
+      // Edit existing set → same ID. Create / generate-then-save → new ID every Save (no overwrite).
+      const setId = editingSetId ?? newFlashcardSaveSetId();
+      setFlashcardSetId(setId);
+      const saveResult = await persistFlashcards(flashcards, setId);
       if (!saveResult.ok) {
         showNotification({
           type: 'warning',
@@ -295,6 +394,19 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
           duration: 4000,
         });
         return;
+      }
+
+      if (documentId != null) emitFlashcardsSaved(documentId);
+      if (documentId != null) {
+        const uid = getCurrentUserId(user) ?? 0;
+        const valid = flashcards.filter((card) => card.front.trim() && card.back.trim());
+        upsertLocalFlashcardSet({
+          documentId,
+          userId: uid,
+          setId,
+          savedAt: new Date().toISOString(),
+          cards: valid.map((c) => ({ id: c.id, front: c.front, back: c.back })),
+        });
       }
 
       showNotification({
@@ -352,6 +464,28 @@ export function FlashcardCreator({ document, onBack }: FlashcardCreatorProps) {
         <p className="text-gray-600 mb-4">
           Generate flashcards based on: <span className="text-blue-600">{document?.title}</span>
         </p>
+
+        <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3 text-sm">
+          <label htmlFor="flashcard-gen-lang" className="text-gray-700 shrink-0">
+            Card language
+          </label>
+          <select
+            id="flashcard-gen-lang"
+            value={languageMode}
+            onChange={(e) => setLanguageMode(e.target.value as FlashcardLanguageMode)}
+            disabled={generating}
+            className="w-full sm:w-auto max-w-xs rounded-lg border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-600 disabled:opacity-50"
+          >
+            <option value="auto">Auto — match document text (default English if unsure)</option>
+            <option value="vi">Tiếng Việt</option>
+            <option value="en">English</option>
+          </select>
+          {languageMode === 'auto' && (
+            <span className="text-gray-500">
+              → {resolvedGenLanguage === 'vi' ? 'Vietnamese' : 'English'}
+            </span>
+          )}
+        </div>
 
         {flashcards.length === 0 ? (
           <button

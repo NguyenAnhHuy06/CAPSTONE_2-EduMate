@@ -12,7 +12,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { QuizCreator } from '../pages/QuizCreator';
-import { FlashcardCreator } from '../pages/FlashcardCreator';
+import { FlashcardCreator, type FlashcardInitialEdit } from '../pages/FlashcardCreator';
 import { FlashcardViewer } from '../pages/student/FlashcardViewer';
 import { AIChatPanel } from './AIChatPanel';
 import api from '@/services/api';
@@ -85,6 +85,7 @@ function triggerBrowserDownload(blob: Blob, fileName: string) {
 
 export function DocumentDetail ({
   document,
+  user,
   userRole,
   onBack,
   onCreateQuizWithAi,
@@ -100,6 +101,8 @@ export function DocumentDetail ({
   const [showQuizCreator, setShowQuizCreator] = useState(false)
   const [showFlashcardCreator, setShowFlashcardCreator] = useState(false)
   const [showFlashcardViewer, setShowFlashcardViewer] = useState(false)
+  const [flashcardInitialEdit, setFlashcardInitialEdit] = useState<FlashcardInitialEdit | null>(null)
+  const [flashcardViewerNonce, setFlashcardViewerNonce] = useState(0)
   const [showAIChat, setShowAIChat] = useState(false)
   const [descriptionLoading, setDescriptionLoading] = useState(false)
   const [displayDescription, setDisplayDescription] = useState('')
@@ -131,8 +134,10 @@ export function DocumentDetail ({
   useEffect(() => {
     if (!autoOpenFlashcardMode || didAutoOpenFlashcard) return;
     if (autoOpenFlashcardMode === 'viewer') {
+      setFlashcardViewerNonce((n) => n + 1)
       setShowFlashcardViewer(true);
     } else {
+      setFlashcardInitialEdit(null)
       setShowFlashcardCreator(true);
     }
     setDidAutoOpenFlashcard(true);
@@ -633,11 +638,35 @@ export function DocumentDetail ({
   }
 
   if (showFlashcardCreator) {
-    return <FlashcardCreator document={document} onBack={() => setShowFlashcardCreator(false)} />
+    return (
+      <FlashcardCreator
+        key={flashcardInitialEdit ? `edit-${flashcardInitialEdit.setId}` : 'create'}
+        document={document}
+        user={user}
+        initialEdit={flashcardInitialEdit}
+        contentLanguageHint={displayDescription}
+        onBack={() => {
+          setFlashcardInitialEdit(null)
+          setShowFlashcardCreator(false)
+        }}
+      />
+    )
   }
 
   if (showFlashcardViewer) {
-    return <FlashcardViewer document={document} onBack={() => setShowFlashcardViewer(false)} />
+    return (
+      <FlashcardViewer
+        key={flashcardViewerNonce}
+        document={document}
+        user={user}
+        onBack={() => setShowFlashcardViewer(false)}
+        onEditSet={(payload) => {
+          setFlashcardInitialEdit(payload)
+          setShowFlashcardViewer(false)
+          setShowFlashcardCreator(true)
+        }}
+      />
+    )
   }
 
   return (
@@ -774,7 +803,10 @@ export function DocumentDetail ({
               <>
                 <button
                   type="button"
-                  onClick={() => setShowFlashcardCreator(true)}
+                  onClick={() => {
+                    setFlashcardInitialEdit(null)
+                    setShowFlashcardCreator(true)
+                  }}
                   className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
                 >
                   <Sparkles size={18} />
@@ -783,7 +815,10 @@ export function DocumentDetail ({
 
                 <button
                   type="button"
-                  onClick={() => setShowFlashcardViewer(true)}
+                  onClick={() => {
+                    setFlashcardViewerNonce((n) => n + 1)
+                    setShowFlashcardViewer(true)
+                  }}
                   className="flex items-center gap-2 px-4 py-2 bg-white border border-blue-600 text-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
                 >
                   <Sparkles size={18} />

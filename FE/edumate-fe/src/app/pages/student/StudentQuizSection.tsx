@@ -1363,6 +1363,103 @@ export function StudentQuizSection({
 
     const safeQuizQuestions = Array.isArray(selectedQuiz?.questions) ? selectedQuiz.questions : [];
 
+    const openQuizTakingSession = (quiz: any) => {
+        if (!quiz) return;
+        if (timerId) {
+            clearInterval(timerId);
+            setTimerId(null);
+        }
+        setShowResults(false);
+        setSelectedQuiz(quiz);
+        setCurrentQuestionIndex(0);
+        setAnswers([]);
+        setTimeRemaining((finiteQuizMinutes(quiz?.duration, 10) || 10) * 60);
+        setQuizStartedAtMs(Date.now());
+        setShowQuizTaking(true);
+        const timer = setInterval(() => {
+            setTimeRemaining((prev) => {
+                if (prev <= 1) {
+                    clearInterval(timer);
+                    handleSubmitQuiz(true);
+                    return 0;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+        setTimerId(timer);
+    };
+
+    const retakeQuiz = async (quizRow: any) => {
+        if (isGeneratingQuiz) return;
+        const quizId = Number(quizRow?.quizId ?? quizRow?.id ?? (selectedQuiz as any)?.quizId ?? (selectedQuiz as any)?.id);
+        if (!Number.isFinite(quizId) || quizId <= 0) {
+            showNotification({
+                type: 'warning',
+                title: 'Retake Quiz',
+                message: 'Quiz identifier is missing.',
+            });
+            return;
+        }
+
+        try {
+            let detail: any = null;
+            try {
+                const detailRes = await api.get(`/quizzes/${quizId}`);
+                detail = unwrapQuizDetailPayload(detailRes);
+            } catch {
+                detail = null;
+            }
+
+            const fallbackQuestionsRaw =
+                (quizRow as any)?.questionsSnapshot ??
+                (selectedQuiz as any)?.questionsSnapshot ??
+                quizRow?.questions ??
+                (selectedQuiz as any)?.questions ??
+                [];
+            const questions = normalizeStoredQuestions((detail?.questions || fallbackQuestionsRaw) as any[]);
+
+            if (!questions.length) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Retake Quiz',
+                    message: 'This quiz has no questions available to retake.',
+                });
+                return;
+            }
+
+            const quizToTake = {
+                ...(quizRow || {}),
+                id: detail?.quiz_id || quizId,
+                title: detail?.title || quizRow?.title || selectedQuiz?.title || 'Quiz',
+                questions,
+                passPercentage: finitePassPercent(
+                    detail?.pass_percentage ??
+                        (detail as any)?.passPercentage ??
+                        (quizRow as any)?.passPercentage ??
+                        70,
+                    70
+                ),
+                duration: finiteQuizMinutes(
+                    detail?.duration_minutes ??
+                        (detail as any)?.duration ??
+                        (quizRow as any)?.duration ??
+                        10,
+                    10
+                ),
+            };
+
+            void recordAttemptStart(quizToTake.id);
+            openQuizTakingSession(quizToTake);
+        } catch (err: unknown) {
+            console.error('[retakeQuiz] failed:', err);
+            showNotification({
+                type: 'warning',
+                title: 'Retake Quiz',
+                message: safeNotificationMessage(err, 'quizStart'),
+            });
+        }
+    };
+
     const recordAttemptStart = async (quizId: string | number | undefined) => {
         const id = Number(quizId);
         if (!Number.isFinite(id) || id <= 0) return;
@@ -1424,23 +1521,7 @@ export function StudentQuizSection({
                     ),
                 };
                 void recordAttemptStart(generatedQuiz.id);
-                setSelectedQuiz(generatedQuiz);
-                setCurrentQuestionIndex(0);
-                setAnswers([]);
-                setTimeRemaining((generatedQuiz.duration || 10) * 60);
-                setQuizStartedAtMs(Date.now());
-                setShowQuizTaking(true);
-                const timer = setInterval(() => {
-                    setTimeRemaining((prev) => {
-                        if (prev <= 1) {
-                            clearInterval(timer);
-                            handleSubmitQuiz(true);
-                            return 0;
-                        }
-                        return prev - 1;
-                    });
-                }, 1000);
-                setTimerId(timer);
+                openQuizTakingSession(generatedQuiz);
                 return;
             }
 
@@ -1828,17 +1909,20 @@ export function StudentQuizSection({
                 });
                 setCompletedQuizzes((prev) => {
                     let updated = false;
+                    const nowIso = new Date().toISOString();
+                    const scorePct = Number((quizResult as any)?.score ?? result.score);
                     return prev.map((q) => {
                         if (updated) return q;
                         if (
-                            String((q as any)?.quizId ?? q?.id) === String(selectedQuiz.id) &&
-                            ((q as any)?.attemptId == null || (q as any)?.attemptId === '')
+                            String((q as any)?.quizId ?? q?.id) === String(selectedQuiz.id)
                         ) {
                             updated = true;
                             return {
                                 ...q,
                                 attemptId: createdAttemptId,
                                 resultId: `${selectedQuiz.id}-${createdAttemptId}`,
+                                ...(Number.isFinite(scorePct) ? { myScore: Math.round(scorePct) } : {}),
+                                completedDate: (q as any)?.completedDate ?? nowIso,
                             };
                         }
                         return q;
@@ -1980,8 +2064,16 @@ export function StudentQuizSection({
                                 </p>
                             )}
                         </div>
-                        <button
-                            onClick={async () => {
+                        <div className="flex flex-col items-end gap-2">
+                            <button
+                                onClick={() => retakeQuiz(quiz)}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                            >
+                                <Play size={20} />
+                                Retake
+                            </button>
+                            <button
+                                onClick={async () => {
                                 const score = 'myScore' in quiz ? Number(quiz.myScore || 0) : 0;
                                 let fullQuiz = quiz;
                                 const uid = user?.user_id ?? user?.id ?? user?.userId;
@@ -2325,12 +2417,13 @@ export function StudentQuizSection({
                                         : null,
                                 });
                                 setShowResults(true);
-                            }}
-                            className="flex items-center gap-2 px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                        >
-                            <Eye size={20} />
-                            View Results
-                        </button>
+                                }}
+                                className="flex items-center gap-2 px-4 py-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                            >
+                                <Eye size={20} />
+                                View Results
+                            </button>
+                        </div>
                     </div>
                     <div className="grid grid-cols-3 gap-4 pt-4 border-t border-gray-200 text-sm">
                         <div>
@@ -2635,6 +2728,15 @@ export function StudentQuizSection({
 
                     <div className="p-6">
                         {/* Score Summary */}
+                        <div className="flex flex-wrap items-center justify-end gap-2 mb-4">
+                            <button
+                                type="button"
+                                onClick={() => retakeQuiz(selectedQuiz)}
+                                className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+                            >
+                                Retake quiz
+                            </button>
+                        </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
                             <div className="bg-blue-50 rounded-lg p-4 text-center">
                                 <div className="text-blue-600 mb-2">
