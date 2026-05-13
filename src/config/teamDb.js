@@ -1670,6 +1670,14 @@ async function getProgressSummary(userId) {
   const progressPercent =
     totalMaterials > 0 ? Math.round((completedMaterials / totalMaterials) * 100) : 0;
 
+  let ranking = null;
+  try {
+    const lb = await getLeaderboard({ limit: 200, requestingUserId: uid });
+    ranking = lb.myRank;
+  } catch (e) {
+    console.warn("[getProgressSummary] leaderboard:", e.message);
+  }
+
   return {
     overall: {
       progressPercent,
@@ -1683,6 +1691,8 @@ async function getProgressSummary(userId) {
       currentDays,
       longestDays,
     },
+    /** Same shape as GET /leaderboard `myRank` — for student dashboard "Ranking" card */
+    ranking,
   };
 }
 

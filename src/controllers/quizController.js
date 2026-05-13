@@ -579,7 +579,8 @@ const getLeaderboard = async (req, res) => {
   try {
     if (!db.isConfigured()) return res.status(503).json({ success: false, message: "MySQL chưa cấu hình." });
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
-    const requestingUserId = req.user?.id ?? req.query.userId ?? null;
+    const requestingUserId =
+      req.user?.id ?? req.user?.user_id ?? req.query.userId ?? req.query.user_id ?? null;
     const result = await db.getLeaderboard({ limit, requestingUserId });
     return res.status(200).json({ success: true, ...result });
   } catch (err) {

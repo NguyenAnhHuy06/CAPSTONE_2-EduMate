@@ -333,17 +333,43 @@ app.use("/api/donations", donationRoutes);
 app.use("/api/donate", donateRoutes);
 // Compatibility endpoint used by older frontend builds.
 app.get("/api/leaderboard", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   try {
     if (!teamDb.isConfigured()) {
-      return res.status(200).json({ success: true, top: [], me: null, total: 0 });
+      return res.status(200).json({
+        success: true,
+        total: 0,
+        data: [],
+        myRank: null,
+        top: [],
+        me: null,
+      });
     }
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
-    const requestingUserId = req.query.userId ?? req.query.user_id ?? null;
+    const requestingUserId =
+      req.query.userId ??
+      req.query.user_id ??
+      getBearerUserId(req);
     const result = await teamDb.getLeaderboard({ limit, requestingUserId });
-    return res.status(200).json({ success: true, ...result });
+    return res.status(200).json({
+      success: true,
+      total: result.total,
+      data: result.data,
+      myRank: result.myRank,
+      // Aliases for older FE dashboards
+      top: result.data,
+      me: result.myRank,
+    });
   } catch (err) {
     console.error("[api/leaderboard]", err);
-    return res.status(200).json({ success: true, top: [], me: null, total: 0 });
+    return res.status(200).json({
+      success: true,
+      total: 0,
+      data: [],
+      myRank: null,
+      top: [],
+      me: null,
+    });
   }
 });
 // --- END MODULAR FEATURES ---

@@ -16,8 +16,27 @@ function normalizeGeneratedCards(rawCards) {
     if (!Array.isArray(rawCards)) return [];
     return rawCards
         .map((item) => {
-            const front = String(item?.front ?? item?.question ?? item?.q ?? "").trim();
-            const back = String(item?.back ?? item?.answer ?? item?.a ?? "").trim();
+            if (item == null || typeof item !== "object") return { front: "", back: "" };
+            const front = String(
+                item.front ??
+                    item.question ??
+                    item.q ??
+                    item.term ??
+                    item.title ??
+                    item.prompt ??
+                    item.heading ??
+                    ""
+            ).trim();
+            const back = String(
+                item.back ??
+                    item.answer ??
+                    item.a ??
+                    item.definition ??
+                    item.body ??
+                    item.response ??
+                    item.explanation ??
+                    ""
+            ).trim();
             return { front, back };
         })
         .filter((c) => c.front && c.back)
@@ -28,11 +47,26 @@ function parseAiCardsFromText(answerText) {
     const text = String(answerText || "").trim();
     if (!text) return [];
 
+    const tryNormalize = (maybe) => {
+        const cards = normalizeGeneratedCards(maybe);
+        return cards.length ? cards : [];
+    };
+
     // Case 1: valid JSON array directly
     try {
         const parsed = JSON.parse(text);
-        const cards = normalizeGeneratedCards(parsed);
-        if (cards.length) return cards;
+        const fromArr = tryNormalize(parsed);
+        if (fromArr.length) return fromArr;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const inner =
+                parsed.flashcards ??
+                parsed.cards ??
+                parsed.items ??
+                parsed.data ??
+                parsed.results;
+            const fromInner = tryNormalize(inner);
+            if (fromInner.length) return fromInner;
+        }
     } catch (_) {}
 
     // Case 2: response wrapped in code block or additional explanation text
@@ -40,8 +74,18 @@ function parseAiCardsFromText(answerText) {
     if (codeBlockMatch?.[1]) {
         try {
             const parsed = JSON.parse(codeBlockMatch[1].trim());
-            const cards = normalizeGeneratedCards(parsed);
-            if (cards.length) return cards;
+            const fromArr = tryNormalize(parsed);
+            if (fromArr.length) return fromArr;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                const inner =
+                    parsed.flashcards ??
+                    parsed.cards ??
+                    parsed.items ??
+                    parsed.data ??
+                    parsed.results;
+                const fromInner = tryNormalize(inner);
+                if (fromInner.length) return fromInner;
+            }
         } catch (_) {}
     }
 
@@ -52,8 +96,28 @@ function parseAiCardsFromText(answerText) {
         const arraySlice = text.slice(start, end + 1);
         try {
             const parsed = JSON.parse(arraySlice);
-            const cards = normalizeGeneratedCards(parsed);
-            if (cards.length) return cards;
+            const fromArr = tryNormalize(parsed);
+            if (fromArr.length) return fromArr;
+        } catch (_) {}
+    }
+
+    // Case 4: single JSON object (not array) with flashcards/cards at root — substring between first { and last }
+    const objStart = text.indexOf("{");
+    const objEnd = text.lastIndexOf("}");
+    if (objStart >= 0 && objEnd > objStart) {
+        const objSlice = text.slice(objStart, objEnd + 1);
+        try {
+            const parsed = JSON.parse(objSlice);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                const inner =
+                    parsed.flashcards ??
+                    parsed.cards ??
+                    parsed.items ??
+                    parsed.data ??
+                    parsed.results;
+                const fromInner = tryNormalize(inner);
+                if (fromInner.length) return fromInner;
+            }
         } catch (_) {}
     }
 
@@ -223,7 +287,14 @@ ${contextText}`;
     }
 
     const cards = parseAiCardsFromText(answer);
-    if (!cards.length) throw new Error("AI returned empty flashcards.");
+    if (!cards.length) {
+        const preview = String(answer || "").replace(/\s+/g, " ").trim().slice(0, 400);
+        console.warn(
+            "[generateFlashcards] AI returned no parseable cards. Content preview:",
+            preview || "(empty)"
+        );
+        throw new Error("AI returned empty flashcards.");
+    }
     return cards;
 }
 
