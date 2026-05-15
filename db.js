@@ -3,6 +3,10 @@ const mysql = require("mysql2/promise");
 const {
   normalizeQuestionInputCore,
   normalizeShortAnswerText,
+  coerceQuestionBankPayload,
+  isBlankMediaType,
+  inferMediaTypeFromUrl,
+  storedCorrectAnswerForQuestionBank,
 } = require("./src/utils/questionTypes");
 
 /**
@@ -325,6 +329,11 @@ async function initDb() {
     await ensureDocumentCommentsTable();
   } catch (e) {
     console.warn("ensureDocumentCommentsTable (init):", e.message);
+  }
+  try {
+    await ensureQuestionBankTables();
+  } catch (e) {
+    console.warn("ensureQuestionBankTables (init):", e.message);
   }
   const [[row]] = await p.execute(
     `SELECT COUNT(*) AS c FROM information_schema.tables
@@ -1889,6 +1898,32 @@ async function ensureQuestionBankTables() {
       console.warn("ensureQuestionBankTables category:", e.message);
     }
   }
+  await ensureQuestionBankCorrectAnswerColumn(p);
+}
+
+async function ensureQuestionBankCorrectAnswerColumn(p) {
+  try {
+    await p.execute(
+      "ALTER TABLE question_bank_items MODIFY COLUMN correct_answer VARCHAR(2048) NOT NULL"
+    );
+  } catch (e) {
+    if (e.code !== "ER_BAD_FIELD_ERROR") {
+      console.warn("ensureQuestionBankCorrectAnswerColumn modify:", e.message);
+    }
+  }
+  try {
+    await p.execute("ALTER TABLE question_bank_items DROP CHECK chk_qbi_correct_answer");
+  } catch (e) {
+    const msg = String(e?.message || "").toLowerCase();
+    const gone =
+      e.code === "ER_CHECK_CONSTRAINT_NOT_FOUND" ||
+      e.code === "ER_CANT_DROP_FIELD_OR_KEY" ||
+      msg.includes("not found") ||
+      msg.includes("does not exist");
+    if (!gone) {
+      console.warn("ensureQuestionBankCorrectAnswerColumn drop check:", e.message);
+    }
+  }
 }
 
 async function ensureQuestionBankForUser(userId) {
@@ -2006,8 +2041,8 @@ async function createQuestionBankItem(userId, payload) {
   if (!norm) throw new Error("Invalid question payload.");
   const opts = norm.options || {};
   const [a, b, c, d] = ["A", "B", "C", "D"].map((L) => trunc255(opts[L]));
-  const correct = String(norm.correct_answer || "A").toUpperCase().trim().slice(0, 1) || "A";
-  const type = String(payload?.type || "multiple-choice").trim() || "multiple-choice";
+  const type = String(payload?.type || norm.question_type || "multiple-choice").trim() || "multiple-choice";
+  const correct = storedCorrectAnswerForQuestionBank(norm, type);
   const topic = trunc255(payload?.topic || "General") || "General";
   const difficulty = String(payload?.difficulty || "medium").trim() || "medium";
   const catRaw = payload?.category != null ? String(payload.category).trim() : "";
@@ -2020,22 +2055,40 @@ async function createQuestionBankItem(userId, payload) {
     payload?.explanation != null && String(payload.explanation).trim()
       ? String(payload.explanation).trim()
       : null;
+  const insertSqlFull = `INSERT INTO question_bank_items
+        (bank_id, owner_user_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, topic, difficulty, category, media_type, media_url, explanation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  const insertParamsFull = [
+    bankId, uid, norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl, explanation,
+  ];
+  const insertSqlLegacy = `INSERT INTO question_bank_items
+        (bank_id, owner_user_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, topic, difficulty, category)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  const insertParamsLegacy = [
+    bankId, uid, norm.question, a, b, c, d, correct, type, topic, difficulty, category,
+  ];
+
+  async function runInsert() {
+    try {
+      const [r] = await getPool().execute(insertSqlFull, insertParamsFull);
+      return r;
+    } catch (e) {
+      if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
+      const [r] = await getPool().execute(insertSqlLegacy, insertParamsLegacy);
+      return r;
+    }
+  }
+
   let hdr;
   try {
-    [hdr] = await getPool().execute(
-      `INSERT INTO question_bank_items
-        (bank_id, owner_user_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, topic, difficulty, category, media_type, media_url, explanation)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [bankId, uid, norm.question, a, b, c, d, correct, type, topic, difficulty, category, mediaType, mediaUrl, explanation]
-    );
+    hdr = await runInsert();
   } catch (e) {
-    if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
-    [hdr] = await getPool().execute(
-      `INSERT INTO question_bank_items
-        (bank_id, owner_user_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type, topic, difficulty, category)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [bankId, uid, norm.question, a, b, c, d, correct, type, topic, difficulty, category]
-    );
+    if (e.code === "ER_CHECK_CONSTRAINT_VIOLATED") {
+      await ensureQuestionBankCorrectAnswerColumn(getPool());
+      hdr = await runInsert();
+    } else {
+      throw e;
+    }
   }
   return Number(hdr.insertId || 0);
 }
@@ -2050,8 +2103,8 @@ async function updateQuestionBankItem(questionId, userId, payload) {
   const opts = norm.options || {};
   const letters = ["A", "B", "C", "D"];
   const [a, b, c, d] = letters.map((L) => trunc255(opts[L]));
-  const correct = String(norm.correct_answer || "A").toUpperCase().trim().slice(0, 1) || "A";
-  const type = String(payload?.type || "multiple-choice").trim() || "multiple-choice";
+  const type = String(payload?.type || norm.question_type || "multiple-choice").trim() || "multiple-choice";
+  const correct = storedCorrectAnswerForQuestionBank(norm, type);
   const topic = trunc255(payload?.topic || "General") || "General";
   const difficulty = String(payload?.difficulty || "medium").trim() || "medium";
   const catRaw = payload?.category != null ? String(payload.category).trim() : "";
@@ -2961,12 +3014,19 @@ async function listDocumentsRecent(limit) {
 }
 
 function normalizeQuestionInput(q) {
-  const base = normalizeQuestionInputCore(q);
+  const body = coerceQuestionBankPayload(q);
+  const base = normalizeQuestionInputCore(body);
   if (!base) return null;
-  const mediaTypeRaw = String(q.media_type ?? q.mediaType ?? q.attachmentType ?? "").trim().toLowerCase();
-  const mediaType = ["image", "video", "audio", "youtube"].includes(mediaTypeRaw) ? mediaTypeRaw : null;
-  const mediaUrlRaw = q.media_url ?? q.mediaUrl ?? q.youtubeUrl ?? "";
+  const mediaTypeRaw = String(body.media_type ?? body.mediaType ?? body.attachmentType ?? "")
+    .trim()
+    .toLowerCase();
+  const mediaUrlRaw = body.media_url ?? body.mediaUrl ?? body.youtubeUrl ?? "";
   const mediaUrl = String(mediaUrlRaw || "").trim() || null;
+  let mediaType =
+    !isBlankMediaType(mediaTypeRaw) && ["image", "video", "audio", "youtube"].includes(mediaTypeRaw)
+      ? mediaTypeRaw
+      : null;
+  if (!mediaType && mediaUrl) mediaType = inferMediaTypeFromUrl(mediaUrl);
   return { ...base, media_type: mediaType, media_url: mediaUrl };
 }
 

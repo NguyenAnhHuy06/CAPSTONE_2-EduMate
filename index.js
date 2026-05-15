@@ -77,7 +77,30 @@ app.use(
     optionsSuccessStatus: 204,
   })
 );
-app.use(express.json({ limit: "8mb" }));
+const jsonBodyParser = express.json({ limit: "8mb" });
+
+function applyJsonBodyParser(req, res, next) {
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  if (!contentType.includes("application/json")) return next();
+  return jsonBodyParser(req, res, (err) => {
+    if (err && (err.type === "entity.parse.failed" || err instanceof SyntaxError)) {
+      console.warn(
+        `[json] Invalid JSON on ${req.method} ${req.originalUrl || req.url} — body preview:`,
+        String(err.body || "").slice(0, 120)
+      );
+      req.body = {};
+      return next();
+    }
+    return next(err);
+  });
+}
+
+// Skip JSON parsing on GET/HEAD/OPTIONS (some clients send broken JSON bodies on GET).
+app.use((req, res, next) => {
+  const method = String(req.method || "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+  return applyJsonBodyParser(req, res, next);
+});
 app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 
 const allowedExtensions = new Set([
@@ -127,6 +150,19 @@ const questionBankUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 200 * 1024 * 1024 }, // support large local videos
 });
+const questionBankUploadFields = questionBankUpload.fields([
+  { name: "mediaFile", maxCount: 1 },
+  { name: "imageFile", maxCount: 1 },
+  { name: "videoFile", maxCount: 1 },
+  { name: "audioFile", maxCount: 1 },
+]);
+
+/** Only run multer when the client actually sends multipart (JSON saves skip FormData). */
+function optionalQuestionBankUpload(req, res, next) {
+  const ct = String(req.headers["content-type"] || "").toLowerCase();
+  if (!ct.includes("multipart/form-data")) return next();
+  return questionBankUploadFields(req, res, next);
+}
 const questionMediaUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 200 * 1024 * 1024 },
@@ -171,9 +207,17 @@ function selectQuestionMediaFile(req) {
 }
 
 async function resolveQuestionBankMediaPayload(req, userId) {
-  const mediaTypeInput = String(req.body?.mediaType ?? req.body?.media_type ?? "").trim().toLowerCase();
+  const rawMediaType = req.body?.mediaType ?? req.body?.media_type;
+  const mediaTypeInput = String(rawMediaType ?? "").trim().toLowerCase();
   const youtubeUrlInput = String(req.body?.youtubeUrl ?? req.body?.mediaUrl ?? req.body?.media_url ?? "").trim();
   const mediaFile = selectQuestionMediaFile(req);
+  const blankMedia =
+    !mediaTypeInput ||
+    ["none", "null", "undefined", "no", "false"].includes(mediaTypeInput);
+
+  if (blankMedia && !mediaFile && !youtubeUrlInput) {
+    return {};
+  }
 
   if (mediaTypeInput === "youtube") {
     if (!youtubeUrlInput) {
@@ -185,8 +229,14 @@ async function resolveQuestionBankMediaPayload(req, userId) {
   }
 
   if (!mediaFile) {
+    if (mediaTypeInput === "youtube" && youtubeUrlInput) {
+      return { mediaType: "youtube", mediaUrl: youtubeUrlInput };
+    }
+    if (youtubeUrlInput && ["image", "video", "audio"].includes(mediaTypeInput)) {
+      return { mediaType: mediaTypeInput, mediaUrl: youtubeUrlInput };
+    }
     if (mediaTypeInput && mediaTypeInput !== "youtube") {
-      const err = new Error("Please choose a local media file.");
+      const err = new Error("Please choose a local media file or provide a media URL.");
       err.statusCode = 400;
       throw err;
     }
@@ -2408,12 +2458,7 @@ app.get("/api/quizzes/:quizId/attempts", async (req, res) => {
 
 app.post(
   "/api/questions/bank",
-  questionBankUpload.fields([
-    { name: "mediaFile", maxCount: 1 },
-    { name: "imageFile", maxCount: 1 },
-    { name: "videoFile", maxCount: 1 },
-    { name: "audioFile", maxCount: 1 },
-  ]),
+  optionalQuestionBankUpload,
   async (req, res) => {
   try {
     if (!db.isConfigured()) {
@@ -2431,25 +2476,33 @@ app.post(
     }
     const norm = db.normalizeQuestionInput(req.body || {});
     if (!norm) {
-      return res.status(400).json({ success: false, message: "Please provide a valid question." });
+      console.warn("[api/questions/bank POST] invalid payload keys:", Object.keys(req.body || {}));
+      return res.status(400).json({
+        success: false,
+        code: "INVALID_QUESTION",
+        message: "Missing or invalid question fields. Send question, options (A–D), and correctAnswer.",
+      });
     }
     const mediaPayload = await resolveQuestionBankMediaPayload(req, uid);
     const id = await db.createQuestionBankItem(uid, { ...req.body, ...norm, ...mediaPayload });
     return res.status(201).json({ success: true, id });
   } catch (err) {
     console.error("[api/questions/bank POST]", err);
+    if (err?.code === "ER_CHECK_CONSTRAINT_VIOLATED") {
+      return res.status(400).json({
+        success: false,
+        code: "DB_SCHEMA",
+        message:
+          "Question bank schema is outdated. Restart the backend (npm start) and try again.",
+      });
+    }
     return res.status(err?.statusCode || 400).json({ success: false, message: err?.message || MSG_TRY_AGAIN });
   }
 });
 
 app.patch(
   "/api/questions/bank/:id",
-  questionBankUpload.fields([
-    { name: "mediaFile", maxCount: 1 },
-    { name: "imageFile", maxCount: 1 },
-    { name: "videoFile", maxCount: 1 },
-    { name: "audioFile", maxCount: 1 },
-  ]),
+  optionalQuestionBankUpload,
   async (req, res) => {
   try {
     if (!db.isConfigured()) {
@@ -3662,6 +3715,15 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   console.error(err);
+
+  if (err?.type === "entity.parse.failed" || err instanceof SyntaxError) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_JSON",
+      message:
+        "Request body is not valid JSON. For question bank saves with files, use multipart/form-data; otherwise send a valid JSON object.",
+    });
+  }
 
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {

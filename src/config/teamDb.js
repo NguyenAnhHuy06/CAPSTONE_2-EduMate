@@ -10,6 +10,10 @@ const mysql = require("mysql2/promise");
 const {
   normalizeQuestionInputCore,
   normalizeShortAnswerText,
+  coerceQuestionBankPayload,
+  isBlankMediaType,
+  inferMediaTypeFromUrl,
+  storedCorrectAnswerForQuestionBank,
 } = require("../utils/questionTypes");
 
 function createPoolConfig() {
@@ -65,10 +69,23 @@ async function ensureQuizLifecycleColumns() {
     "ALTER TABLE quiz_answers MODIFY COLUMN user_answer VARCHAR(2048) NULL DEFAULT NULL",
     "ALTER TABLE quiz_questions ADD COLUMN explanation TEXT NULL",
     "ALTER TABLE question_bank_items ADD COLUMN explanation TEXT NULL",
+    "ALTER TABLE question_bank_items MODIFY COLUMN correct_answer VARCHAR(2048) NOT NULL",
   ];
   for (const sql of stmts) {
     try { await p.execute(sql); }
     catch (e) { if (e.code !== "ER_DUP_FIELDNAME") console.warn("ensureQuizLifecycleColumns:", e.message); }
+  }
+  try {
+    await p.execute("ALTER TABLE question_bank_items DROP CHECK chk_qbi_correct_answer");
+  } catch (e) {
+    const msg = String(e?.message || "");
+    if (
+      e.code !== "ER_CHECK_CONSTRAINT_NOT_FOUND" &&
+      !msg.includes("check constraint") &&
+      !msg.includes("does not exist")
+    ) {
+      console.warn("ensureQuizLifecycleColumns drop chk_qbi_correct_answer:", e.message);
+    }
   }
   columnExistenceCache.clear();
 }
@@ -592,27 +609,31 @@ async function canUserManageQuiz(quizId, userId) {
 }
 
 function normalizeQuestionInput(q) {
-  const base = normalizeQuestionInputCore(q);
+  const body = coerceQuestionBankPayload(q);
+  const base = normalizeQuestionInputCore(body);
   if (!base) return null;
   const normalizedMediaType = String(
-    q.media_type ?? q.mediaType ?? q.attachmentType ?? q.resourceType ?? ""
+    body.media_type ?? body.mediaType ?? body.attachmentType ?? body.resourceType ?? ""
   )
     .trim()
     .toLowerCase();
   const mediaUrlRaw =
-    q.media_url ??
-    q.mediaUrl ??
-    q.attachmentUrl ??
-    q.resourceUrl ??
-    q.imageUrl ??
-    q.videoUrl ??
-    q.audioUrl ??
-    q.youtubeUrl ??
+    body.media_url ??
+    body.mediaUrl ??
+    body.attachmentUrl ??
+    body.resourceUrl ??
+    body.imageUrl ??
+    body.videoUrl ??
+    body.audioUrl ??
+    body.youtubeUrl ??
     "";
   const mediaUrl = String(mediaUrlRaw || "").trim();
-  const mediaType = ["image", "video", "audio", "youtube"].includes(normalizedMediaType)
-    ? normalizedMediaType
-    : null;
+  let mediaType =
+    !isBlankMediaType(normalizedMediaType) &&
+    ["image", "video", "audio", "youtube"].includes(normalizedMediaType)
+      ? normalizedMediaType
+      : null;
+  if (!mediaType && mediaUrl) mediaType = inferMediaTypeFromUrl(mediaUrl);
   return {
     ...base,
     media_type: mediaType,
@@ -1719,46 +1740,78 @@ async function listQuestionBankItems(ownerUserId) {
   const uid = Number(ownerUserId);
   if (!Number.isFinite(uid) || uid <= 0) return [];
 
+  const supportOwnerOnItem = await hasTableColumn("question_bank_items", "owner_user_id");
+  const supportIsActive = await hasTableColumn("question_bank_items", "is_active");
   const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
   const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
   const supportExplanation = await hasTableColumn("question_bank_items", "explanation");
-  const mediaColumns = supportMediaType && supportMediaUrl
-    ? ", qbi.media_type, qbi.media_url"
-    : "";
+  const supportVersionNo = await hasTableColumn("question_bank_items", "version_no");
+  const supportVersion = await hasTableColumn("question_bank_items", "version");
+  const supportCategory = await hasTableColumn("question_bank_items", "category");
+
+  const mediaColumns = supportMediaType && supportMediaUrl ? ", qbi.media_type, qbi.media_url" : "";
   const explanationColumn = supportExplanation ? ", qbi.explanation" : "";
-  const sql = `
-    SELECT
-      qbi.item_id,
-      qbi.bank_id,
-      qbi.owner_user_id,
-      qbi.question_text,
-      qbi.option_a,
-      qbi.option_b,
-      qbi.option_c,
-      qbi.option_d,
-      qbi.correct_answer,
-      qbi.question_type,
-      qbi.topic,
-      qbi.category,
-      qbi.difficulty,
-      qbi.version_no,
-      qbi.version,
-      qbi.is_active,
-      qbi.created_at,
-      qbi.updated_at
-      ${mediaColumns}${explanationColumn}
-    FROM question_bank_items qbi
-    WHERE qbi.owner_user_id = ?
-      AND qbi.is_active = 1
-    ORDER BY qbi.updated_at DESC, qbi.item_id DESC
-  `;
-  const [rows] = await p.execute(sql, [uid]);
+  const versionNoColumn = supportVersionNo ? ", qbi.version_no" : "";
+  const versionColumn = supportVersion ? ", qbi.version" : "";
+  const categoryColumn = supportCategory ? ", qbi.category" : "";
+  const ownerColumn = supportOwnerOnItem ? ", qbi.owner_user_id" : "";
+  const isActiveFilter = supportIsActive ? " AND qbi.is_active = 1" : "";
+
+  let rows;
+  if (supportOwnerOnItem) {
+    const sql = `
+      SELECT
+        qbi.item_id,
+        qbi.bank_id,
+        qbi.question_text,
+        qbi.option_a,
+        qbi.option_b,
+        qbi.option_c,
+        qbi.option_d,
+        qbi.correct_answer,
+        qbi.question_type,
+        qbi.topic,
+        qbi.difficulty,
+        qbi.created_at,
+        qbi.updated_at
+        ${ownerColumn}${categoryColumn}${versionNoColumn}${versionColumn}
+        ${mediaColumns}${explanationColumn}
+      FROM question_bank_items qbi
+      WHERE qbi.owner_user_id = ?${isActiveFilter}
+      ORDER BY qbi.updated_at DESC, qbi.item_id DESC
+    `;
+    [rows] = await p.execute(sql, [uid]);
+  } else {
+    const sql = `
+      SELECT
+        qbi.item_id,
+        qbi.bank_id,
+        qbi.question_text,
+        qbi.option_a,
+        qbi.option_b,
+        qbi.option_c,
+        qbi.option_d,
+        qbi.correct_answer,
+        qbi.question_type,
+        qbi.topic,
+        qbi.difficulty,
+        qbi.created_at,
+        qbi.updated_at
+        ${categoryColumn}${versionColumn}
+        ${mediaColumns}${explanationColumn}
+      FROM question_bank_items qbi
+      INNER JOIN question_bank qb ON qb.bank_id = qbi.bank_id
+      WHERE qb.owner_user_id = ?
+      ORDER BY qbi.item_id DESC
+    `;
+    [rows] = await p.execute(sql, [uid]);
+  }
 
   return rows.map((r) => ({
     id: Number(r.item_id),
     item_id: Number(r.item_id),
     bankId: Number(r.bank_id),
-    ownerUserId: Number(r.owner_user_id),
+    ownerUserId: Number(r.owner_user_id || uid),
     question: r.question_text || "",
     type: r.question_type || "multiple-choice",
     topic: r.topic || "General",
@@ -1774,6 +1827,35 @@ async function listQuestionBankItems(ownerUserId) {
     createdAt: r.created_at || null,
     updatedAt: r.updated_at || null,
   }));
+}
+
+async function findQuestionBankItemForOwner(itemId, ownerUserId) {
+  const p = getPool();
+  const id = Number(itemId);
+  const uid = Number(ownerUserId);
+  if (!Number.isFinite(id) || id <= 0 || !Number.isFinite(uid) || uid <= 0) return null;
+
+  const supportOwnerOnItem = await hasTableColumn("question_bank_items", "owner_user_id");
+  const supportIsActive = await hasTableColumn("question_bank_items", "is_active");
+  const activeFilter = supportIsActive ? " AND is_active = 1" : "";
+
+  if (supportOwnerOnItem) {
+    const [rows] = await p.execute(
+      `SELECT * FROM question_bank_items WHERE item_id = ? AND owner_user_id = ?${activeFilter} LIMIT 1`,
+      [id, uid]
+    );
+    if (rows.length) return rows[0];
+  }
+
+  const [rows] = await p.execute(
+    `SELECT qbi.*
+     FROM question_bank_items qbi
+     INNER JOIN question_bank qb ON qb.bank_id = qbi.bank_id
+     WHERE qbi.item_id = ? AND qb.owner_user_id = ?
+     LIMIT 1`,
+    [id, uid]
+  );
+  return rows.length ? rows[0] : null;
 }
 
 async function insertQuestionBankItem({
@@ -1807,12 +1889,17 @@ async function insertQuestionBankItem({
   const safeTopic = trunc255(topic || "General") || "General";
   const safeCategory = String(category || "").trim() || null;
   const safeDifficulty = String(difficulty || "medium").trim() || "medium";
+  await ensureQuizLifecycleColumns();
+  const correctStored = storedCorrectAnswerForQuestionBank(normalized, safeType);
 
   const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
   const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
   const supportExplanation = await hasTableColumn("question_bank_items", "explanation");
   const safeExplanation = explanation != null && String(explanation).trim() ? String(explanation).trim() : null;
-  const [hdr] = supportMediaType && supportMediaUrl && supportExplanation
+  const supportOwnerOnItem = await hasTableColumn("question_bank_items", "owner_user_id");
+  let hdr;
+  try {
+  [hdr] = supportMediaType && supportMediaUrl && supportExplanation
     ? await p.execute(
       `INSERT INTO question_bank_items (
         bank_id, owner_user_id, question_text,
@@ -1827,7 +1914,7 @@ async function insertQuestionBankItem({
         trunc255(normalized.options.B),
         trunc255(normalized.options.C),
         trunc255(normalized.options.D),
-        normalized.correct_answer,
+        correctStored,
         safeType,
         safeTopic,
         safeCategory,
@@ -1852,7 +1939,7 @@ async function insertQuestionBankItem({
           trunc255(normalized.options.B),
           trunc255(normalized.options.C),
           trunc255(normalized.options.D),
-          normalized.correct_answer,
+          correctStored,
           safeType,
           safeTopic,
           safeCategory,
@@ -1875,13 +1962,36 @@ async function insertQuestionBankItem({
         trunc255(normalized.options.B),
         trunc255(normalized.options.C),
         trunc255(normalized.options.D),
-        normalized.correct_answer,
+        correctStored,
         safeType,
         safeTopic,
         safeCategory,
         safeDifficulty,
       ]
     );
+  } catch (e) {
+    if (e.code !== "ER_BAD_FIELD_ERROR" || supportOwnerOnItem) throw e;
+    [hdr] = await p.execute(
+      `INSERT INTO question_bank_items (
+        bank_id, question_text,
+        option_a, option_b, option_c, option_d,
+        correct_answer, question_type, topic, category, difficulty
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        bankId,
+        normalized.question,
+        trunc255(normalized.options.A),
+        trunc255(normalized.options.B),
+        trunc255(normalized.options.C),
+        trunc255(normalized.options.D),
+        correctStored,
+        safeType,
+        safeTopic,
+        safeCategory,
+        safeDifficulty,
+      ]
+    );
+  }
 
   const itemId = hdr.insertId;
   const [rows] = await p.execute(
@@ -1903,13 +2013,8 @@ async function updateQuestionBankItem(
   if (!Number.isFinite(id) || id <= 0) throw new Error("itemId không hợp lệ.");
   if (!Number.isFinite(uid) || uid <= 0) throw new Error("ownerUserId không hợp lệ.");
 
-  const [existing] = await p.execute(
-    "SELECT * FROM question_bank_items WHERE item_id = ? AND owner_user_id = ? AND is_active = 1 LIMIT 1",
-    [id, uid]
-  );
-  if (!existing.length) throw new Error("Không tìm thấy câu hỏi trong ngân hàng.");
-
-  const base = existing[0];
+  const base = await findQuestionBankItemForOwner(id, uid);
+  if (!base) throw new Error("Không tìm thấy câu hỏi trong ngân hàng.");
 
   const mergedOptions = Array.isArray(options) && options.length
     ? options
@@ -1923,6 +2028,10 @@ async function updateQuestionBankItem(
     mediaUrl: mediaUrl ?? base.media_url,
   });
   if (!normalized) throw new Error("Câu hỏi không hợp lệ.");
+
+  const qTypeUpdate = String(type || base.question_type || "multiple-choice").trim() || "multiple-choice";
+  await ensureQuizLifecycleColumns();
+  const correctStoredUpdate = storedCorrectAnswerForQuestionBank(normalized, qTypeUpdate);
 
   const supportMediaType = await hasTableColumn("question_bank_items", "media_type");
   const supportMediaUrl = await hasTableColumn("question_bank_items", "media_url");
@@ -1954,8 +2063,8 @@ async function updateQuestionBankItem(
         trunc255(normalized.options.B),
         trunc255(normalized.options.C),
         trunc255(normalized.options.D),
-        normalized.correct_answer,
-        String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+        correctStoredUpdate,
+        qTypeUpdate,
         trunc255(topic || base.topic || "General") || "General",
         String(category ?? base.category ?? "").trim() || null,
         String(difficulty || base.difficulty || "medium").trim() || "medium",
@@ -1990,8 +2099,8 @@ async function updateQuestionBankItem(
         trunc255(normalized.options.B),
         trunc255(normalized.options.C),
         trunc255(normalized.options.D),
-        normalized.correct_answer,
-        String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+        correctStoredUpdate,
+        qTypeUpdate,
         trunc255(topic || base.topic || "General") || "General",
         String(category ?? base.category ?? "").trim() || null,
         String(difficulty || base.difficulty || "medium").trim() || "medium",
@@ -2023,8 +2132,8 @@ async function updateQuestionBankItem(
         trunc255(normalized.options.B),
         trunc255(normalized.options.C),
         trunc255(normalized.options.D),
-        normalized.correct_answer,
-        String(type || base.question_type || "multiple-choice").trim() || "multiple-choice",
+        correctStoredUpdate,
+        qTypeUpdate,
         trunc255(topic || base.topic || "General") || "General",
         String(category ?? base.category ?? "").trim() || null,
         String(difficulty || base.difficulty || "medium").trim() || "medium",
