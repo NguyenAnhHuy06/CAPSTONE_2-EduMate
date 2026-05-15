@@ -638,6 +638,19 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
 
   const baseUrl = `${req.protocol}://${req.get("host")}`;
 
+  const bodyUploaderId = req.body?.uploaderId != null ? Number(req.body.uploaderId) : null;
+  const bearerUserId = getBearerUserIdMock(req);
+  const uploaderId = Number.isFinite(bodyUploaderId) ? bodyUploaderId : bearerUserId;
+  const uploaderRow =
+    uploaderId != null ? users.find((u) => Number(u?.user_id) === Number(uploaderId)) : null;
+  const uploaderRoleRaw = String(uploaderRow?.role || "STUDENT").toUpperCase();
+  const uploaderRole =
+    uploaderRoleRaw === "LECTURER"
+      ? "lecturer"
+      : uploaderRoleRaw === "ADMIN"
+        ? "admin"
+        : "student";
+
   const newDocument = {
     id: Date.now(),
     title: title.trim(),
@@ -655,7 +668,9 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
     uploadedAt: new Date().toISOString(),
     /** Moderation: pending until PATCH …/verify — must stay in memory for for-quiz (do not cap too low). */
     verificationStatus: "pending",
-    uploaderRole: "lecturer",
+    uploaderId: uploaderId != null ? uploaderId : undefined,
+    uploaderRole,
+    uploaderName: resolveUserDisplayName(uploaderRow, ""),
     chunkCount: 2,
     inDatabase: true,
     commentsCount: 0,
@@ -672,6 +687,22 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
     success: true,
     message: "Document uploaded successfully.",
     data: newDocument,
+  });
+});
+
+app.post("/api/documents/:id/report", (req, res) => {
+  const docId = toNum(req.params.id, NaN);
+  if (!Number.isFinite(docId)) {
+    return res.status(400).json({ success: false, message: "Invalid document id." });
+  }
+  const reason = String(req.body?.reason || "").trim();
+  if (!reason) {
+    return res.status(400).json({ success: false, message: "Report reason is required." });
+  }
+  return res.status(201).json({
+    success: true,
+    message: "Report submitted. Thank you for helping keep EduMate safe.",
+    data: { documentId: docId, reason },
   });
 });
 

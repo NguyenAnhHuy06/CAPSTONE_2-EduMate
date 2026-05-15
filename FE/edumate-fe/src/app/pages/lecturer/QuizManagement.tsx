@@ -2712,19 +2712,41 @@ export function QuizManagement({
             return;
         }
         const bankUid = Number(String(lecturerUserId ?? '').trim());
-        try {
-            await api.post('/questions/bank', {
-                ...(Number.isFinite(bankUid) ? { userId: bankUid } : {}),
-                question: questionForm.question,
-                type: questionForm.type,
-                topic: questionForm.topic,
-                category: questionForm.category || undefined,
-                difficulty: questionForm.difficulty,
-                options: questionForm.type === 'multiple-choice' ? questionForm.options.filter((o) => o) : undefined,
-                correctAnswer: normalizeCorrectAnswerForSubmit(questionForm),
-                mediaUrl: String(questionForm.mediaUrl || '').trim() || undefined,
-                explanation: String(questionForm.explanation || '').trim() || undefined,
+        const correctAnswer = normalizeCorrectAnswerForSubmit(questionForm);
+        if (questionForm.type === 'multiple-choice' && !correctAnswer) {
+            showNotification({
+                type: 'warning',
+                title: 'Question bank',
+                message: 'Select the correct option (A–D).',
             });
+            return;
+        }
+        const mediaUrl = String(questionForm.mediaUrl || '').trim();
+        const youtubeId = mediaUrl ? parseYoutubeVideoId(mediaUrl) : null;
+        const payload: Record<string, unknown> = {
+            ...(Number.isFinite(bankUid) ? { userId: bankUid } : {}),
+            question: String(questionForm.question || '').trim(),
+            type: questionForm.type,
+            topic: questionForm.topic,
+            category: questionForm.category || undefined,
+            difficulty: questionForm.difficulty,
+            ...(questionForm.type !== 'short-answer'
+                ? {
+                      correctAnswer:
+                          correctAnswer || (questionForm.type === 'multiple-choice' ? 'A' : correctAnswer),
+                  }
+                : {}),
+            mediaUrl: mediaUrl || undefined,
+            explanation: String(questionForm.explanation || '').trim() || undefined,
+        };
+        if (questionForm.type === 'multiple-choice') {
+            payload.options = questionForm.options.map((o) => String(o ?? '').trim());
+        } else if (questionForm.type === 'true-false') {
+            payload.options = ['True', 'False', '', ''];
+        }
+        if (youtubeId) payload.mediaType = 'youtube';
+        try {
+            await api.post('/questions/bank', payload);
             await loadQuestionBankFromApi({ merge: true });
             resetQuestionForm();
             setModalType(null);
@@ -2776,19 +2798,41 @@ export function QuizManagement({
             return;
         }
         const bankUid = Number(String(lecturerUserId ?? '').trim());
-        try {
-            await api.patch(`/questions/bank/${editingQuestionId}`, {
-                ...(Number.isFinite(bankUid) ? { userId: bankUid } : {}),
-                question: questionForm.question,
-                type: questionForm.type,
-                topic: questionForm.topic,
-                category: questionForm.category || undefined,
-                difficulty: questionForm.difficulty,
-                options: questionForm.type === 'multiple-choice' ? questionForm.options.filter((o) => o) : undefined,
-                correctAnswer: normalizeCorrectAnswerForSubmit(questionForm),
-                mediaUrl: String(questionForm.mediaUrl || '').trim() || undefined,
-                explanation: String(questionForm.explanation || '').trim() || undefined,
+        const correctAnswer = normalizeCorrectAnswerForSubmit(questionForm);
+        if (questionForm.type === 'multiple-choice' && !correctAnswer) {
+            showNotification({
+                type: 'warning',
+                title: 'Question bank',
+                message: 'Select the correct option (A–D).',
             });
+            return;
+        }
+        const mediaUrl = String(questionForm.mediaUrl || '').trim();
+        const youtubeId = mediaUrl ? parseYoutubeVideoId(mediaUrl) : null;
+        const patchPayload: Record<string, unknown> = {
+            ...(Number.isFinite(bankUid) ? { userId: bankUid } : {}),
+            question: String(questionForm.question || '').trim(),
+            type: questionForm.type,
+            topic: questionForm.topic,
+            category: questionForm.category || undefined,
+            difficulty: questionForm.difficulty,
+            ...(questionForm.type !== 'short-answer'
+                ? {
+                      correctAnswer:
+                          correctAnswer || (questionForm.type === 'multiple-choice' ? 'A' : correctAnswer),
+                  }
+                : {}),
+            mediaUrl: mediaUrl || undefined,
+            explanation: String(questionForm.explanation || '').trim() || undefined,
+        };
+        if (questionForm.type === 'multiple-choice') {
+            patchPayload.options = questionForm.options.map((o) => String(o ?? '').trim());
+        } else if (questionForm.type === 'true-false') {
+            patchPayload.options = ['True', 'False', '', ''];
+        }
+        if (youtubeId) patchPayload.mediaType = 'youtube';
+        try {
+            await api.patch(`/questions/bank/${editingQuestionId}`, patchPayload);
             await loadQuestionBankFromApi({ merge: true });
             resetQuestionForm();
             setEditingQuestionId(null);
@@ -3815,7 +3859,7 @@ export function QuizManagement({
                                                     </option>
                                                 ))}
                                             </select>
-                                        ) : questionForm.type === 'true-false' ? (
+                                        ) : (
                                             <select
                                                 value={questionForm.correctAnswer}
                                                 onChange={(e) => setQuestionForm({ ...questionForm, correctAnswer: e.target.value })}
@@ -3826,15 +3870,6 @@ export function QuizManagement({
                                                 <option value="A">True</option>
                                                 <option value="B">False</option>
                                             </select>
-                                        ) : (
-                                            <input
-                                                type="text"
-                                                value={questionForm.correctAnswer}
-                                                onChange={(e) => setQuestionForm({ ...questionForm, correctAnswer: e.target.value })}
-                                                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-                                                aria-label="Correct Answer"
-                                                placeholder="Enter expected short answer"
-                                            />
                                         )}
                                     </div>
                                 )}
@@ -5070,23 +5105,7 @@ export function QuizManagement({
                                                                         );
                                                                     })}
                                                                 </div>
-                                                            ) : (
-                                                                <div>
-                                                                    <label className="block text-sm text-gray-600 mb-1">
-                                                                        Correct / expected answer
-                                                                    </label>
-                                                                    <input
-                                                                        type="text"
-                                                                        value={String(question.correctAnswer ?? '')}
-                                                                        onChange={(e) =>
-                                                                            patchQuestionInBank(question.id, {
-                                                                                correctAnswer: e.target.value,
-                                                                            })
-                                                                        }
-                                                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-                                                                    />
-                                                                </div>
-                                                            )}
+                                                            ) : null}
                                                             <div className="mt-3 border-t border-gray-200 pt-3">
                                                                 <label className="block text-sm font-medium text-gray-800">
                                                                     Explanation{' '}
