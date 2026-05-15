@@ -167,3 +167,29 @@ Compared with general AI tools or static file storage platforms, EduMate focuses
 ## 13. Contact
 
 For project information, collaboration, or academic discussion, please contact team members listed above.
+
+---
+
+## 14. Run locally
+
+**Backend (production API, default port 5000):**
+
+```bash
+cp .env.example .env
+# Edit .env (MySQL, JWT, S3, OpenAI, …)
+npm install
+npm run dev
+```
+
+**Frontend (Vite, port 5173):**
+
+```bash
+cd FE/edumate-fe
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Set `VITE_PROXY_TARGET=http://127.0.0.1:5000` in `FE/edumate-fe/.env` so `/api` proxies to the backend.
+
+**Optional mock API** (`FE/server.js`, port 3001): `npm run dev:api` from the repo root.
