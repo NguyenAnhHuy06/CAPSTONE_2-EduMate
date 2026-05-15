@@ -141,6 +141,10 @@ async function listDocuments({ prefix, maxKeys = 5000 } = {}) {
   return out;
 }
 
+async function listLogArchives() {
+  return listDocuments({ prefix: "LOGS/archive/", maxKeys: 1000 });
+}
+
 async function streamToBuffer(body) {
   const chunks = [];
   for await (const chunk of body) {
@@ -167,6 +171,7 @@ module.exports = {
   buildDocumentKey,
   getBucket,
   listDocuments,
+  listLogArchives,
   getObjectBuffer,
   documentsPrefix,
   buildSignedUrl,

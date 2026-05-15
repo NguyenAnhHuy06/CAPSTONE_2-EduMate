@@ -42,5 +42,8 @@ require('../models/ChatSession');
 require('../models/ChatMessage');
 require('../models/Citation');
 require('../models/Flashcard');
+require('../models/FlashcardContent');
 require('../models/ActivityLog');
 require('../models/Notification');
+require('../models/DonateSetting');
+require('../models/Donation');

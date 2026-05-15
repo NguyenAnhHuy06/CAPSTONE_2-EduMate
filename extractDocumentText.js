@@ -1,11 +1,16 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const WordExtractor = require("word-extractor");
+const execFileAsync = promisify(execFile);
 
 const MAX_CHARS = 120_000;
+const OCR_MAX_PAGES = Math.min(10, Math.max(1, Number(process.env.PDF_OCR_MAX_PAGES || 5)));
+const OCR_LANG = String(process.env.PDF_OCR_LANG || "vie+eng").trim() || "vie+eng";
 
 /** pdf.js (pdf-parse) often warns on TrueType fonts; text extraction is usually still fine. */
 function withPdfNoiseSuppressed(fn) {
@@ -52,17 +57,75 @@ function truncate(text) {
   return t.slice(0, MAX_CHARS);
 }
 
+async function runPdfImageOcr(buffer) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "edumate-ocr-"));
+  const pdfPath = path.join(tempDir, "input.pdf");
+  fs.writeFileSync(pdfPath, buffer);
+  try {
+    const imagePrefix = path.join(tempDir, "page");
+    await execFileAsync("pdftoppm", [
+      "-png",
+      "-f",
+      "1",
+      "-l",
+      String(OCR_MAX_PAGES),
+      pdfPath,
+      imagePrefix,
+    ]);
+    const imageFiles = fs
+      .readdirSync(tempDir)
+      .filter((name) => /^page-\d+\.png$/i.test(name))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    if (!imageFiles.length) return "";
+
+    const pages = [];
+    for (const imageName of imageFiles) {
+      const imagePath = path.join(tempDir, imageName);
+      const { stdout } = await execFileAsync("tesseract", [
+        imagePath,
+        "stdout",
+        "-l",
+        OCR_LANG,
+        "--psm",
+        "6",
+      ]);
+      const text = String(stdout || "").trim();
+      if (text) pages.push(text);
+    }
+    return truncate(pages.join("\n\n"));
+  } catch (err) {
+    const msg = String(err?.message || "").toLowerCase();
+    if (msg.includes("pdftoppm") || msg.includes("tesseract") || err?.code === "ENOENT") {
+      console.warn("[extractDocumentText] OCR tools not available (need pdftoppm + tesseract).");
+      return "";
+    }
+    console.warn("[extractDocumentText] PDF OCR fallback failed:", err.message);
+    return "";
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
 async function extractFromPdf(buffer) {
   return withPdfNoiseSuppressed(async () => {
     const data = await pdfParse(buffer);
-    const text = truncate(data.text);
+    const textLayer = truncate(data.text);
+    if (String(textLayer).trim()) return textLayer;
+
+    const ocrText = await runPdfImageOcr(buffer);
+    if (String(ocrText).trim()) return ocrText;
+
     /** pdf-parse only reads embedded text streams — scanned/image-only PDFs often yield "". */
-    if (!String(text).trim()) {
+    if (!String(textLayer).trim()) {
       throw new Error(
-        "PDF_HAS_NO_TEXT_LAYER: This PDF has no extractable text (often scanned images). Use a text-based PDF, Word, or run OCR first."
+        "PDF_HAS_NO_TEXT_LAYER: This PDF has no extractable text and OCR is unavailable. Install pdftoppm + tesseract for scanned/slide PDFs."
       );
     }
-    return text;
+    return textLayer;
   });
 }
 

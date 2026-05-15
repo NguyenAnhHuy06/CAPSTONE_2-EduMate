@@ -1,5 +1,13 @@
 const { retrieveTopChunks } = require("./vectorSearch");
 const crypto = require("crypto");
+const path = require("path");
+const s3 = require("./s3Upload");
+const { extractDocumentText } = require("./extractDocumentText");
+const {
+  resolveQuizLanguage,
+  languageLabel,
+  languageRequirement,
+} = require("./src/utils/quizLanguage");
 
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-chat";
@@ -10,7 +18,7 @@ function computeQuizMaxTokens(qCount) {
     8192,
     Math.max(800, Number(process.env.QUIZ_MAX_TOKENS || 2800))
   );
-  const need = 220 + Math.ceil(Number(qCount) || 5) * 110;
+  const need = 220 + Math.ceil(Number(qCount) || 5) * 200;
   return Math.min(cap, Math.max(need, 600));
 }
 
@@ -161,11 +169,77 @@ function tryParseQuizJsonObject(content) {
   return null;
 }
 
+/**
+ * Recover complete question objects from truncated JSON output.
+ * Example: {"questions":[{...},{...},{"quest...
+ */
+function recoverQuestionsFromTruncatedOutput(content) {
+  const raw = normalizeQuizJsonQuotes(String(content ?? "").replace(/^\uFEFF/, ""));
+  if (!raw.trim()) return null;
+
+  const candidates = [];
+  const qIdx = raw.search(/"questions"\s*:\s*\[/i);
+  if (qIdx !== -1) {
+    const arrStart = raw.indexOf("[", qIdx);
+    if (arrStart !== -1) candidates.push(arrStart);
+  }
+  const firstArray = raw.indexOf("[");
+  if (firstArray !== -1) candidates.push(firstArray);
+
+  for (const arrStart of candidates) {
+    const questions = [];
+    let inString = false;
+    let escape = false;
+    let objDepth = 0;
+    let objStart = -1;
+
+    for (let i = arrStart + 1; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\" && inString) {
+        escape = true;
+        continue;
+      }
+      if (ch === '"' && !escape) {
+        inString = !inString;
+        continue;
+      }
+      if (inString) continue;
+
+      if (ch === "{") {
+        if (objDepth === 0) objStart = i;
+        objDepth++;
+        continue;
+      }
+      if (ch === "}") {
+        if (objDepth > 0) objDepth--;
+        if (objDepth === 0 && objStart !== -1) {
+          const snippet = raw.slice(objStart, i + 1);
+          const parsedObj = tryParseJson(snippet);
+          if (parsedObj && typeof parsedObj === "object") questions.push(parsedObj);
+          objStart = -1;
+        }
+        continue;
+      }
+      if (ch === "]" && objDepth === 0) break;
+    }
+
+    if (questions.length) return { questions };
+  }
+
+  return null;
+}
+
 function parseQuizResponse(content) {
   if (!content) throw new Error("AI returned no content.");
   if (String(content).trim() === "Not enough information") return [];
 
-  const parsed = tryParseQuizJsonObject(content);
+  const parsed =
+    tryParseQuizJsonObject(content) ||
+    recoverQuestionsFromTruncatedOutput(content);
   if (parsed == null || typeof parsed !== "object") {
     const preview = String(content).replace(/\s+/g, " ").slice(0, 280);
     console.warn("[quiz] JSON parse failed, preview:", preview);
@@ -207,12 +281,13 @@ function parseQuizResponse(content) {
       });
       const id = crypto.createHash("sha1").update(stable).digest("hex").slice(0, 16);
 
+      const explanation = String(q.explanation || q.rationale || "").trim().slice(0, 8000);
       return {
         id,
         question,
         options: options || {},
         correct_answer: correct || "A",
-        explanation: "",
+        explanation,
       };
     })
     .filter(Boolean);
@@ -250,14 +325,38 @@ function calculateQuestionCount(chunks) {
   return Math.min(q, SOFT_MAX);
 }
 
-async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Vietnamese" }) {
+async function fallbackContextFromSourceFile(s3Key, maxContextChars = 6000) {
+  if (!s3Key || !s3.isS3Configured()) return { context: "", chunks: [] };
+  try {
+    const { buffer, contentType } = await s3.getObjectBuffer(s3Key);
+    const ext = path.extname(String(s3Key || "")).toLowerCase();
+    const plain = await extractDocumentText(buffer, ext, contentType || "");
+    const normalized = String(plain || "").replace(/\s+/g, " ").trim();
+    if (!normalized) return { context: "", chunks: [] };
+    const context = normalized.slice(0, Math.max(1000, Number(maxContextChars) || 6000));
+    return {
+      context,
+      chunks: [{ section: 1, content: context, score: 1 }],
+    };
+  } catch (e) {
+    console.warn("[quiz] source-file fallback context failed:", e.message);
+    return { context: "", chunks: [] };
+  }
+}
+
+async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" }) {
   const retrievalQuery = String(query || "core concept and key facts").trim();
-  const { context, chunks } = await retrieveTopChunks({
+  let { context, chunks } = await retrieveTopChunks({
     s3Key,
     query: retrievalQuery,
-    topK: 3,
-    maxContextChars: 2000,
+    topK: 5,
+    maxContextChars: 8000,
   });
+  if (!String(context || "").trim()) {
+    const fb = await fallbackContextFromSourceFile(s3Key, 6000);
+    context = fb.context;
+    chunks = fb.chunks;
+  }
 
   const chunkTexts = (chunks || []).map((c) => c.content);
   const autoQ = chunkTexts.length ? calculateQuestionCount(chunkTexts) : 3;
@@ -269,51 +368,63 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Vietna
 
   if (!context.trim()) return { questions: [], targetCount: qCount };
 
-  const system = `Generate multiple-choice questions based ONLY on the provided context.
+  const lang = resolveQuizLanguage(languageHint, context);
+  const strictSystem = `Generate multiple-choice questions based ONLY on the provided context.
+Language of questions/options: ${languageLabel(lang)}.
+${languageRequirement(lang)}
 Do not use external knowledge.
 If insufficient data, return exactly the JSON: {"questions":[]}.`;
+  const relaxedSystem = `Generate multiple-choice questions based ONLY on the provided context.
+Language of questions/options: ${languageLabel(lang)}.
+${languageRequirement(lang)}
+Do not use external knowledge.
+Try your best to produce at least 3 meaningful questions when context has usable content.`;
 
   const user = [
-    `Language: ${languageHint}`,
-    `Generate exactly ${qCount} questions.`,
+    `Generate exactly ${qCount} questions in ${languageLabel(lang)}.`,
     "Return STRICT JSON only with this format:",
     "{",
     '  "questions": [',
     "    {",
     '      "question": "string",',
-    '      "options": ["A", "B", "C", "D"],',
-    '      "correctAnswer": "A"',
+    '      "options": ["Option text 1", "Option text 2", "Option text 3", "Option text 4"],',
+    '      "correctAnswer": "A",',
+    '      "explanation": "1–3 sentences: why the correct option is supported by the context."',
     "    }",
     "  ]",
     "}",
-    "- Do NOT include explanations.",
+    "- For each question, include a non-empty explanation in the same language as the question.",
     "- Do NOT include text outside JSON.",
     "- Do NOT use markdown.",
+    "- options must be full sentences or phrases in the same language as the document, not single letters.",
     "",
     "Context:",
     context,
   ].join("\n");
 
   const useJsonSchema = String(process.env.QUIZ_OPENROUTER_JSON_MODE || "1").trim() !== "0";
-  const payload = {
-    model: OPENROUTER_MODEL,
-    temperature: 0.2,
-    max_tokens: computeQuizMaxTokens(qCount),
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
-  };
-  if (useJsonSchema) {
-    payload.response_format = { type: "json_object" };
+  async function askOnce(systemPrompt) {
+    const payload = {
+      model: OPENROUTER_MODEL,
+      temperature: 0.2,
+      max_tokens: computeQuizMaxTokens(qCount),
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: user },
+      ],
+    };
+    if (useJsonSchema) payload.response_format = { type: "json_object" };
+    const completion = await callOpenRouterWithRetry(payload);
+    const choice0 = completion?.choices?.[0];
+    const content = getAssistantMessageText(choice0);
+    const parsed = parseQuizResponse(content);
+    return parsed.length > qCount ? parsed.slice(0, qCount) : parsed;
   }
 
-  const completion = await callOpenRouterWithRetry(payload);
-
-  const choice0 = completion?.choices?.[0];
-  const content = getAssistantMessageText(choice0);
-  const parsed = parseQuizResponse(content);
-  const questions = parsed.length > qCount ? parsed.slice(0, qCount) : parsed;
+  let questions = await askOnce(strictSystem);
+  if (!questions.length && String(context || "").trim()) {
+    questions = await askOnce(relaxedSystem);
+  }
   return { questions, targetCount: qCount };
 }
 

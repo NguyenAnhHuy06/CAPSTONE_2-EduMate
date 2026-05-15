@@ -9,33 +9,257 @@ const ChatMessage = require("../models/ChatMessage");
 const Citation = require("../models/Citation");
 const { retrieveTopChunks } = require("../services/vectorSearch");
 
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001";
+function resolveChatUserId(req) {
+    const fromAuth = req.user?.id ?? req.user?.user_id;
+    if (Number.isFinite(Number(fromAuth)) && Number(fromAuth) > 0) return Number(fromAuth);
+    const fromBody = req.body?.userId ?? req.body?.user_id;
+    if (Number.isFinite(Number(fromBody)) && Number(fromBody) > 0) return Number(fromBody);
+    const fromQuery = req.query?.userId ?? req.query?.user_id;
+    if (Number.isFinite(Number(fromQuery)) && Number(fromQuery) > 0) return Number(fromQuery);
+    const fallback =
+        process.env.DEFAULT_CHAT_USER_ID ||
+        process.env.DEFAULT_QUIZ_USER_ID ||
+        "14";
+    if (Number.isFinite(Number(fallback)) && Number(fallback) > 0) return Number(fallback);
+    return null;
+}
 
-async function callLLM(systemPrompt, userMessage) {
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            model: OPENROUTER_MODEL,
-            temperature: 0.2,
-            max_tokens: 2000,
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userMessage },
-            ]
-        })
-    });
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
 
-    if (!resp.ok) {
-        throw new Error(`LLM Error: ${resp.status} ${resp.statusText}`);
+/** Chat uses GPT only — default gpt-4o-mini (OpenAI API). */
+function resolveOpenAiChatModel() {
+    const m = String(
+        process.env.CHAT_MODEL ||
+        process.env.OPENAI_CHAT_MODEL ||
+        process.env.OPENAI_MODEL ||
+        "gpt-4o-mini"
+    ).trim();
+    return m || "gpt-4o-mini";
+}
+
+/** OpenRouter route to OpenAI GPT when OPENAI_API_KEY is not set. */
+function resolveOpenRouterGptChatModels() {
+    const listRaw =
+        process.env.OPENROUTER_CHAT_MODELS ||
+        process.env.OPENROUTER_CHAT_MODEL ||
+        "";
+    const fromList = String(listRaw)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (fromList.length) {
+        return fromList.filter((m) => !String(m).toLowerCase().includes("gemini"));
+    }
+    const single = String(process.env.CHAT_MODEL || "openai/gpt-4o-mini").trim();
+    if (single.toLowerCase().includes("gemini")) return ["openai/gpt-4o-mini"];
+    if (single.includes("/")) return [single];
+    return [`openai/${single}`];
+}
+
+function getChatProviderConfigs() {
+    const configs = [];
+    const prefer = String(process.env.CHAT_PROVIDER || "openai").trim().toLowerCase();
+    const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
+    const openrouterKey = String(process.env.OPENROUTER_API_KEY || "").trim();
+
+    const pushOpenAi = () => {
+        if (!openaiKey) return;
+        configs.push({
+            provider: "openai",
+            apiKey: openaiKey,
+            endpoint: "https://api.openai.com/v1/chat/completions",
+            model: resolveOpenAiChatModel(),
+        });
+    };
+
+    const pushOpenRouterGpt = () => {
+        if (!openrouterKey) return;
+        for (const model of resolveOpenRouterGptChatModels()) {
+            configs.push({
+                provider: "openrouter",
+                apiKey: openrouterKey,
+                endpoint: "https://openrouter.ai/api/v1/chat/completions",
+                model,
+            });
+        }
+    };
+
+    if (prefer === "openrouter") {
+        pushOpenRouterGpt();
+        pushOpenAi();
+    } else if (prefer === "openai") {
+        pushOpenAi();
+        // If OpenAI quota/billing is exhausted, try GPT via OpenRouter (openai/gpt-4o-mini), not Gemini
+        if (openrouterKey) pushOpenRouterGpt();
+        else if (!openaiKey) pushOpenRouterGpt();
+    } else {
+        pushOpenAi();
+        const allowOrFallback =
+            process.env.CHAT_OPENROUTER_FALLBACK === "1" ||
+            process.env.CHAT_OPENROUTER_FALLBACK === "true" ||
+            !openaiKey;
+        if (allowOrFallback) pushOpenRouterGpt();
     }
 
-    const data = await resp.json();
-    return data?.choices?.[0]?.message?.content || "";
+    if (!configs.length) {
+        throw new Error(
+            "Chat requires GPT. Set OPENAI_API_KEY (recommended) or OPENROUTER_API_KEY with openai/gpt-4o-mini."
+        );
+    }
+    return configs;
+}
+
+function logChatProviderSetup() {
+    try {
+        const cfgs = getChatProviderConfigs();
+        console.log(
+            "[chat] Active providers:",
+            cfgs.map((c) => `${c.provider}:${c.model}`).join(", ")
+        );
+    } catch (e) {
+        console.warn("[chat] Provider setup:", e.message);
+    }
+}
+logChatProviderSetup();
+
+function buildSystemPrompt(hasContext) {
+    return [
+        "You are EduMate AI Assistant for academic study support.",
+        "Always answer in the same language as the user's question.",
+        hasContext
+            ? "Use only the provided document context; if information is missing, explicitly say it is not in the documents."
+            : "No document context is available; provide a general best-effort answer and clearly mention it is not document-grounded.",
+        "Be concise, accurate, and avoid hallucinations.",
+        "When possible, provide actionable steps or examples for students.",
+    ].join("\n");
+}
+
+async function callLLM({ hasContext, context, question }) {
+    const configs = getChatProviderConfigs();
+    const userMessage = hasContext
+        ? `Document context:\n---\n${context}\n---\n\nQuestion: ${question}`
+        : `Question: ${question}`;
+    const maxRetries = Math.min(Math.max(Number(process.env.CHAT_MAX_RETRIES) || 3, 1), 6);
+    let lastErr = null;
+
+    for (const cfg of configs) {
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30000);
+            if (attempt === 0) {
+                console.log(`[chat/ask] Using ${cfg.provider} model=${cfg.model}`);
+            }
+            try {
+                const headers = {
+                    Authorization: `Bearer ${cfg.apiKey}`,
+                    "Content-Type": "application/json",
+                };
+
+                if (cfg.provider === "openrouter") {
+                    headers["HTTP-Referer"] = "http://localhost";
+                    headers["X-Title"] = "EduMate BE Chat";
+                }
+
+                const resp = await fetch(cfg.endpoint, {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                        model: cfg.model,
+                        temperature: 0.2,
+                        max_tokens: 1000,
+                        messages: [
+                            { role: "system", content: buildSystemPrompt(hasContext) },
+                            { role: "user", content: userMessage },
+                        ],
+                    }),
+                    signal: controller.signal,
+                });
+
+                if (!resp.ok) {
+                    const detail = await resp.text().catch(() => "");
+                    const err = new Error(
+                        `LLM Error: ${resp.status} ${resp.statusText}${detail ? ` - ${detail.slice(0, 300)}` : ""}`
+                    );
+                    err.status = resp.status;
+                    throw err;
+                }
+
+                const data = await resp.json();
+                const text = data?.choices?.[0]?.message?.content || "";
+                if (text && String(text).trim()) return text;
+                throw new Error("LLM returned empty content.");
+            } catch (err) {
+                lastErr = err;
+                const status = Number(err?.status);
+                const msg = String(err?.message || "").toLowerCase();
+                const isQuotaExhausted =
+                    status === 402 ||
+                    msg.includes("insufficient_quota") ||
+                    msg.includes("exceeded your current quota") ||
+                    msg.includes("check your plan and billing");
+                const isRateLimit =
+                    !isQuotaExhausted &&
+                    (status === 429 ||
+                        msg.includes("rate limit") ||
+                        msg.includes("rate-limited") ||
+                        msg.includes("too many requests"));
+                const isRetryableSameModel =
+                    isRateLimit || status === 503 || status === 408 || err?.name === "AbortError";
+                if (isRetryableSameModel && attempt < maxRetries - 1) {
+                    await sleep(1200 * (attempt + 1));
+                    continue;
+                }
+                const shouldTryNextProvider =
+                    status === 401 ||
+                    status === 402 ||
+                    status === 403 ||
+                    isRateLimit ||
+                    isQuotaExhausted ||
+                    msg.includes("insufficient_quota");
+                if (!shouldTryNextProvider) throw err;
+                break;
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+    }
+
+    throw lastErr || new Error("All AI providers failed.");
+}
+
+function mapChatErrorToClient(err) {
+    const status = Number(err?.status);
+    const msg = String(err?.message || "").toLowerCase();
+    if (
+        status === 402 ||
+        msg.includes("insufficient_quota") ||
+        msg.includes("exceeded your current quota") ||
+        msg.includes("check your plan and billing")
+    ) {
+        return {
+            httpStatus: 402,
+            message:
+                "Tài khoản OpenAI đã hết quota/credit (không phải do gọi quá nhanh). Nạp billing tại platform.openai.com hoặc dùng OPENROUTER_API_KEY để chat qua OpenRouter.",
+        };
+    }
+    if (
+        status === 429 ||
+        msg.includes("rate limit") ||
+        msg.includes("rate-limited") ||
+        msg.includes("too many requests")
+    ) {
+        return {
+            httpStatus: 429,
+            message:
+                "GPT đang bị giới hạn tần suất (rate limit). Vui lòng thử lại sau 1–2 phút.",
+        };
+    }
+    if (status === 401 || status === 403 || msg.includes("api key")) {
+        return { httpStatus: 502, message: "Cấu hình API key AI không hợp lệ." };
+    }
+    return { httpStatus: 500, message: err?.message || "AI query failed." };
 }
 
 /**
@@ -45,8 +269,15 @@ async function callLLM(systemPrompt, userMessage) {
  */
 const askQuestion = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = resolveChatUserId(req);
         const { question, s3Key, sessionId } = req.body;
+
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Missing user identity. Provide token or userId.",
+            });
+        }
 
         if (!question || !question.trim()) {
             return res.status(400).json({ success: false, message: "Question is required." });
@@ -93,22 +324,16 @@ const askQuestion = async (req, res) => {
 
         // 4. Call LLM with RAG context
         let answer;
-        if (context.trim()) {
-            const systemPrompt = [
-                "You are EduMate AI Assistant, an academic Q&A system.",
-                "Answer the user's question based ONLY on the provided document context.",
-                "If the context does not contain enough information, clearly state that you cannot answer based on the available documents.",
-                "Provide exact references to the source material when possible.",
-                "Answer in the same language as the user's question.",
-                "Do NOT make up information. Zero hallucination tolerance.",
-            ].join("\n");
-
-            const userMsg = `Context from verified documents:\n---\n${context}\n---\n\nQuestion: ${question.trim()}`;
-            answer = await callLLM(systemPrompt, userMsg);
-        } else {
-            // No context found
-            answer = "I could not find relevant information in the verified documents to answer your question. " +
-                "Please try rephrasing your question or ensure the relevant document has been uploaded and verified.";
+        const hasContext = context.trim().length > 0;
+        answer = await callLLM({
+            hasContext,
+            context,
+            question: question.trim(),
+        });
+        if (!answer || !answer.trim()) {
+            answer = hasContext
+                ? "I found document context but could not generate an answer at this time. Please try again."
+                : "I could not generate a response right now. Please try again.";
         }
 
         // 5. Save assistant message
@@ -148,7 +373,8 @@ const askQuestion = async (req, res) => {
         });
     } catch (err) {
         console.error("[chat/ask] Error:", err.message);
-        return res.status(500).json({ success: false, message: err.message || "AI query failed." });
+        const mapped = mapChatErrorToClient(err);
+        return res.status(mapped.httpStatus).json({ success: false, message: mapped.message });
     }
 };
 

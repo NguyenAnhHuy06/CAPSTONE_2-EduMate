@@ -1,7 +1,6 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 
-// Design ref: Database Design — "activity_logs" table
 const ActivityLog = sequelize.define('ActivityLog', {
     log_id: {
         type: DataTypes.INTEGER,
@@ -14,7 +13,7 @@ const ActivityLog = sequelize.define('ActivityLog', {
     },
     action: {
         type: DataTypes.STRING(100),
-        allowNull: false // e.g. 'login', 'upload_document', 'generate_quiz', 'ai_query'
+        allowNull: false
     },
     details: {
         type: DataTypes.TEXT,

@@ -2,7 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
-dotenv.config();
+// dotenv.config();
+const path = require("path");
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+
+console.log("DB_USER:", process.env.DB_USER);
 
 const { sequelize, ensureDatabase } = require('./config/db');
 const teamDb = require('./config/teamDb');
@@ -15,6 +19,9 @@ const chatRoutes = require('./routes/chatRoutes');
 const flashcardRoutes = require('./routes/flashcardRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
+const progressRoutes = require('./routes/progressRoutes');
+const donateRoutes = require('./routes/donateRoutes');
+const donationRoutes = require('./routes/donationRoutes');
 
 // Initialize Associations
 require('./models/associations');
@@ -34,8 +41,14 @@ app.use('/api/documents', documentRoutes);
 app.use('/api', quizRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/flashcards', flashcardRoutes);
+// Backward-compatible aliases for older frontend paths.
+app.use('/api/ai/flashcard', flashcardRoutes);
+app.use('/api/ai/flashcards', flashcardRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/progress', progressRoutes);
+app.use('/api/donate', donateRoutes);
+app.use('/api/donations', donationRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -65,7 +78,8 @@ const startServer = async () => {
         await ensureDatabase();
 
         // 2. Sequelize sync (creates/migrates all model tables)
-        await sequelize.sync({ alter: true });
+        await sequelize.sync();
+        console.log('Database connected (Squelize).');
         console.log('Database connected and synced (Sequelize).');
 
         // 3. Seed roles table
