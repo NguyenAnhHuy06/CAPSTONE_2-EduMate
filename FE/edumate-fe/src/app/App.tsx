@@ -139,7 +139,7 @@ export default function App() {
                     onClick={handleCloseDonate}
                     className="rounded-xl bg-white px-4 py-2 shadow border border-gray-200 hover:bg-gray-50"
                   >
-                    ← Quay lại
+                    ← Back
                   </button>
                 </div>
                 <DonatePage />

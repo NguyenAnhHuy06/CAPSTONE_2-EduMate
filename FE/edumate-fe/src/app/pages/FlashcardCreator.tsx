@@ -18,7 +18,6 @@ import {
 } from '../../utils/inferFlashcardOutputLanguage';
 
 const STUDENT_FLASHCARD_GENERATING_KEY = 'edumate_student_flashcard_generating';
-const FLASHCARD_GEN_LANG_KEY = 'edumate_flashcard_gen_language';
 /** Fired after flashcards are persisted so lists (e.g. Study My Flashcards) can refetch. */
 export const EDUMATE_FLASHCARDS_SAVED_EVENT = 'edumate:flashcards-saved';
 
@@ -46,7 +45,7 @@ interface FlashcardCreatorProps {
   onBack: () => void;
   /** When set, creator opens with these cards (e.g. from Study My Flashcards → Edit). */
   initialEdit?: FlashcardInitialEdit | null;
-  /** Extra text (e.g. AI summary on document page) to infer output language when mode is Auto. */
+  /** Extra text (e.g. AI summary on document page) to infer output language for generation. */
   contentLanguageHint?: string;
 }
 
@@ -55,8 +54,6 @@ interface Flashcard {
   front: string;
   back: string;
 }
-
-type FlashcardLanguageMode = 'auto' | 'vi' | 'en';
 
 export function FlashcardCreator({
   document,
@@ -75,28 +72,11 @@ export function FlashcardCreator({
   const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
   const [authBlocked, setAuthBlocked] = useState(false);
-  const [languageMode, setLanguageMode] = useState<FlashcardLanguageMode>(() => {
-    try {
-      const v = localStorage.getItem(FLASHCARD_GEN_LANG_KEY);
-      if (v === 'vi' || v === 'en' || v === 'auto') return v;
-    } catch {
-      /* ignore */
-    }
-    return 'auto';
-  });
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(FLASHCARD_GEN_LANG_KEY, languageMode);
-    } catch {
-      /* ignore */
-    }
-  }, [languageMode]);
-
-  const resolvedGenLanguage = useMemo(() => {
-    if (languageMode === 'vi' || languageMode === 'en') return languageMode;
-    return inferFlashcardOutputLanguage(document, contentLanguageHint);
-  }, [languageMode, document, contentLanguageHint]);
+  const resolvedGenLanguage = useMemo(
+    () => inferFlashcardOutputLanguage(document, contentLanguageHint),
+    [document, contentLanguageHint]
+  );
 
   const setFlashcardGeneratingStatus = (
     status: StudentFlashcardJobStatus,
@@ -464,28 +444,6 @@ export function FlashcardCreator({
         <p className="text-gray-600 mb-4">
           Generate flashcards based on: <span className="text-blue-600">{document?.title}</span>
         </p>
-
-        <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3 text-sm">
-          <label htmlFor="flashcard-gen-lang" className="text-gray-700 shrink-0">
-            Card language
-          </label>
-          <select
-            id="flashcard-gen-lang"
-            value={languageMode}
-            onChange={(e) => setLanguageMode(e.target.value as FlashcardLanguageMode)}
-            disabled={generating}
-            className="w-full sm:w-auto max-w-xs rounded-lg border border-gray-300 bg-white px-3 py-2 text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-600 disabled:opacity-50"
-          >
-            <option value="auto">Auto — match document text (default English if unsure)</option>
-            <option value="vi">Tiếng Việt</option>
-            <option value="en">English</option>
-          </select>
-          {languageMode === 'auto' && (
-            <span className="text-gray-500">
-              → {resolvedGenLanguage === 'vi' ? 'Vietnamese' : 'English'}
-            </span>
-          )}
-        </div>
 
         {flashcards.length === 0 ? (
           <button

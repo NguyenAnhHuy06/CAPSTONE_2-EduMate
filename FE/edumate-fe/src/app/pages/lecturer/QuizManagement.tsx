@@ -1247,7 +1247,7 @@ export function QuizManagement({
             const status = (err as { response?: { status?: number } })?.response?.status;
             const hint =
                 status === 404
-                    ? 'Quiz không có trên API đang chạy (khởi động lại `npm run dev:api` / quiz chỉ nằm ở FE cũ).'
+                    ? 'Quiz not found on the running API (restart `npm run dev:api` / quiz may only exist in old FE storage).'
                     : getApiErrorMessage(err) || 'Could not load attempts for this quiz.';
             showNotification({
                 type: 'error',
@@ -2818,9 +2818,9 @@ export function QuizManagement({
             setSelectedItem(null);
             showNotification({
                 type: 'info',
-                title: 'Ngân hàng câu hỏi',
+                title: 'Question bank',
                 message:
-                    'Đã gỡ câu khỏi danh sách. Đây là câu đang gắn với quiz (AI/chi tiết quiz), không phải bản ghi riêng trong ngân hàng trên server — không thể xóa bằng API ngân hàng.',
+                    'Removed from the list. This question is tied to the quiz (AI/quiz detail), not a separate question-bank record on the server — cannot delete via question-bank API.',
             });
             return;
         }

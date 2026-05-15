@@ -41,12 +41,12 @@ const handleSubmit = async (e: React.FormEvent) => {
   e.preventDefault();
 
   if (!file) {
-    alert("Vui lòng chọn file");
+    alert("Please select a file");
     return;
   }
 
   if (file.size > 10 * 1024 * 1024) {
-    alert("File không được vượt quá 10MB");
+    alert("File must not exceed 10MB");
     return;
   }
 
@@ -55,7 +55,7 @@ const handleSubmit = async (e: React.FormEvent) => {
   try {
     const form = new FormData();
 
-    // ⚠️ QUAN TRỌNG: key phải khớp với BE
+    // Field name must match the backend
     form.append("documentFile", file);
 
     form.append("title", formData.topicTitle);
@@ -87,7 +87,7 @@ const handleSubmit = async (e: React.FormEvent) => {
           body: form,
         });
     } catch (err) {
-      throw new Error("Không kết nối được server (CORS / server down)");
+      throw new Error("Could not connect to server (CORS / server down)");
     }
 
     let data;
@@ -95,11 +95,11 @@ const handleSubmit = async (e: React.FormEvent) => {
     try {
       data = await res.json();
     } catch (err) {
-      throw new Error("Server không trả về JSON hợp lệ");
+      throw new Error("Server did not return valid JSON");
     }
 
     if (!res.ok) {
-      throw new Error(data.message || "Upload thất bại");
+      throw new Error(data.message || "Upload failed");
     }
 
     setUploadSuccess(true);
@@ -126,7 +126,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     }, 2000);
 
   } catch (err: any) {
-    alert(err.message || "Đã có lỗi xảy ra trong quá trình upload. Vui lòng thử lại.");
+    alert(err.message || "An error occurred during upload. Please try again.");
   } finally {
     setUploading(false);
   }
@@ -215,10 +215,10 @@ const handleSubmit = async (e: React.FormEvent) => {
             required
           >
             <option value="">Select year</option>
-            <option value="NĂM 1 (2022-2023)">NĂM 1 (2022-2023)</option>
-            <option value="NĂM 2 (2023-2024)">NĂM 2 (2023-2024)</option>
-            <option value="NĂM 3 (2024-2025)">NĂM 3 (2024-2025)</option>
-            <option value="NĂM 4 (2025-2026)">NĂM 4 (2025-2026)</option>
+            <option value="NĂM 1 (2022-2023)">Year 1 (2022-2023)</option>
+            <option value="NĂM 2 (2023-2024)">Year 2 (2023-2024)</option>
+            <option value="NĂM 3 (2024-2025)">Year 3 (2024-2025)</option>
+            <option value="NĂM 4 (2025-2026)">Year 4 (2025-2026)</option>
           </select>
         </div>
 

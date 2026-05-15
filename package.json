@@ -1,7 +1,7 @@
 {
   "name": "capstone_2-edumate",
   "version": "1.0.0",
-  "description": "**EduMate** là hệ thống hỗ trợ học tập thông minh và chia sẻ tài liệu học thuật, được xây dựng cho sinh viên, giảng viên và quản trị viên trong môi trường DTU/CMU. Dự án giúp tập trung hóa tài liệu học tập chính thống, hỗ trợ tìm kiếm thông minh, đồng thời tích hợp AI hỏi đáp học thuật kèm trích dẫn nguồn để nâng cao hiệu quả học tập và giảm tải việc hỗ trợ lặp lại.",
+  "description": "EduMate — smart learning support and academic document sharing for DTU/CMU students, lecturers, and admins.",
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",

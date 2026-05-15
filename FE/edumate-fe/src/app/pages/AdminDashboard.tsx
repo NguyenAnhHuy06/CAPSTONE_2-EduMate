@@ -142,7 +142,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
   const handleConfirmDonation = async (donationId: number) => {
     try {
       await api.patch(`/donations/${donationId}/confirm`, {
-        admin_note: 'Đã xác nhận khoản ủng hộ.',
+        admin_note: 'Donation confirmed.',
       });
       fetchData();
     } catch (err) {
@@ -154,11 +154,11 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
     try {
       const reason = window.prompt(
         'Reason for rejection:',
-        'Biên lai không hợp lệ hoặc chưa tìm thấy giao dịch.'
+        'Invalid receipt or transaction not found.'
       );
 
       await api.patch(`/donations/${donationId}/reject`, {
-        admin_note: reason || 'Đã từ chối khoản ủng hộ.',
+        admin_note: reason || 'Donation rejected.',
       });
 
       fetchData();
@@ -607,7 +607,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
               <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg flex items-start gap-3">
                 <Heart className="text-blue-600 shrink-0" size={20} />
                 <p className="text-blue-800 text-sm">
-                  Các khoản donate đang chờ xác nhận. Admin cần kiểm tra biên lai với giao dịch ngân hàng trước khi xác nhận.
+                  Donations awaiting confirmation. Admins should verify receipts against bank transactions before approving.
                 </p>
               </div>
 
@@ -669,7 +669,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
                               </div>
                             </td>
                             <td className="p-4 font-semibold">
-                              {Number(d.amount || 0).toLocaleString('vi-VN')}đ
+                              {Number(d.amount || 0).toLocaleString('en-US')} VND
                             </td>
                             <td className="p-4 text-sm">
                               <div className="text-gray-900">
@@ -685,7 +685,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
                               ) : null}
                             </td>
                             <td className="p-4 text-sm text-gray-400">
-                              {d.created_at ? new Date(d.created_at).toLocaleString('vi-VN') : '-'}
+                              {d.created_at ? new Date(d.created_at).toLocaleString('en-US') : '-'}
                             </td>
                             <td className="p-4">
                               <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${

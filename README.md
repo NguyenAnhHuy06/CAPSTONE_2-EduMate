@@ -1,128 +1,128 @@
 # EduMate
 
-**EduMate** là hệ thống hỗ trợ học tập thông minh và chia sẻ tài liệu học thuật, được xây dựng cho sinh viên, giảng viên và quản trị viên trong môi trường DTU/CMU. Dự án giúp tập trung hóa tài liệu học tập chính thống, hỗ trợ tìm kiếm thông minh, đồng thời tích hợp AI hỏi đáp học thuật kèm trích dẫn nguồn để nâng cao hiệu quả học tập và giảm tải việc hỗ trợ lặp lại.
+**EduMate** is a smart learning support and academic document sharing system built for students, lecturers, and administrators in the DTU/CMU environment. The project centralizes official learning materials, supports intelligent search, and integrates academic AI Q&A with source citations to improve learning outcomes and reduce repetitive support work.
 
 ---
 
-## 1. Tổng quan dự án
+## 1. Project overview
 
-Trong môi trường đại học, sinh viên thường gặp khó khăn khi tìm kiếm thông tin học thuật hoặc tài liệu môn học vì dữ liệu bị phân tán, khó tra cứu và thiếu tính tập trung. Bên cạnh đó, các công cụ AI phổ biến có thể trả lời nhanh nhưng chưa bảo đảm độ chính xác theo tài liệu chính thức của nhà trường.
+In university settings, students often struggle to find academic information or course materials because data is scattered, hard to search, and not centralized. Meanwhile, popular AI tools can answer quickly but do not guarantee accuracy against official school materials.
 
-EduMate được xây dựng để giải quyết bài toán đó bằng cách kết hợp:
-- kho tài liệu học thuật tập trung,
-- công cụ tìm kiếm tài liệu thông minh,
-- AI hỏi đáp học thuật dựa trên tài liệu chính thức,
-- và tính năng tạo quiz/flashcard tự động để hỗ trợ ôn tập.
-
----
-
-## 2. Mục tiêu dự án
-
-- Tập trung tài liệu học tập và tài liệu học thuật CMU trên cùng một nền tảng.
-- Giúp sinh viên tìm tài liệu nhanh theo mã môn, từ khóa, học kỳ hoặc loại tài liệu.
-- Cung cấp câu trả lời AI dựa chặt chẽ trên tài liệu đã xác minh.
-- Hiển thị trích dẫn nguồn để người dùng có thể kiểm chứng câu trả lời.
-- Sinh quiz và flashcard từ tài liệu môn học để hỗ trợ ôn tập.
-- Giảm khối lượng hỗ trợ lặp lại cho giảng viên và nhân sự học vụ.
+EduMate addresses this by combining:
+- a centralized academic document repository,
+- smart document search,
+- academic AI Q&A grounded in official materials,
+- and automatic quiz/flashcard generation for review.
 
 ---
 
-## 3. Tính năng chính
+## 2. Project goals
 
-### Quản lý tài liệu
-- Tải lên và tải xuống tài liệu học thuật (PDF/DOCX)
-- Tổ chức tài liệu theo môn học, học kỳ và loại tài liệu
-- Xem danh sách tài liệu và tìm kiếm theo mã môn hoặc tên môn
-- Quy trình giảng viên xác minh tài liệu đã tải lên
-- Theo dõi lịch sử phiên bản tài liệu và xử lý báo cáo cơ bản
-
-### Hỗ trợ học tập bằng AI
-- Hỏi đáp học thuật bằng cơ chế Retrieval-Augmented Generation (RAG)
-- Trích dẫn nguồn cụ thể cho câu trả lời AI
-- Tạo quiz tự động từ tài liệu môn học
-- Tạo flashcard tự động phục vụ ôn tập
-- Trình xem tài liệu có thể làm nổi bật nội dung được AI tham chiếu
-
-### Theo dõi học tập
-- Lịch sử quiz và danh sách quiz
-- Chỉnh sửa quiz (dành cho giảng viên)
-- Bảng xếp hạng
-- Theo dõi tiến độ học tập
-
-### Quản trị hệ thống
-- Quản lý vai trò và phân quyền
-- Kiểm soát truy cập bằng email DTU
-- Nhật ký hoạt động quan trọng
-- Quản lý thư viện tài liệu
+- Centralize learning materials and CMU academic documents on one platform.
+- Help students find documents quickly by course code, keywords, semester, or document type.
+- Provide AI answers tightly grounded in verified materials.
+- Show source citations so users can verify responses.
+- Generate quizzes and flashcards from course materials to support review.
+- Reduce repetitive support load for lecturers and academic staff.
 
 ---
 
-## 4. Đối tượng sử dụng
+## 3. Main features
 
-- **Sinh viên**: tìm tài liệu, hỏi AI, tạo quiz/flashcard và theo dõi tiến độ học tập.
-- **Giảng viên / Nhân sự học vụ**: tải lên, xác minh và quản lý tài liệu chính thức; rà soát quiz do AI tạo.
-- **Quản trị viên**: quản lý người dùng, phân quyền, thư viện tài liệu và quy trình kiểm duyệt.
+### Document management
+- Upload and download academic documents (PDF/DOCX)
+- Organize documents by course, semester, and type
+- Browse and search by course code or course name
+- Lecturer verification workflow for uploaded documents
+- Document version history and basic reporting
+
+### AI-powered learning support
+- Academic Q&A using Retrieval-Augmented Generation (RAG)
+- Specific source citations for AI answers
+- Automatic quiz generation from course materials
+- Automatic flashcard generation for review
+- Document viewer that can highlight AI-referenced content
+
+### Learning progress
+- Quiz history and quiz lists
+- Quiz editing (for lecturers)
+- Leaderboard
+- Learning progress tracking
+
+### System administration
+- Role and permission management
+- DTU email access control
+- Important activity logs
+- Document library management
 
 ---
 
-## 5. Công nghệ sử dụng
+## 4. Users
+
+- **Students**: find materials, ask AI, create quizzes/flashcards, and track learning progress.
+- **Lecturers / Academic staff**: upload, verify, and manage official materials; review AI-generated quizzes.
+- **Administrators**: manage users, permissions, the document library, and moderation workflows.
+
+---
+
+## 5. Technology stack
 
 - **Frontend**: ReactJS, HTML, CSS, JavaScript
 - **Backend**: Node.js, Python (FastAPI / AI processing)
 - **Database**: MySQL
-- **Lưu trữ tệp**: AWS S3
-- **Lớp truy hồi ngữ nghĩa**: Vector DB nhúng (Chroma / FAISS / Qdrant tùy môi trường triển khai)
-- **AI Integration**: External LLM API kết hợp RAG pipeline
-- **Công cụ hỗ trợ**: GitHub, Postman, Figma, Discord, Zalo
+- **File storage**: AWS S3
+- **Semantic retrieval layer**: embedding vector DB (Chroma / FAISS / Qdrant depending on deployment)
+- **AI integration**: external LLM API with RAG pipeline
+- **Tools**: GitHub, Postman, Figma, Discord, Zalo
 
 ---
 
-## 6. Kiến trúc tổng quan
+## 6. High-level architecture
 
-EduMate được thiết kế như một hệ thống web gồm:
-- **Frontend ReactJS** cho giao diện sinh viên, giảng viên và quản trị viên,
-- **Node.js Web Core** xử lý xác thực, quản lý tài liệu và lịch sử/quiz,
-- **Python AI Engine** xử lý tách tài liệu, truy hồi ngữ nghĩa và sinh nội dung AI,
-- **MySQL** lưu dữ liệu quan hệ,
-- **AWS S3** lưu tài liệu,
-- và **Vector Database** phục vụ tìm kiếm ngữ nghĩa.
+EduMate is designed as a web system with:
+- **ReactJS frontend** for student, lecturer, and admin UIs,
+- **Node.js web core** for auth, document management, and quiz/history,
+- **Python AI engine** for document chunking, semantic retrieval, and AI content generation,
+- **MySQL** for relational data,
+- **AWS S3** for document storage,
+- and a **vector database** for semantic search.
 
-Kiến trúc này giúp hệ thống trả lời câu hỏi học thuật bằng AI nhưng vẫn bám sát tài liệu đáng tin cậy của trường.
-
----
-
-## 7. Phạm vi dự án
-
-### Trong phạm vi
-- Quản lý tài liệu CMU
-- Tìm kiếm thông minh và xem/tải tài liệu
-- Hỏi đáp học thuật bằng AI kèm trích dẫn nguồn
-- Tạo quiz và flashcard
-- Quản trị cơ bản và kiểm soát truy cập
-
-### Ngoài phạm vi
-- Cá nhân hóa nâng cao và hệ gợi ý
-- Tích hợp sâu với LMS/SSO
-- Tìm kiếm đa phương tiện (video/audio)
-- OCR nâng cao cho tài liệu scan hoàn toàn
+This architecture lets the system answer academic questions with AI while staying aligned with trustworthy school materials.
 
 ---
 
-## 8. Phương pháp phát triển
+## 7. Project scope
 
-Dự án áp dụng **Scrum** với nhiều sprint phát triển, tập trung vào phát hành theo từng giai đoạn, nhận phản hồi liên tục và ưu tiên MVP.
+### In scope
+- CMU document management
+- Smart search and document view/download
+- Academic AI Q&A with source citations
+- Quiz and flashcard generation
+- Basic administration and access control
 
-Các giai đoạn chính:
-- Giai đoạn khởi tạo và lập tài liệu
-- Sprint 1: xác thực, dashboard, upload/search tài liệu, xác minh, AI quiz/flashcard
+### Out of scope
+- Advanced personalization and recommendation systems
+- Deep LMS/SSO integration
+- Multimedia search (video/audio)
+- Advanced OCR for fully scanned documents
+
+---
+
+## 8. Development approach
+
+The project uses **Scrum** with multiple development sprints, incremental releases, continuous feedback, and an MVP-first mindset.
+
+Main phases:
+- Initiation and documentation
+- Sprint 1: auth, dashboard, upload/search documents, verification, AI quiz/flashcard
 - Sprint 2: quiz history, AI chat, source citation, document viewer, admin data management
 - Sprint 3: roles/permissions, audit logs, moderation flow, document version history
 
 ---
 
-## 9. Thành viên nhóm
+## 9. Team members
 
-| STT | MSSV | Họ và tên | Email |
+| # | Student ID | Full name | Email |
 |---|---|---|---|
 | 1 | 28209043094 | Ngo Thi Tuyet Nhung | nn8242115@gmail.com |
 | 2 | 28210205517 | Nguyen Anh Huy | anhhuynguyenqn23@gmail.com |
@@ -132,9 +132,9 @@ Các giai đoạn chính:
 
 ---
 
-## 10. Tài liệu dự án
+## 10. Project documents
 
-Dự án được hỗ trợ bởi các tài liệu sau:
+Supported project artifacts include:
 - Project Proposal
 - Project Plan
 - Product Backlog
@@ -144,26 +144,26 @@ Dự án được hỗ trợ bởi các tài liệu sau:
 
 ---
 
-## 11. Điểm nổi bật của EduMate
+## 11. EduMate highlights
 
-So với các công cụ AI tổng quát hoặc nền tảng lưu trữ tệp tĩnh, EduMate tập trung vào **độ tin cậy học thuật**:
-- Câu trả lời được tạo dựa trên tài liệu chính thức.
-- Trích dẫn nguồn giúp người dùng kiểm chứng thông tin.
-- Giảng viên có thể xác minh tài liệu được đưa vào hệ thống.
-- AI đóng vai trò hỗ trợ học tập, không thay thế bằng chứng học thuật chính thống.
-
----
-
-## 12. Hướng phát triển tương lai
-
-- Cải thiện OCR cho tài liệu scan
-- Gợi ý học tập cá nhân hóa
-- Đề xuất lộ trình học tập
-- Phân tích học tập chuyên sâu hơn
-- Tích hợp rộng hơn với các nền tảng của trường
+Compared with general AI tools or static file storage platforms, EduMate focuses on **academic trustworthiness**:
+- Answers are generated from official materials.
+- Source citations help users verify information.
+- Lecturers can verify materials added to the system.
+- AI supports learning; it does not replace official academic evidence.
 
 ---
 
-## 13. Liên hệ
+## 12. Future direction
 
-Mọi thông tin liên quan đến dự án, hợp tác hoặc trao đổi học thuật, vui lòng liên hệ các thành viên trong nhóm ở phần trên.
+- Better OCR for scanned documents
+- Personalized learning recommendations
+- Suggested learning paths
+- Deeper learning analytics
+- Broader integration with university platforms
+
+---
+
+## 13. Contact
+
+For project information, collaboration, or academic discussion, please contact team members listed above.

@@ -107,7 +107,7 @@ function fileFilter(req, file, cb) {
   if (!isExtensionAllowed || !isMimeAllowed) {
     return cb(
       new Error(
-        "Chỉ chấp nhận file PDF hoặc Word (.doc, .docx, .docm, .dotx, .dotm)."
+        "Only PDF or Word files are accepted (.doc, .docx, .docm, .dotx, .dotm)."
       )
     );
   }
@@ -181,7 +181,7 @@ function averageScorePercentForQuiz(quizId) {
   return Math.round(list.reduce((s, a) => s + Number(a.scorePercent || 0), 0) / list.length);
 }
 const manualGradesByAttemptId = new Map();
-/** PATCH /quiz/attempts/:id/grade — lecturer marks each question đúng/sai (Map: questionId -> boolean). */
+/** PATCH /quiz/attempts/:id/grade — lecturer marks each question correct/incorrect (Map: questionId -> boolean). */
 const lecturerCorrectMarksByAttemptId = new Map();
 const quizCommentsByQuizId = new Map();
 /** In-memory discussion thread for mock server (key: id:123 or key:s3filename). */
@@ -617,7 +617,7 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
   if (!req.file) {
     return res.status(400).json({
       success: false,
-      message: "Bạn chưa chọn file tài liệu.",
+      message: "You have not selected a document file.",
     });
   }
 
@@ -632,7 +632,7 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
 
     return res.status(400).json({
       success: false,
-      message: "Vui lòng nhập đầy đủ các trường bắt buộc.",
+      message: "Please fill in all required fields.",
     });
   }
 
@@ -670,7 +670,7 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
 
   return res.status(201).json({
     success: true,
-    message: "Tải tài liệu lên thành công.",
+    message: "Document uploaded successfully.",
     data: newDocument,
   });
 });
@@ -1774,7 +1774,7 @@ app.get("/api/quiz/attempts/:attemptId/lecturer-review", (req, res) => {
 });
 
 /**
- * Lecturer: set đúng/sai per question (manual override).
+ * Lecturer: set correct/incorrect per question (manual override).
  * PATCH /api/quiz/attempts/:attemptId/grade?userId=<lecturerId>
  * Body: { items: [ { questionId, markedCorrect: boolean } ] }
  */
@@ -2423,7 +2423,7 @@ app.use("/uploads", express.static(uploadDir));
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: "Không tìm thấy API bạn yêu cầu.",
+    message: "The requested API was not found.",
   });
 });
 
@@ -2437,19 +2437,19 @@ app.use((err, req, res, next) => {
       return res.status(400).json({
         success: false,
         message:
-          "File vượt quá 10MB. Vui lòng chọn file nhỏ hơn hoặc bằng 10MB.",
+          "File exceeds 10MB. Please choose a file 10MB or smaller.",
       });
     }
 
     return res.status(400).json({
       success: false,
-      message: err.message || "Lỗi upload file.",
+      message: err.message || "File upload error.",
     });
   }
 
   return res.status(400).json({
     success: false,
-    message: err.message || "Đã xảy ra lỗi ở server.",
+    message: err.message || "A server error occurred.",
   });
 });
 

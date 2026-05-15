@@ -11,7 +11,7 @@ export default function DonatePage() {
     qr_image_url: '',
     transfer_note: '',
     message:
-      'Mỗi khoản ủng hộ sẽ giúp chúng tôi duy trì server, chi trả chi phí API, lưu trữ tài liệu và tiếp tục phát triển thêm những tính năng hữu ích cho sinh viên và giảng viên.',
+      'Every contribution helps us maintain servers, pay API costs, store learning materials, and keep building useful features for students and lecturers.',
     is_enabled: true,
     updated_at: '',
   });
@@ -31,30 +31,30 @@ export default function DonatePage() {
   });
 
   const donationLevels = [
-    { amount: '20.000đ', label: 'Ủng hộ cơ bản' },
-    { amount: '50.000đ', label: 'Đồng hành cùng dự án' },
-    { amount: '100.000đ', label: 'Hỗ trợ phát triển tính năng' },
-    { amount: '200.000đ', label: 'Góp sức duy trì hệ thống' },
-    { amount: 'Tùy ý', label: 'Đóng góp theo khả năng' },
+    { amount: '20,000 VND', label: 'Basic support' },
+    { amount: '50,000 VND', label: 'Project partner' },
+    { amount: '100,000 VND', label: 'Feature development' },
+    { amount: '200,000 VND', label: 'System upkeep' },
+    { amount: 'Custom', label: 'Give what you can' },
   ];
 
   const supportItems = [
     {
-      title: 'Duy trì server',
+      title: 'Server upkeep',
       description:
-        'Giúp hệ thống hoạt động ổn định, truy cập mượt mà và phục vụ người dùng liên tục.',
+        'Keeps the platform stable, fast, and available for everyone.',
       icon: '🖥️',
     },
     {
-      title: 'Chi phí API',
+      title: 'API costs',
       description:
-        'Hỗ trợ các tính năng AI như quiz, flashcard và các trải nghiệm học tập thông minh hơn.',
+        'Powers AI features such as quizzes, flashcards, and smarter study experiences.',
       icon: '🤖',
     },
     {
-      title: 'Lưu trữ tài liệu',
+      title: 'Document storage',
       description:
-        'Đảm bảo tài liệu học tập được lưu trữ an toàn và sẵn sàng cho người dùng truy cập.',
+        'Keeps course materials stored safely and ready for users to access.',
       icon: '📚',
     },
   ];
@@ -113,12 +113,12 @@ export default function DonatePage() {
 
       setQrVisible(!!nextData.qr_image_url);
       setDonateInfo(nextData);
-      setSaveMessage('Đã cập nhật thông tin ủng hộ thành công.');
+      setSaveMessage('Donation information updated successfully.');
     } catch (err: any) {
       const apiMessage =
         err?.response?.data?.message ||
         err?.message ||
-        'Không cập nhật được thông tin ủng hộ.';
+        'Could not update donation information.';
       setSaveError(apiMessage);
     } finally {
       setIsSaving(false);
@@ -170,14 +170,14 @@ export default function DonatePage() {
     if (!allowedTypes.includes(file.type)) {
       setReceiptFile(null);
       e.target.value = '';
-      setDonationError('Biên lai phải là JPG, PNG, WEBP hoặc PDF.');
+      setDonationError('Receipt must be JPG, PNG, WEBP, or PDF.');
       return;
     }
 
     if (file.size > 10 * 1024 * 1024) {
       setReceiptFile(null);
       e.target.value = '';
-      setDonationError('Biên lai không được vượt quá 10MB.');
+      setDonationError('Receipt must not exceed 10MB.');
       return;
     }
 
@@ -185,7 +185,7 @@ export default function DonatePage() {
   };
 
   const handleSelectDonationLevel = (amount: string) => {
-    if (amount === 'Tùy ý') return;
+    if (amount === 'Custom') return;
     const numeric = amount.replace(/[^\d]/g, '');
     setDonationForm((prev) => ({
       ...prev,
@@ -201,23 +201,23 @@ export default function DonatePage() {
 
       const token = localStorage.getItem('edumate_token');
       if (!token) {
-        setDonationError('Bạn cần đăng nhập để gửi biên lai donate.');
+        setDonationError('You must be signed in to submit a donation receipt.');
         return;
       }
 
       if (!donateInfo.is_enabled) {
-        setDonationError('Tính năng donate hiện đang tạm tắt.');
+        setDonationError('Donations are temporarily disabled.');
         return;
       }
 
       const amount = Number(donationForm.amount);
       if (!Number.isFinite(amount) || amount <= 0) {
-        setDonationError('Vui lòng nhập số tiền ủng hộ hợp lệ.');
+        setDonationError('Please enter a valid donation amount.');
         return;
       }
 
       if (!receiptFile) {
-        setDonationError('Vui lòng upload biên lai chuyển khoản.');
+        setDonationError('Please upload your transfer receipt.');
         return;
       }
 
@@ -230,7 +230,7 @@ export default function DonatePage() {
 
       await api.post('/donations', fd);
 
-      setDonationMessage('Đã gửi biên lai. Vui lòng chờ admin xác nhận.');
+      setDonationMessage('Receipt submitted. Please wait for admin confirmation.');
       setDonationForm({
         amount: '',
         transfer_note: '',
@@ -259,7 +259,7 @@ export default function DonatePage() {
       const url = payload?.url || payload?.data?.url;
 
       if (!url) {
-        setDonationError('Không lấy được đường dẫn biên lai.');
+        setDonationError('Could not load receipt URL.');
         return;
       }
 
@@ -292,7 +292,7 @@ export default function DonatePage() {
           transfer_note: data.transfer_note || '',
           message:
             data.message ||
-            'Mỗi khoản ủng hộ sẽ giúp chúng tôi duy trì server, chi trả chi phí API, lưu trữ tài liệu và tiếp tục phát triển thêm những tính năng hữu ích cho sinh viên và giảng viên.',
+            'Every contribution helps us maintain servers, pay API costs, store learning materials, and keep building useful features for students and lecturers.',
           is_enabled: data.is_enabled !== false,
           updated_at: data.updated_at || '',
         });
@@ -344,13 +344,13 @@ export default function DonatePage() {
     <div className="min-h-screen bg-slate-50 text-slate-800">
       {!donateInfo.is_enabled && (
         <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 text-sm text-amber-800 text-center">
-          Tính năng ủng hộ hiện đang tạm tắt.
+          Donations are temporarily disabled.
         </div>
       )}
 
       {loading && (
         <div className="bg-blue-50 border-b border-blue-200 px-6 py-3 text-sm text-blue-800 text-center">
-          Đang tải thông tin ủng hộ...
+          Loading donation information...
         </div>
       )}
 
@@ -362,7 +362,7 @@ export default function DonatePage() {
               Support EduMate
             </span>
             <h1 className="max-w-2xl text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
-              Đồng hành cùng EduMate để xây dựng trải nghiệm học tập tốt hơn.
+              Support EduMate and help us build a better learning experience.
             </h1>
             <p className="mt-6 max-w-2xl text-lg leading-8 text-slate-600">
               {donateInfo.message}
@@ -372,13 +372,13 @@ export default function DonatePage() {
                 href="#donate-levels"
                 className="rounded-2xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
               >
-                Ủng hộ ngay
+                Donate now
               </a>
               <a
                 href="#about"
                 className="rounded-2xl border border-slate-300 bg-white px-6 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
               >
-                Tìm hiểu thêm
+                Learn more
               </a>
             </div>
           </div>
@@ -398,24 +398,23 @@ export default function DonatePage() {
       <section id="about" className="mx-auto max-w-7xl px-6 py-16 lg:px-10">
         <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
           <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">Giới thiệu EduMate</p>
-            <h2 className="mt-3 text-3xl font-bold text-slate-900">EduMate là nền tảng hỗ trợ học tập thông minh.</h2>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">About EduMate</p>
+            <h2 className="mt-3 text-3xl font-bold text-slate-900">EduMate is a smart learning support platform.</h2>
             <p className="mt-4 text-base leading-8 text-slate-600">
-              EduMate được xây dựng để giúp sinh viên và giảng viên tiếp cận tài liệu, ôn tập kiến thức,
-              làm quiz, học với flashcard và quản lý việc học thuận tiện hơn. Dự án tập trung vào việc kết
-              hợp công nghệ với nhu cầu học tập thực tế để tạo ra một môi trường học tập hiện đại, dễ sử dụng
-              và hữu ích.
+              EduMate helps students and lecturers access materials, review knowledge, take quizzes, study with
+              flashcards, and manage learning more easily. We combine technology with real classroom needs to build a
+              modern, easy-to-use, and useful learning environment.
             </p>
           </div>
 
           <div className="rounded-3xl bg-slate-900 p-8 text-white shadow-sm">
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-200">Vì sao cần donate</p>
-            <h2 className="mt-3 text-3xl font-bold">Sự ủng hộ của bạn giúp dự án phát triển bền vững hơn.</h2>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-200">Why donate</p>
+            <h2 className="mt-3 text-3xl font-bold">Your support helps the project grow sustainably.</h2>
             <ul className="mt-6 space-y-4 text-sm leading-7 text-slate-200">
-              <li>• Duy trì server để hệ thống hoạt động ổn định và truy cập mượt mà.</li>
-              <li>• Chi trả API phục vụ các tính năng AI như quiz, flashcard và hỗ trợ học tập.</li>
-              <li>• Lưu trữ tài liệu học tập an toàn, sẵn sàng cho người dùng sử dụng.</li>
-              <li>• Phát triển thêm tính năng mới và cải thiện trải nghiệm học tập lâu dài.</li>
+              <li>• Keep servers running so the system stays stable and responsive.</li>
+              <li>• Pay for APIs that power AI features such as quizzes, flashcards, and study support.</li>
+              <li>• Store learning materials safely and keep them available for users.</li>
+              <li>• Build new features and improve the learning experience over time.</li>
             </ul>
           </div>
         </div>
@@ -424,11 +423,11 @@ export default function DonatePage() {
       <section id="donate-levels" className="mx-auto max-w-7xl px-6 py-4 lg:px-10">
         <div className="rounded-[2rem] bg-white p-8 shadow-sm ring-1 ring-slate-200">
           <div className="max-w-2xl">
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">Mức ủng hộ tùy ý</p>
-            <h2 className="mt-3 text-3xl font-bold text-slate-900">Bạn có thể ủng hộ với bất kỳ mức nào phù hợp.</h2>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">Flexible amounts</p>
+            <h2 className="mt-3 text-3xl font-bold text-slate-900">You can donate any amount that works for you.</h2>
             <p className="mt-4 text-base leading-8 text-slate-600">
-              Mỗi khoản đóng góp, dù nhỏ, đều là một động lực để EduMate tiếp tục duy trì hoạt động và phát triển.
-              Việc ủng hộ là hoàn toàn tự nguyện.
+              Every contribution, no matter how small, helps EduMate keep running and improving. Donating is
+              completely voluntary.
             </p>
           </div>
 
@@ -451,44 +450,43 @@ export default function DonatePage() {
       <section className="mx-auto max-w-7xl px-6 py-16 lg:px-10">
         <div className="grid gap-8 lg:grid-cols-2">
           <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">Cam kết minh bạch</p>
-            <h2 className="mt-3 text-3xl font-bold text-slate-900">Chúng tôi sử dụng khoản ủng hộ một cách rõ ràng.</h2>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">Transparency</p>
+            <h2 className="mt-3 text-3xl font-bold text-slate-900">We use donations transparently.</h2>
             <p className="mt-4 text-base leading-8 text-slate-600">
-              Toàn bộ khoản đóng góp sẽ được ưu tiên cho các chi phí vận hành và phát triển dự án như server,
-              API, lưu trữ tài liệu và cải thiện sản phẩm. Chúng tôi mong muốn EduMate không chỉ hữu ích mà còn
-              đáng tin cậy với cộng đồng người dùng.
+              Contributions go first to operating and development costs—servers, APIs, document storage, and product
+              improvements. We want EduMate to be both useful and trustworthy for our community.
             </p>
           </div>
 
           <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
-            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">Phương thức ủng hộ</p>
-            <h2 className="mt-3 text-3xl font-bold text-slate-900">Thông tin ủng hộ hiện tại.</h2>
+            <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">How to donate</p>
+            <h2 className="mt-3 text-3xl font-bold text-slate-900">Current donation details.</h2>
 
             <div className="mt-6 grid gap-3">
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-medium text-slate-700">
-                <span className="block text-slate-500 text-xs mb-1">Tên tài khoản</span>
-                {donateInfo.account_name || 'Chưa cập nhật'}
+                <span className="block text-slate-500 text-xs mb-1">Account name</span>
+                {donateInfo.account_name || 'Not set'}
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-medium text-slate-700">
-                <span className="block text-slate-500 text-xs mb-1">Ngân hàng</span>
-                {donateInfo.bank_name || 'Chưa cập nhật'}
+                <span className="block text-slate-500 text-xs mb-1">Bank</span>
+                {donateInfo.bank_name || 'Not set'}
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-medium text-slate-700">
-                <span className="block text-slate-500 text-xs mb-1">Số tài khoản</span>
-                {donateInfo.account_number || 'Chưa cập nhật'}
+                <span className="block text-slate-500 text-xs mb-1">Account number</span>
+                {donateInfo.account_number || 'Not set'}
               </div>
 
               <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm font-medium text-slate-700">
-                <span className="block text-slate-500 text-xs mb-1">Nội dung chuyển khoản</span>
-                {donateInfo.transfer_note || 'Chưa cập nhật'}
+                <span className="block text-slate-500 text-xs mb-1">Transfer note</span>
+                {donateInfo.transfer_note || 'Not set'}
               </div>
             </div>
 
             {donateInfo.qr_image_url && qrVisible ? (
               <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <p className="text-sm font-medium text-slate-700 mb-3">Mã QR ủng hộ</p>
+                <p className="text-sm font-medium text-slate-700 mb-3">Donation QR code</p>
                 <img
                   src={donateInfo.qr_image_url}
                   alt="QR donate"
@@ -500,12 +498,12 @@ export default function DonatePage() {
 
             {donateInfo.updated_at ? (
               <p className="mt-4 text-xs text-slate-500">
-                Cập nhật lần cuối: {new Date(donateInfo.updated_at).toLocaleString('vi-VN')}
+                Last updated: {new Date(donateInfo.updated_at).toLocaleString('en-US')}
               </p>
             ) : null}
 
             <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-sm leading-7 text-slate-600">
-              Nếu bạn muốn đồng hành cùng EduMate, có thể ủng hộ qua thông tin bên trên. Sự đóng góp của bạn sẽ giúp dự án duy trì server, chi trả chi phí API, lưu trữ tài liệu và tiếp tục phát triển thêm tính năng mới.
+              To support EduMate, use the bank details above. Your contribution helps maintain servers, pay API costs, store documents, and fund new features.
             </div>
           </div>
         </div>
@@ -515,19 +513,19 @@ export default function DonatePage() {
         <section className="mx-auto max-w-7xl px-6 pb-16 lg:px-10">
           <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">
-              Xác nhận ủng hộ
+              Confirm donation
             </p>
             <h2 className="mt-3 text-3xl font-bold text-slate-900">
-              Upload biên lai để admin xác nhận khoản donate.
+              Upload your receipt for admin verification.
             </h2>
             <p className="mt-4 text-base leading-8 text-slate-600">
-              Sau khi chuyển khoản theo thông tin bên trên, hãy gửi số tiền và biên lai. Admin sẽ kiểm tra và cập nhật trạng thái.
+              After transferring using the details above, submit the amount and receipt. An admin will review and update the status.
             </p>
 
             <div className="mt-8 grid gap-6 md:grid-cols-2">
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Số tiền đã chuyển (VND)
+                  Amount transferred (VND)
                 </label>
                 <input
                   name="amount"
@@ -535,54 +533,54 @@ export default function DonatePage() {
                   min="1000"
                   value={donationForm.amount}
                   onChange={handleDonationFormChange}
-                  placeholder="Ví dụ: 50000"
+                  placeholder="e.g. 50000"
                   className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
                 />
               </div>
 
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Mã giao dịch, nếu có
+                  Transaction code (optional)
                 </label>
                 <input
                   name="transaction_code"
                   value={donationForm.transaction_code}
                   onChange={handleDonationFormChange}
-                  placeholder="Ví dụ: FT123456789"
+                  placeholder="e.g. FT123456789"
                   className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
                 />
               </div>
 
               <div className="md:col-span-2">
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Nội dung chuyển khoản
+                  Transfer note
                 </label>
                 <input
                   name="transfer_note"
                   value={donationForm.transfer_note}
                   onChange={handleDonationFormChange}
-                  placeholder={donateInfo.transfer_note || 'Ví dụ: DONATE EDUMATE'}
+                  placeholder={donateInfo.transfer_note || 'e.g. DONATE EDUMATE'}
                   className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
                 />
               </div>
 
               <div className="md:col-span-2">
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Lời nhắn, tùy chọn
+                  Message (optional)
                 </label>
                 <textarea
                   name="message"
                   value={donationForm.message}
                   onChange={handleDonationFormChange}
                   rows={3}
-                  placeholder="Bạn có thể để lại lời nhắn cho nhóm EduMate."
+                  placeholder="Leave a message for the EduMate team."
                   className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
                 />
               </div>
 
               <div className="md:col-span-2">
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Biên lai chuyển khoản
+                  Transfer receipt
                 </label>
                 <input
                   id="donation-receipt"
@@ -592,7 +590,7 @@ export default function DonatePage() {
                   className="w-full rounded-2xl border border-slate-300 px-4 py-3 outline-none focus:border-blue-500"
                 />
                 <p className="mt-2 text-xs text-slate-500">
-                  Chấp nhận JPG, PNG, WEBP hoặc PDF. Tối đa 10MB.
+                  JPG, PNG, WEBP, or PDF. Max 10MB.
                 </p>
               </div>
             </div>
@@ -616,7 +614,7 @@ export default function DonatePage() {
                 disabled={donationSubmitting}
                 className="rounded-2xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {donationSubmitting ? 'Đang gửi...' : 'Gửi biên lai xác nhận'}
+                {donationSubmitting ? 'Submitting...' : 'Submit receipt'}
               </button>
             </div>
           </div>
@@ -628,10 +626,10 @@ export default function DonatePage() {
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">
-                Lịch sử ủng hộ
+                Donation history
               </p>
               <h2 className="mt-3 text-3xl font-bold text-slate-900">
-                Trạng thái các khoản donate của bạn.
+                Status of your donations.
               </h2>
             </div>
             <button
@@ -639,7 +637,7 @@ export default function DonatePage() {
               onClick={loadMyDonations}
               className="rounded-2xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
             >
-              Làm mới
+              Refresh
             </button>
           </div>
 
@@ -647,34 +645,34 @@ export default function DonatePage() {
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50">
-                  <th className="px-4 py-3">Ngày gửi</th>
-                  <th className="px-4 py-3">Số tiền</th>
-                  <th className="px-4 py-3">Trạng thái</th>
-                  <th className="px-4 py-3">Ghi chú admin</th>
-                  <th className="px-4 py-3 text-right">Biên lai</th>
+                  <th className="px-4 py-3">Submitted</th>
+                  <th className="px-4 py-3">Amount</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Admin note</th>
+                  <th className="px-4 py-3 text-right">Receipt</th>
                 </tr>
               </thead>
               <tbody>
                 {historyLoading ? (
                   <tr>
                     <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
-                      Đang tải lịch sử...
+                      Loading history...
                     </td>
                   </tr>
                 ) : myDonations.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
-                      Chưa có khoản donate nào.
+                      No donations yet.
                     </td>
                   </tr>
                 ) : (
                   myDonations.map((item) => (
                     <tr key={item.donation_id} className="border-b border-slate-100">
                       <td className="px-4 py-3">
-                        {item.created_at ? new Date(item.created_at).toLocaleString('vi-VN') : '-'}
+                        {item.created_at ? new Date(item.created_at).toLocaleString('en-US') : '-'}
                       </td>
                       <td className="px-4 py-3 font-semibold">
-                        {Number(item.amount || 0).toLocaleString('vi-VN')}đ
+                        {Number(item.amount || 0).toLocaleString('en-US')} VND
                       </td>
                       <td className="px-4 py-3">
                         <span className={`rounded-full px-3 py-1 text-xs font-bold ${
@@ -696,7 +694,7 @@ export default function DonatePage() {
                           onClick={() => handleOpenDonationReceipt(item.donation_id)}
                           className="rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                         >
-                          Xem biên lai
+                          View receipt
                         </button>
                       </td>
                     </tr>
@@ -712,19 +710,19 @@ export default function DonatePage() {
         <section className="mx-auto max-w-7xl px-6 pb-16 lg:px-10">
           <div className="rounded-3xl bg-white p-8 shadow-sm ring-1 ring-slate-200">
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-blue-700">
-              Quản trị Donate
+              Donate admin
             </p>
             <h2 className="mt-3 text-3xl font-bold text-slate-900">
-              Cập nhật thông tin ủng hộ
+              Update donation information
             </h2>
             <p className="mt-4 text-base leading-8 text-slate-600">
-              Khu vực này chỉ dành cho admin để chỉnh sửa nội dung hiển thị trên trang Donate.
+              Admin-only area to edit content shown on the Donate page.
             </p>
 
             <div className="mt-8 grid gap-6 md:grid-cols-2">
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Tên tài khoản
+                  Account name
                 </label>
                 <input
                   name="account_name"
@@ -736,7 +734,7 @@ export default function DonatePage() {
 
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Ngân hàng
+                  Bank
                 </label>
                 <input
                   name="bank_name"
@@ -748,7 +746,7 @@ export default function DonatePage() {
 
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Số tài khoản
+                  Account number
                 </label>
                 <input
                   name="account_number"
@@ -760,7 +758,7 @@ export default function DonatePage() {
 
               <div>
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Nội dung chuyển khoản
+                  Transfer note
                 </label>
                 <input
                   name="transfer_note"
@@ -784,7 +782,7 @@ export default function DonatePage() {
 
               <div className="md:col-span-2">
                 <label className="mb-2 block text-sm font-medium text-slate-700">
-                  Thông điệp hiển thị
+                  Display message
                 </label>
                 <textarea
                   name="message"
@@ -803,7 +801,7 @@ export default function DonatePage() {
                     onChange={handleToggleEnabled}
                     className="h-4 w-4 rounded border-slate-300"
                   />
-                  Bật tính năng donate
+                  Enable donations
                 </label>
               </div>
             </div>
@@ -827,7 +825,7 @@ export default function DonatePage() {
                 disabled={isSaving}
                 className="rounded-2xl bg-slate-900 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {isSaving ? 'Đang lưu...' : 'Lưu thông tin donate'}
+                {isSaving ? 'Saving...' : 'Save donation info'}
               </button>
             </div>
           </div>
@@ -836,10 +834,10 @@ export default function DonatePage() {
 
       <section className="border-t border-slate-200 bg-white">
         <div className="mx-auto max-w-7xl px-6 py-14 text-center lg:px-10">
-          <h2 className="text-3xl font-bold text-slate-900">Cảm ơn bạn đã đồng hành cùng EduMate.</h2>
+          <h2 className="text-3xl font-bold text-slate-900">Thank you for supporting EduMate.</h2>
           <p className="mx-auto mt-4 max-w-3xl text-base leading-8 text-slate-600">
-            Sự ủng hộ của bạn không chỉ giúp dự án duy trì hoạt động mà còn góp phần xây dựng một trải nghiệm học tập
-            tốt hơn cho nhiều người dùng trong tương lai.
+            Your support helps keep the project running and builds a better learning experience for more users in the
+            future.
           </p>
         </div>
       </section>

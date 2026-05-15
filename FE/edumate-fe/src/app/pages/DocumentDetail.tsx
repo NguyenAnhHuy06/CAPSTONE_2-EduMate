@@ -14,7 +14,7 @@ import {
 import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator, type FlashcardInitialEdit } from '../pages/FlashcardCreator';
 import { FlashcardViewer } from '../pages/student/FlashcardViewer';
-import { AIChatPanel } from './AIChatPanel';
+import { AIChatPanel, AIChatLauncher } from './AIChatPanel';
 import api from '@/services/api';
 import { useNotification } from './NotificationContext';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -829,7 +829,7 @@ export function DocumentDetail ({
 
             <button
               type="button"
-              onClick={() => setShowAIChat((v) => !v)}
+              onClick={() => setShowAIChat(true)}
               title="Chat about this document"
               className={`flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors ${
                 showAIChat
@@ -838,7 +838,7 @@ export function DocumentDetail ({
               }`}
             >
               <MessageSquare size={18} />
-              {showAIChat ? 'Close Chat' : 'Chat with AI'}
+              Chat with AI
             </button>
 
             {userRole === 'student' && (() => {
@@ -1011,16 +1011,17 @@ export function DocumentDetail ({
         )}
       </div>
 
+      {!showAIChat && <AIChatLauncher onClick={() => setShowAIChat(true)} />}
       {showAIChat && (
-        <div className="bg-white rounded-lg border border-gray-200 p-4 mb-6 h-[730px] min-h-[400px]">
-          <AIChatPanel
-            documentId={document.documentId}
-            s3Key={document.s3Key}
-            pdfPage={pdfTotalPages > 0 ? pdfPage : undefined}
-            pdfTotalPages={pdfTotalPages > 0 ? pdfTotalPages : undefined}
-            onClose={() => setShowAIChat(false)}
-          />
-        </div>
+        <AIChatPanel
+          documentId={document.documentId}
+          s3Key={document.s3Key}
+          documentTitle={document?.title}
+          pdfPage={pdfTotalPages > 0 ? pdfPage : undefined}
+          pdfTotalPages={pdfTotalPages > 0 ? pdfTotalPages : undefined}
+          onClose={() => setShowAIChat(false)}
+          floating
+        />
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 p-6 mb-6">

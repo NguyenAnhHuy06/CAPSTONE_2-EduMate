@@ -165,7 +165,7 @@ export function NotificationBell({
 
                       {n.created_at ? (
                         <p className="text-[11px] text-gray-400 mt-0.5">
-                          {new Date(n.created_at).toLocaleString('vi-VN')}
+                          {new Date(n.created_at).toLocaleString('en-US')}
                         </p>
                       ) : null}
                     </div>
@@ -191,7 +191,7 @@ export function NotificationBell({
                       {n.title}
                     </p>
                     <p className="text-[11px] text-gray-400 mt-0.5">
-                      {new Date(n.createdAt).toLocaleString('vi-VN')}
+                      {new Date(n.createdAt).toLocaleString('en-US')}
                     </p>
                   </button>
                 ))}
