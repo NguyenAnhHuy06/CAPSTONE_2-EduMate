@@ -24,33 +24,105 @@ function resolveChatUserId(req) {
     return null;
 }
 
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Chat uses GPT only — default gpt-4o-mini (OpenAI API). */
+function resolveOpenAiChatModel() {
+    const m = String(
+        process.env.CHAT_MODEL ||
+        process.env.OPENAI_CHAT_MODEL ||
+        process.env.OPENAI_MODEL ||
+        "gpt-4o-mini"
+    ).trim();
+    return m || "gpt-4o-mini";
+}
+
+/** OpenRouter route to OpenAI GPT when OPENAI_API_KEY is not set. */
+function resolveOpenRouterGptChatModels() {
+    const listRaw =
+        process.env.OPENROUTER_CHAT_MODELS ||
+        process.env.OPENROUTER_CHAT_MODEL ||
+        "";
+    const fromList = String(listRaw)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (fromList.length) {
+        return fromList.filter((m) => !String(m).toLowerCase().includes("gemini"));
+    }
+    const single = String(process.env.CHAT_MODEL || "openai/gpt-4o-mini").trim();
+    if (single.toLowerCase().includes("gemini")) return ["openai/gpt-4o-mini"];
+    if (single.includes("/")) return [single];
+    return [`openai/${single}`];
+}
+
 function getChatProviderConfigs() {
     const configs = [];
+    const prefer = String(process.env.CHAT_PROVIDER || "openai").trim().toLowerCase();
     const openaiKey = String(process.env.OPENAI_API_KEY || "").trim();
-    if (openaiKey) {
+    const openrouterKey = String(process.env.OPENROUTER_API_KEY || "").trim();
+
+    const pushOpenAi = () => {
+        if (!openaiKey) return;
         configs.push({
             provider: "openai",
             apiKey: openaiKey,
             endpoint: "https://api.openai.com/v1/chat/completions",
-            model: process.env.OPENAI_MODEL || process.env.CHAT_MODEL || "gpt-4o-mini",
+            model: resolveOpenAiChatModel(),
         });
-    }
+    };
 
-    const openrouterKey = String(process.env.OPENROUTER_API_KEY || "").trim();
-    if (openrouterKey) {
-        configs.push({
-            provider: "openrouter",
-            apiKey: openrouterKey,
-            endpoint: "https://openrouter.ai/api/v1/chat/completions",
-            model: process.env.OPENROUTER_MODEL || process.env.CHAT_MODEL || "google/gemini-2.0-flash-001",
-        });
+    const pushOpenRouterGpt = () => {
+        if (!openrouterKey) return;
+        for (const model of resolveOpenRouterGptChatModels()) {
+            configs.push({
+                provider: "openrouter",
+                apiKey: openrouterKey,
+                endpoint: "https://openrouter.ai/api/v1/chat/completions",
+                model,
+            });
+        }
+    };
+
+    if (prefer === "openrouter") {
+        pushOpenRouterGpt();
+        pushOpenAi();
+    } else if (prefer === "openai") {
+        pushOpenAi();
+        // If OpenAI quota/billing is exhausted, try GPT via OpenRouter (openai/gpt-4o-mini), not Gemini
+        if (openrouterKey) pushOpenRouterGpt();
+        else if (!openaiKey) pushOpenRouterGpt();
+    } else {
+        pushOpenAi();
+        const allowOrFallback =
+            process.env.CHAT_OPENROUTER_FALLBACK === "1" ||
+            process.env.CHAT_OPENROUTER_FALLBACK === "true" ||
+            !openaiKey;
+        if (allowOrFallback) pushOpenRouterGpt();
     }
 
     if (!configs.length) {
-        throw new Error("Missing AI API key. Set OPENAI_API_KEY or OPENROUTER_API_KEY.");
+        throw new Error(
+            "Chat requires GPT. Set OPENAI_API_KEY (recommended) or OPENROUTER_API_KEY with openai/gpt-4o-mini."
+        );
     }
     return configs;
 }
+
+function logChatProviderSetup() {
+    try {
+        const cfgs = getChatProviderConfigs();
+        console.log(
+            "[chat] Active providers:",
+            cfgs.map((c) => `${c.provider}:${c.model}`).join(", ")
+        );
+    } catch (e) {
+        console.warn("[chat] Provider setup:", e.message);
+    }
+}
+logChatProviderSetup();
 
 function buildSystemPrompt(hasContext) {
     return [
@@ -69,62 +141,125 @@ async function callLLM({ hasContext, context, question }) {
     const userMessage = hasContext
         ? `Document context:\n---\n${context}\n---\n\nQuestion: ${question}`
         : `Question: ${question}`;
+    const maxRetries = Math.min(Math.max(Number(process.env.CHAT_MAX_RETRIES) || 3, 1), 6);
     let lastErr = null;
 
     for (const cfg of configs) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000);
-        try {
-            const headers = {
-                Authorization: `Bearer ${cfg.apiKey}`,
-                "Content-Type": "application/json",
-            };
-
-            if (cfg.provider === "openrouter") {
-                headers["HTTP-Referer"] = "http://localhost";
-                headers["X-Title"] = "EduMate BE Chat";
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30000);
+            if (attempt === 0) {
+                console.log(`[chat/ask] Using ${cfg.provider} model=${cfg.model}`);
             }
+            try {
+                const headers = {
+                    Authorization: `Bearer ${cfg.apiKey}`,
+                    "Content-Type": "application/json",
+                };
 
-            const resp = await fetch(cfg.endpoint, {
-                method: "POST",
-                headers,
-                body: JSON.stringify({
-                    model: cfg.model,
-                    temperature: 0.2,
-                    max_tokens: 1000,
-                    messages: [
-                        { role: "system", content: buildSystemPrompt(hasContext) },
-                        { role: "user", content: userMessage },
-                    ],
-                }),
-                signal: controller.signal,
-            });
+                if (cfg.provider === "openrouter") {
+                    headers["HTTP-Referer"] = "http://localhost";
+                    headers["X-Title"] = "EduMate BE Chat";
+                }
 
-            if (!resp.ok) {
-                const detail = await resp.text().catch(() => "");
-                const err = new Error(`LLM Error: ${resp.status} ${resp.statusText}${detail ? ` - ${detail.slice(0, 300)}` : ""}`);
-                err.status = resp.status;
-                throw err;
+                const resp = await fetch(cfg.endpoint, {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify({
+                        model: cfg.model,
+                        temperature: 0.2,
+                        max_tokens: 1000,
+                        messages: [
+                            { role: "system", content: buildSystemPrompt(hasContext) },
+                            { role: "user", content: userMessage },
+                        ],
+                    }),
+                    signal: controller.signal,
+                });
+
+                if (!resp.ok) {
+                    const detail = await resp.text().catch(() => "");
+                    const err = new Error(
+                        `LLM Error: ${resp.status} ${resp.statusText}${detail ? ` - ${detail.slice(0, 300)}` : ""}`
+                    );
+                    err.status = resp.status;
+                    throw err;
+                }
+
+                const data = await resp.json();
+                const text = data?.choices?.[0]?.message?.content || "";
+                if (text && String(text).trim()) return text;
+                throw new Error("LLM returned empty content.");
+            } catch (err) {
+                lastErr = err;
+                const status = Number(err?.status);
+                const msg = String(err?.message || "").toLowerCase();
+                const isQuotaExhausted =
+                    status === 402 ||
+                    msg.includes("insufficient_quota") ||
+                    msg.includes("exceeded your current quota") ||
+                    msg.includes("check your plan and billing");
+                const isRateLimit =
+                    !isQuotaExhausted &&
+                    (status === 429 ||
+                        msg.includes("rate limit") ||
+                        msg.includes("rate-limited") ||
+                        msg.includes("too many requests"));
+                const isRetryableSameModel =
+                    isRateLimit || status === 503 || status === 408 || err?.name === "AbortError";
+                if (isRetryableSameModel && attempt < maxRetries - 1) {
+                    await sleep(1200 * (attempt + 1));
+                    continue;
+                }
+                const shouldTryNextProvider =
+                    status === 401 ||
+                    status === 402 ||
+                    status === 403 ||
+                    isRateLimit ||
+                    isQuotaExhausted ||
+                    msg.includes("insufficient_quota");
+                if (!shouldTryNextProvider) throw err;
+                break;
+            } finally {
+                clearTimeout(timeout);
             }
-
-            const data = await resp.json();
-            const text = data?.choices?.[0]?.message?.content || "";
-            if (text && String(text).trim()) return text;
-            throw new Error("LLM returned empty content.");
-        } catch (err) {
-            lastErr = err;
-            const status = Number(err?.status);
-            const msg = String(err?.message || "").toLowerCase();
-            const shouldTryNext =
-                status === 401 || status === 402 || status === 403 || status === 429 ||
-                msg.includes("insufficient_quota") || msg.includes("rate limit");
-            if (!shouldTryNext) throw err;
-        } finally {
-            clearTimeout(timeout);
         }
     }
 
     throw lastErr || new Error("All AI providers failed.");
+}
+
+function mapChatErrorToClient(err) {
+    const status = Number(err?.status);
+    const msg = String(err?.message || "").toLowerCase();
+    if (
+        status === 402 ||
+        msg.includes("insufficient_quota") ||
+        msg.includes("exceeded your current quota") ||
+        msg.includes("check your plan and billing")
+    ) {
+        return {
+            httpStatus: 402,
+            message:
+                "Tài khoản OpenAI đã hết quota/credit (không phải do gọi quá nhanh). Nạp billing tại platform.openai.com hoặc dùng OPENROUTER_API_KEY để chat qua OpenRouter.",
+        };
+    }
+    if (
+        status === 429 ||
+        msg.includes("rate limit") ||
+        msg.includes("rate-limited") ||
+        msg.includes("too many requests")
+    ) {
+        return {
+            httpStatus: 429,
+            message:
+                "GPT đang bị giới hạn tần suất (rate limit). Vui lòng thử lại sau 1–2 phút.",
+        };
+    }
+    if (status === 401 || status === 403 || msg.includes("api key")) {
+        return { httpStatus: 502, message: "Cấu hình API key AI không hợp lệ." };
+    }
+    return { httpStatus: 500, message: err?.message || "AI query failed." };
 }
 
 /**
@@ -238,7 +373,8 @@ const askQuestion = async (req, res) => {
         });
     } catch (err) {
         console.error("[chat/ask] Error:", err.message);
-        return res.status(500).json({ success: false, message: err.message || "AI query failed." });
+        const mapped = mapChatErrorToClient(err);
+        return res.status(mapped.httpStatus).json({ success: false, message: mapped.message });
     }
 };
 

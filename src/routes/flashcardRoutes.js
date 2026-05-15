@@ -11,6 +11,92 @@ const db = require("../config/teamDb");
 const { activityLogMiddleware } = require("../middleware/activityLog");
 
 const GENERATION_FAIL_MESSAGE = "Generation failed. Please try again.";
+const FLASHCARD_OPENROUTER_TIMEOUT_MS = Math.max(
+    15000,
+    Number(process.env.FLASHCARD_OPENROUTER_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 90000)
+);
+const FLASHCARD_S3_EXTRACT_TIMEOUT_MS = Math.max(
+    10000,
+    Number(process.env.FLASHCARD_S3_EXTRACT_TIMEOUT_MS || 45000)
+);
+
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+
+function withTimeout(promise, ms, label) {
+    const lim = Math.max(1000, Number(ms) || 30000);
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => {
+                const err = new Error(`${label} timed out after ${Math.round(lim / 1000)}s`);
+                err.statusCode = 408;
+                reject(err);
+            }, lim);
+        }),
+    ]);
+}
+
+function resolveFlashcardOpenRouterModel() {
+    return (
+        process.env.FLASHCARD_OPENROUTER_MODEL ||
+        process.env.OPENROUTER_MODEL ||
+        process.env.DEEPSEEK_MODEL ||
+        "openrouter/free"
+    );
+}
+
+async function callOpenRouterForFlashcards({ apiKey, prompt }) {
+    const fetchFn = global.fetch || require("node-fetch");
+    const payload = {
+        model: resolveFlashcardOpenRouterModel(),
+        temperature: 0.2,
+        max_tokens: 1200,
+        messages: [{ role: "user", content: prompt }],
+    };
+    let lastErr;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), FLASHCARD_OPENROUTER_TIMEOUT_MS);
+        try {
+            const resp = await fetchFn("https://openrouter.ai/api/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost",
+                    "X-Title": "EduMate Flashcards",
+                },
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+            if (!resp.ok) {
+                const detail = await resp.text().catch(() => "");
+                const err = new Error(
+                    `OpenRouter HTTP ${resp.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`
+                );
+                err.status = resp.status;
+                throw err;
+            }
+            return await resp.json();
+        } catch (e) {
+            lastErr = e;
+            if (e?.name === "AbortError") {
+                lastErr = Object.assign(new Error(`OpenRouter timed out after ${FLASHCARD_OPENROUTER_TIMEOUT_MS}ms`), {
+                    statusCode: 408,
+                });
+            }
+            const st = Number(e?.status);
+            const retryable = st === 429 || st === 503 || st === 408 || e?.name === "AbortError";
+            if (!retryable || attempt >= 1) break;
+            await sleep(1500);
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+    throw lastErr || new Error("OpenRouter flashcard generation failed.");
+}
 
 function normalizeGeneratedCards(rawCards) {
     if (!Array.isArray(rawCards)) return [];
@@ -43,30 +129,67 @@ function normalizeGeneratedCards(rawCards) {
         .slice(0, 20);
 }
 
+/** AI sometimes returns { "front_1": "...", "back_1": "..." } instead of an array. */
+function parseNumberedKeyFlashcards(obj) {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+    const fronts = new Map();
+    const backs = new Map();
+    for (const [key, val] of Object.entries(obj)) {
+        const text = String(val ?? "").trim();
+        if (!text) continue;
+        const fm = String(key).match(/^(?:front|question|q)[_\s-]?(\d+)$/i);
+        const bm = String(key).match(/^(?:back|answer|a)[_\s-]?(\d+)$/i);
+        if (fm) fronts.set(Number(fm[1]), text);
+        if (bm) backs.set(Number(bm[1]), text);
+    }
+    const indices = new Set([...fronts.keys(), ...backs.keys()]);
+    if (!indices.size) return [];
+
+    const cards = [];
+    for (const i of [...indices].sort((a, b) => a - b)) {
+        const f = fronts.get(i) || "";
+        const b = backs.get(i) || "";
+        if (f && b) {
+            cards.push({ front: f, back: b });
+        } else if (f && !b) {
+            // Model put answer text under front_N only — use it as the back side
+            cards.push({ front: `Key point ${i}`, back: f });
+        } else if (!f && b) {
+            cards.push({ front: `Question ${i}`, back: b });
+        }
+    }
+    return cards.slice(0, 20);
+}
+
+function parseParsedFlashcardPayload(parsed) {
+    if (parsed == null) return [];
+    if (Array.isArray(parsed)) {
+        const cards = normalizeGeneratedCards(parsed);
+        return cards.length ? cards : [];
+    }
+    if (typeof parsed === "object") {
+        const numbered = parseNumberedKeyFlashcards(parsed);
+        if (numbered.length) return numbered;
+        const inner =
+            parsed.flashcards ??
+            parsed.cards ??
+            parsed.items ??
+            parsed.data ??
+            parsed.results;
+        if (inner != null) return parseParsedFlashcardPayload(inner);
+    }
+    return [];
+}
+
 function parseAiCardsFromText(answerText) {
     const text = String(answerText || "").trim();
     if (!text) return [];
 
-    const tryNormalize = (maybe) => {
-        const cards = normalizeGeneratedCards(maybe);
-        return cards.length ? cards : [];
-    };
-
     // Case 1: valid JSON array directly
     try {
         const parsed = JSON.parse(text);
-        const fromArr = tryNormalize(parsed);
-        if (fromArr.length) return fromArr;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            const inner =
-                parsed.flashcards ??
-                parsed.cards ??
-                parsed.items ??
-                parsed.data ??
-                parsed.results;
-            const fromInner = tryNormalize(inner);
-            if (fromInner.length) return fromInner;
-        }
+        const cards = parseParsedFlashcardPayload(parsed);
+        if (cards.length) return cards;
     } catch (_) {}
 
     // Case 2: response wrapped in code block or additional explanation text
@@ -74,18 +197,8 @@ function parseAiCardsFromText(answerText) {
     if (codeBlockMatch?.[1]) {
         try {
             const parsed = JSON.parse(codeBlockMatch[1].trim());
-            const fromArr = tryNormalize(parsed);
-            if (fromArr.length) return fromArr;
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                const inner =
-                    parsed.flashcards ??
-                    parsed.cards ??
-                    parsed.items ??
-                    parsed.data ??
-                    parsed.results;
-                const fromInner = tryNormalize(inner);
-                if (fromInner.length) return fromInner;
-            }
+            const cards = parseParsedFlashcardPayload(parsed);
+            if (cards.length) return cards;
         } catch (_) {}
     }
 
@@ -96,8 +209,8 @@ function parseAiCardsFromText(answerText) {
         const arraySlice = text.slice(start, end + 1);
         try {
             const parsed = JSON.parse(arraySlice);
-            const fromArr = tryNormalize(parsed);
-            if (fromArr.length) return fromArr;
+            const cards = parseParsedFlashcardPayload(parsed);
+            if (cards.length) return cards;
         } catch (_) {}
     }
 
@@ -108,16 +221,8 @@ function parseAiCardsFromText(answerText) {
         const objSlice = text.slice(objStart, objEnd + 1);
         try {
             const parsed = JSON.parse(objSlice);
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                const inner =
-                    parsed.flashcards ??
-                    parsed.cards ??
-                    parsed.items ??
-                    parsed.data ??
-                    parsed.results;
-                const fromInner = tryNormalize(inner);
-                if (fromInner.length) return fromInner;
-            }
+            const cards = parseParsedFlashcardPayload(parsed);
+            if (cards.length) return cards;
         } catch (_) {}
     }
 
@@ -172,6 +277,7 @@ async function resolveExistingUserId({ requestedUserId, documentId }) {
 }
 
 async function buildGeneratedFlashcards(reqLike) {
+    const t0 = Date.now();
     const body = reqLike?.body || {};
     const { s3Key } = body;
     if (!s3Key) throw new Error("Missing s3Key.");
@@ -236,49 +342,56 @@ async function buildGeneratedFlashcards(reqLike) {
         }
     }
 
-    // 3) Last fallback: fetch object from S3 and extract text.
+    // 3) Last fallback: fetch object from S3 and extract text (slow — time-boxed).
     if (!contextText.trim() && s3.isS3Configured()) {
         const candidateKeys = [...new Set([
             String(docRows?.[0]?.file_url || "").trim(),
             ...keyCandidates,
         ].filter(Boolean))];
 
-        for (const candidate of candidateKeys) {
-            try {
-                const { buffer, contentType } = await s3.getObjectBuffer(candidate);
-                const ext = path.extname(candidate || "").toLowerCase();
-                const extracted = await extractDocumentText(buffer, ext, contentType || "");
-                contextText = String(extracted || "").trim().slice(0, 10000);
-                if (contextText) break;
-            } catch (_) {
-                // Try next candidate key quietly.
+        const extractFromS3 = async () => {
+            for (const candidate of candidateKeys) {
+                try {
+                    const { buffer, contentType } = await s3.getObjectBuffer(candidate);
+                    const ext = path.extname(candidate || "").toLowerCase();
+                    const extracted = await extractDocumentText(buffer, ext, contentType || "");
+                    const plain = String(extracted || "").trim().slice(0, 10000);
+                    if (plain) return plain;
+                } catch (_) {
+                    // Try next candidate key quietly.
+                }
             }
+            return "";
+        };
+
+        try {
+            contextText = await withTimeout(
+                extractFromS3(),
+                FLASHCARD_S3_EXTRACT_TIMEOUT_MS,
+                "S3 document extract"
+            );
+        } catch (e) {
+            console.warn("[generateFlashcards] S3 extract skipped:", e.message);
         }
     }
+
+    console.log(
+        `[generateFlashcards] context ready in ${Date.now() - t0}ms (${contextText.trim().length} chars)`
+    );
 
     if (!contextText.trim()) throw new Error("No text extracted from document.");
 
     const prompt = `You are an AI study assistant. Generate exactly 5 flashcards from this text.
-Return ONLY a valid JSON array of objects, with each object having "front" (question) and "back" (answer). Do not include any other text or markdown formatting.
+Return ONLY a valid JSON array (no markdown), each item: {"front":"short question","back":"short answer"}.
+Example: [{"front":"What is X?","back":"X is ..."},{"front":"...","back":"..."}]
+Do not use front_1/back_1 keys. Both front and back are required.
 
 Text:
 ${contextText}`;
 
-    const fetch = global.fetch || require("node-fetch");
-    const aRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${openRouterKey}`,
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            model: process.env.OPENROUTER_MODEL || "openrouter/free",
-            messages: [{ role: "user", content: prompt }]
-        })
-    });
-    if (!aRes.ok) throw new Error("AI provider rejected flashcard generation.");
-
-    const data = await aRes.json().catch(() => ({}));
+    const aiStart = Date.now();
+    const data = await callOpenRouterForFlashcards({ apiKey: openRouterKey, prompt });
+    console.log(`[generateFlashcards] OpenRouter done in ${Date.now() - aiStart}ms`);
     let answer = data.choices?.[0]?.message?.content || "[]";
     if (answer.startsWith("```json")) {
         answer = answer.replace(/```json/g, "").replace(/```/g, "").trim();
@@ -295,6 +408,7 @@ ${contextText}`;
         );
         throw new Error("AI returned empty flashcards.");
     }
+    console.log(`[generateFlashcards] total ${Date.now() - t0}ms, ${cards.length} cards`);
     return cards;
 }
 
@@ -397,6 +511,17 @@ async function generateFlashcardsHandler(req, res) {
         });
     } catch (err) {
         console.error("[generateFlashcards]", err);
+        const isTimeout =
+            err?.statusCode === 408 ||
+            err?.name === "AbortError" ||
+            String(err?.message || "").toLowerCase().includes("timed out");
+        if (isTimeout) {
+            return res.status(408).json({
+                success: false,
+                message:
+                    "Tạo flashcard quá lâu (timeout). Hãy dùng POST /api/flashcards/generate-async rồi poll jobId, hoặc index tài liệu trước khi generate.",
+            });
+        }
         return res.status(200).json({ success: false, message: GENERATION_FAIL_MESSAGE });
     }
 }

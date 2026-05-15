@@ -3693,6 +3693,14 @@ async function start() {
   if (db.isConfigured()) {
     await db.initDb();
     console.log("MySQL: using documents + document_segments (+ quizzes when persisted).");
+    try {
+      const { sequelize, ensureDatabase } = require("./src/config/db");
+      await ensureDatabase();
+      await sequelize.sync();
+      console.log("Sequelize: tables synced (notifications, flashcards, chat, …).");
+    } catch (seqErr) {
+      console.warn("Sequelize sync skipped:", seqErr.message);
+    }
   } else {
     console.warn("MySQL is not configured — s3Key + embedding quiz flow will not run.");
   }
