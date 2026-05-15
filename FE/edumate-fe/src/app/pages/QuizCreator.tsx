@@ -1,5 +1,17 @@
 import { useState } from 'react';
-import { ArrowLeft, Sparkles, Edit2, Save, Trash2, Plus, CheckCircle, Play, X, Clock, Award, FileText } from 'lucide-react';
+import {
+    ArrowLeft,
+    Sparkles,
+    Edit2,
+    Save,
+    Trash2,
+    Plus,
+    CheckCircle,
+    Play,
+    Award,
+    FileText,
+    Lightbulb,
+} from 'lucide-react';
 import { useNotification } from '../pages/NotificationContext';
 
 interface QuizCreatorProps {
@@ -14,6 +26,8 @@ interface Question {
     question: string;
     options: string[];
     correctAnswer: number;
+    /** Shown in results only */
+    explanation?: string;
 }
 
 interface QuizAnswer {
@@ -45,30 +59,38 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                     question: 'What is the time complexity of binary search?',
                     options: ['O(n)', 'O(log n)', 'O(n²)', 'O(1)'],
                     correctAnswer: 1,
+                    explanation:
+                        'Binary search halves the search space each step, so time is logarithmic in the array size.',
                 },
                 {
                     id: '2',
                     question: 'Which data structure uses LIFO (Last In First Out)?',
                     options: ['Queue', 'Stack', 'Array', 'Linked List'],
                     correctAnswer: 1,
+                    explanation: 'A stack pops the most recently pushed element — last in, first out.',
                 },
                 {
                     id: '3',
                     question: 'What is the space complexity of merge sort?',
                     options: ['O(1)', 'O(log n)', 'O(n)', 'O(n log n)'],
                     correctAnswer: 2,
+                    explanation:
+                        'Merge sort typically uses auxiliary arrays proportional to n when merging subarrays.',
                 },
                 {
                     id: '4',
                     question: 'Which of the following is a non-linear data structure?',
                     options: ['Array', 'Stack', 'Tree', 'Queue'],
                     correctAnswer: 2,
+                    explanation: 'Trees branch into multiple children; arrays/stacks/queues are linear structures.',
                 },
                 {
                     id: '5',
                     question: 'What is the average time complexity of hash table lookups?',
                     options: ['O(1)', 'O(n)', 'O(log n)', 'O(n²)'],
                     correctAnswer: 0,
+                    explanation:
+                        'With a good hash function and load factor, average-case lookup approaches constant time.',
                 },
             ];
             setQuestions(generatedQuestions);
@@ -175,7 +197,6 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                 questions: questions,
                 createdBy: 'instructor',
                 status: 'published',
-                highCredibility: true,
             };
 
             if (onQuizCreated) {
@@ -185,7 +206,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
             showNotification({
                 type: 'success',
                 title: 'Quiz Published!',
-                message: 'Your quiz has been published with high credibility badge and is now available to students.',
+                message: 'Your quiz has been published and is now available to students.',
                 duration: 4000,
             });
 
@@ -402,6 +423,36 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                                                             <p className="text-green-700">{q.options[q.correctAnswer]}</p>
                                                         </div>
                                                     )}
+                                                    {String(q.explanation || '').trim() ? (
+                                                        <details className="mt-4 overflow-hidden rounded-r-lg border border-slate-200/90 border-l-[3px] border-l-indigo-500 bg-gradient-to-br from-slate-50/90 to-white shadow-sm ring-1 ring-slate-900/[0.06] [&[open]_summary_.expl-chevron]:rotate-90">
+                                                            <summary className="cursor-pointer list-none px-4 py-3.5 transition-colors hover:bg-slate-50/80 [&::-webkit-details-marker]:hidden">
+                                                                <div className="flex items-start gap-3">
+                                                                    <span
+                                                                        className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700 ring-1 ring-indigo-600/10"
+                                                                        aria-hidden
+                                                                    >
+                                                                        <Lightbulb className="h-4 w-4" strokeWidth={2} />
+                                                                    </span>
+                                                                    <div className="min-w-0 flex-1 pt-1">
+                                                                        <span className="text-sm font-semibold tracking-tight text-slate-900">
+                                                                            Explanation
+                                                                        </span>
+                                                                    </div>
+                                                                    <span
+                                                                        className="expl-chevron mt-1.5 inline-block shrink-0 text-slate-400 transition-transform duration-200"
+                                                                        aria-hidden
+                                                                    >
+                                                                        ▶
+                                                                    </span>
+                                                                </div>
+                                                            </summary>
+                                                            <div className="border-t border-slate-100 bg-white/70 px-4 py-3.5 pl-[4.25rem]">
+                                                                <p className="text-sm leading-relaxed text-slate-700 whitespace-pre-wrap">
+                                                                    {q.explanation}
+                                                                </p>
+                                                            </div>
+                                                        </details>
+                                                    ) : null}
                                                 </div>
                                             </div>
                                         </div>
@@ -459,7 +510,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                     </h2>
                     <p className="text-gray-600">
                         {userRole === 'instructor'
-                            ? 'Your quiz has been published with high credibility badge and is now available to students.'
+                            ? 'Your quiz has been published and is now available to students.'
                             : 'Your practice quiz has been created. Take the quiz to test your knowledge and see the correct answers!'}
                     </p>
                 </div>
@@ -535,7 +586,7 @@ export function QuizCreator({ document, userRole, onBack, onQuizCreated }: QuizC
                             className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
                         >
                             <Save size={18} />
-                            {userRole === 'instructor' ? 'Publish Quiz (High Credibility)' : 'Save Practice Quiz'}
+                            {userRole === 'instructor' ? 'Publish Quiz' : 'Save Practice Quiz'}
                         </button>
                     </div>
                 )}

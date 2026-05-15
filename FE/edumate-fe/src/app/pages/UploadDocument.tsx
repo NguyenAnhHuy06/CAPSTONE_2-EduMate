@@ -1,14 +1,20 @@
+// File: src/app/pages/UploadDocument.tsx
+
 import { useState } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
+import { getApiBaseUrl } from '@/services/api';
 
 interface UploadDocumentProps {
   userRole: 'instructor' | 'student';
   onUploadComplete: () => void;
+  /** When set, sent as `uploaderId` so `documents.uploader_id` is stored (JWT on the server also supplies this). */
+  user?: { user_id?: number; id?: number; userId?: number } | null;
 }
 
-export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentProps) {
+export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocumentProps) {
   const [formData, setFormData] = useState({
     type: 'general',
+    year: '',
     courseCode: '',
     courseName: '',
     topicTitle: '',
@@ -31,30 +37,100 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    setUploading(true);
+const handleSubmit = async (e: React.FormEvent) => {
+  e.preventDefault();
 
-    // Mock upload process
-    setTimeout(() => {
-      setUploading(false);
-      setUploadSuccess(true);
+  if (!file) {
+    alert("Please select a file");
+    return;
+  }
 
-      // Reset form after 2 seconds and redirect
-      setTimeout(() => {
-        setUploadSuccess(false);
-        setFormData({
-          type: 'general',
-          courseCode: '',
-          courseName: '',
-          topicTitle: '',
-          description: '',
+  if (file.size > 10 * 1024 * 1024) {
+    alert("File must not exceed 10MB");
+    return;
+  }
+
+  setUploading(true);
+
+  try {
+    const form = new FormData();
+
+    // Field name must match the backend
+    form.append("documentFile", file);
+
+    form.append("title", formData.topicTitle);
+    form.append("category", formData.type);
+    form.append("year", formData.year);
+    form.append("subjectCode", formData.courseCode);
+    form.append("subjectName", formData.courseName);
+    form.append("tags", formData.courseCode);
+    form.append("description", formData.description || "");
+
+    const uploaderId = user?.user_id ?? user?.id ?? user?.userId;
+    if (uploaderId != null && String(uploaderId).trim() !== '') {
+      form.append('uploaderId', String(uploaderId));
+    }
+
+    const base = getApiBaseUrl();
+    const uploadUrl = `${base.replace(/\/$/, '')}/documents/upload`;
+
+    let res;
+
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('edumate_token') : null;
+      const headers: HeadersInit = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      res = await fetch(uploadUrl, {
+          method: "POST",
+          headers,
+          body: form,
         });
-        setFile(null);
-        onUploadComplete();
-      }, 2000);
-    }, 1500);
-  };
+    } catch (err) {
+      throw new Error("Could not connect to server (CORS / server down)");
+    }
+
+    let data;
+
+    try {
+      data = await res.json();
+    } catch (err) {
+      throw new Error("Server did not return valid JSON");
+    }
+
+    if (!res.ok) {
+      throw new Error(data.message || "Upload failed");
+    }
+
+    setUploadSuccess(true);
+
+    setTimeout(() => {
+      setUploadSuccess(false);
+      setFormData({
+        type: 'general',
+        year: '',
+        courseCode: '',
+        courseName: '',
+        topicTitle: '',
+        description: '',
+      });
+
+      setFile(null);
+      const fileInput = document.getElementById("file-upload") as HTMLInputElement;
+
+      if (fileInput) {
+        fileInput.value = "";
+      }
+
+      onUploadComplete();
+    }, 2000);
+
+  } catch (err: any) {
+    alert(err.message || "An error occurred during upload. Please try again.");
+  } finally {
+    setUploading(false);
+  }
+};
 
   if (uploadSuccess) {
     return (
@@ -77,7 +153,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
       <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6">
         {/* File Upload */}
         <div className="mb-6">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Document File *
           </label>
           <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-600 transition-colors">
@@ -86,7 +162,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
               onChange={handleFileChange}
               className="hidden"
               id="file-upload"
-              accept=".pdf,.doc,.docx,.ppt,.pptx"
+              accept=".pdf,.doc,.docx,.docm,.dotx,.dotm"
               required
             />
             <label htmlFor="file-upload" className="cursor-pointer">
@@ -99,7 +175,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
               ) : (
                 <div>
                   <p className="text-gray-700 mb-1">Click to upload or drag and drop</p>
-                  <p className="text-gray-500">PDF, DOC, DOCX, PPT, PPTX (max 50MB)</p>
+                  <p className="text-gray-500">PDF, DOC, DOCX, DOCM, DOTX, DOTM (max 10MB)</p>
                 </div>
               )}
             </label>
@@ -108,8 +184,8 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
 
         {/* Type */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
-            Document Type *
+          <label className="block text-gray-700 text-lg mb-2">
+            Document Type
           </label>
           <select
             name="type"
@@ -125,9 +201,30 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
           </select>
         </div>
 
+        {/* Year */}
+        <div className="mb-4">
+          <label className="block text-gray-700 text-lg mb-2">
+            Year *
+          </label>
+          <select
+            name="year"
+            aria-label="Select academic year"
+            value={formData.year}
+            onChange={handleInputChange}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+            required
+          >
+            <option value="">Select year</option>
+            <option value="NĂM 1 (2022-2023)">Year 1 (2022-2023)</option>
+            <option value="NĂM 2 (2023-2024)">Year 2 (2023-2024)</option>
+            <option value="NĂM 3 (2024-2025)">Year 3 (2024-2025)</option>
+            <option value="NĂM 4 (2025-2026)">Year 4 (2025-2026)</option>
+          </select>
+        </div>
+
         {/* Course Code */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Course Code *
           </label>
           <input
@@ -143,7 +240,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
 
         {/* Course Name */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Course Name *
           </label>
           <input
@@ -159,7 +256,7 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
 
         {/* Topic Title */}
         <div className="mb-4">
-          <label className="block text-gray-700 mb-2">
+          <label className="block text-gray-700 text-lg mb-2">
             Topic Title *
           </label>
           <input
@@ -175,8 +272,8 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
 
         {/* Description */}
         <div className="mb-6">
-          <label className="block text-gray-700 mb-2">
-            Description *
+          <label className="block text-gray-700 text-lg mb-2">
+            Description 
           </label>
           <textarea
             name="description"
@@ -185,14 +282,13 @@ export function UploadDocument({ userRole, onUploadComplete }: UploadDocumentPro
             placeholder="Provide a brief description of the document content..."
             rows={4}
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
-            required
           />
         </div>
 
         {/* Submit Button */}
         <button
           type="submit"
-          disabled={uploading}
+          disabled={uploading || !file}
           className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
         >
           {uploading ? (

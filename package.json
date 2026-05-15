@@ -1,15 +1,28 @@
 {
-  "name": "edumate-be",
+  "name": "capstone_2-edumate",
   "version": "1.0.0",
   "private": true,
+  "description": "EduMate — smart learning support and academic document sharing for DTU/CMU students, lecturers, and admins.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "start:sequelize": "node src/sequelizeServer.js",
-    "dev:sequelize": "node --watch src/sequelizeServer.js",
+    "dev:api": "node FE/server.js",
+    "dev:fe": "npm run dev --prefix FE/edumate-fe",
     "create:admin": "node scripts/createAdmin.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NguyenAnhHuy06/CAPSTONE_2-EduMate.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/NguyenAnhHuy06/CAPSTONE_2-EduMate/issues"
+  },
+  "homepage": "https://github.com/NguyenAnhHuy06/CAPSTONE_2-EduMate#readme",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1019.0",
     "@aws-sdk/s3-request-presigner": "^3.1029.0",

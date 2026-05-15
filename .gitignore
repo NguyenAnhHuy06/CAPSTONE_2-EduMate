@@ -1,7 +1,31 @@
 node_modules/
 .env
+dist/
+.DS_Store
 *.log
 uploads/
 
-# Vite/React build — build lại bằng npm run build trong FE/edumate-fe
+# Vite/React build — rebuild with npm run build in FE/edumate-fe
 FE/edumate-fe/dist/
+
+.vscode/
+.idea/
+build/
+coverage/
+.next/
+out/
+.vercel
+.cache/
+.vite/
+.npm
+.yarn
+.pnp*
+.ssh/
+.bash_history
+.npmrc
+.yarnrc
+.env.*.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local

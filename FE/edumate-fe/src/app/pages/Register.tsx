@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BookOpen, User, GraduationCap } from 'lucide-react';
+import api from '../../services/api';
 
 interface RegisterProps {
   onRegister: (role: 'instructor' | 'student', userData: any) => void;
   onBackToLogin: () => void;
 }
 
-export function Register({ onRegister, onBackToLogin }: RegisterProps) {
+export function Register({ onBackToLogin }: RegisterProps) {
   const [role, setRole] = useState<'instructor' | 'student'>('student');
   const [formData, setFormData] = useState({
     fullName: '',
@@ -16,6 +17,21 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
     confirmPassword: '',
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [step, setStep] = useState<'form' | 'otp'>('form');
+  const [otpCode, setOtpCode] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [resendingOtp, setResendingOtp] = useState(false);
+  const [resendAvailableAtMs, setResendAvailableAtMs] = useState<number>(0);
+  const [nowMs, setNowMs] = useState<number>(Date.now());
+  const [message, setMessage] = useState('');
+  const RESEND_COOLDOWN_MS = 5 * 60 * 1000;
+  const resendRemainSec = Math.max(0, Math.ceil((resendAvailableAtMs - nowMs) / 1000));
+  const canResendOtp = resendRemainSec <= 0 && !submitting && !resendingOtp;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {};
@@ -51,22 +67,57 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setMessage('');
 
-    if (!validateForm()) {
+    if (step === 'otp') {
+      setSubmitting(true);
+      try {
+        const verifyRes: any = await api.post('/auth/verify-otp', {
+          email: formData.email,
+          otp_code: otpCode,
+        });
+        if (!verifyRes?.success) {
+          setErrors({ otpCode: 'OTP verification failed.' });
+          return;
+        }
+      setMessage('OTP verified successfully. Please sign in.');
+      setStep('form');
+      setOtpCode('');
+      setErrors({});
+      onBackToLogin();
+      } catch (err: any) {
+        setErrors({ otpCode: String(err?.response?.data?.message || 'OTP verification failed.') });
+      } finally {
+        setSubmitting(false);
+      }
       return;
     }
 
-    // Create user data
-    const userData = {
-      id: formData.id,
-      name: formData.fullName,
-      email: formData.email,
-      role,
-    };
+    if (!validateForm()) return;
 
-    onRegister(role, userData);
+    setSubmitting(true);
+    try {
+      const res: any = await api.post('/auth/register', {
+        full_name: formData.fullName,
+        email: formData.email,
+        password: formData.password,
+        role: role === 'instructor' ? 'LECTURER' : 'STUDENT',
+        user_code: formData.id,
+      });
+      if (!res?.success) {
+        setErrors({ email: 'Registration failed.' });
+        return;
+      }
+      setStep('otp');
+      setMessage('OTP has been sent. Please check your email.');
+      setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
+    } catch (err: any) {
+      setErrors({ email: String(err?.response?.data?.message || 'Registration failed.') });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleInputChange = (field: string, value: string) => {
@@ -74,6 +125,35 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
     // Clear error when user starts typing
     if (errors[field]) {
       setErrors({ ...errors, [field]: '' });
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (!canResendOtp) return;
+    setMessage('');
+    setErrors((prev) => ({ ...prev, otpCode: '' }));
+    setResendingOtp(true);
+    try {
+      const resendRes: any = await api.post('/auth/register', {
+        full_name: formData.fullName,
+        email: formData.email,
+        password: formData.password,
+        role: role === 'instructor' ? 'LECTURER' : 'STUDENT',
+        user_code: formData.id,
+      });
+      if (!resendRes?.success) {
+        setErrors((prev) => ({ ...prev, otpCode: 'Failed to resend OTP.' }));
+        return;
+      }
+      setMessage('OTP has been resent. Please check your email.');
+      setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
+    } catch (err: any) {
+      setErrors((prev) => ({
+        ...prev,
+        otpCode: String(err?.response?.data?.message || 'Failed to resend OTP.'),
+      }));
+    } finally {
+      setResendingOtp(false);
     }
   };
 
@@ -96,6 +176,7 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
           <h2 className="text-center mb-6">Register</h2>
 
           {/* Role Selection */}
+          {step === 'form' && (
           <div className="grid grid-cols-2 gap-3 mb-6">
             <button
               type="button"
@@ -126,9 +207,12 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
               </div>
             </button>
           </div>
+          )}
 
           {/* Registration Form */}
           <form onSubmit={handleSubmit}>
+            {step === 'form' ? (
+              <>
             <div className="mb-4">
               <label className="block text-gray-700 mb-2">
                 Full Name <span className="text-red-500">*</span>
@@ -221,10 +305,51 @@ export function Register({ onRegister, onBackToLogin }: RegisterProps) {
 
             <button
               type="submit"
+              disabled={submitting}
               className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
             >
-              Register as {role === 'instructor' ? 'Instructor' : 'Student'}
+              {submitting ? 'Sending OTP...' : `Register as ${role === 'instructor' ? 'Instructor' : 'Student'}`}
             </button>
+              </>
+            ) : (
+              <>
+                <div className="mb-4">
+                  <label className="block text-gray-700 mb-2">
+                    OTP Code <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value)}
+                    className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 ${
+                      errors.otpCode ? 'border-red-500' : 'border-gray-300'
+                    }`}
+                    placeholder="Enter 6-digit OTP"
+                  />
+                  {errors.otpCode && <p className="text-red-500 text-sm mt-1">{errors.otpCode}</p>}
+                </div>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors"
+                >
+                  {submitting ? 'Verifying...' : 'Verify OTP & Complete Registration'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={!canResendOtp}
+                  className="w-full mt-3 border border-blue-600 text-blue-600 py-3 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {resendingOtp
+                    ? 'Resending OTP...'
+                    : resendRemainSec > 0
+                      ? `Resend OTP in ${Math.floor(resendRemainSec / 60)}:${String(resendRemainSec % 60).padStart(2, '0')}`
+                      : 'Resend OTP'}
+                </button>
+              </>
+            )}
+            {message && <p className="text-green-600 text-sm mt-3">{message}</p>}
           </form>
 
           <div className="mt-6 text-center">
