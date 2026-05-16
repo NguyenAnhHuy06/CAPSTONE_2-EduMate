@@ -732,13 +732,13 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
             />
           )}
 
-          {activeTab === 'quizzes' && (
+          <div className={activeTab === 'quizzes' ? '' : 'hidden'} aria-hidden={activeTab !== 'quizzes'}>
             <StudentQuizSection
               user={user}
               fileHighlightRequest={studentQuizFileHighlight}
               onFileHighlightConsumed={clearStudentQuizFileHighlight}
             />
-          )}
+          </div>
 
           {activeTab === 'progress' && <ProgressTracker user={user} />}
 

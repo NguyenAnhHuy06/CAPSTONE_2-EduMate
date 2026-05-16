@@ -2367,10 +2367,20 @@ export function QuizManagement({
                     setLecturerQuizGeneratingStatus('completed', {
                         title: quiz.title || 'AI Quiz',
                         quizId: qid,
-                        autoOpen: false,
-                        navigateTo: '',
+                        autoOpen: true,
+                        navigateTo,
                         navigateReplace: useReplace,
                     });
+                    window.dispatchEvent(
+                        new CustomEvent('quiz:ready', {
+                            detail: {
+                                navigateTo,
+                                autoOpen: true,
+                                navigateReplace: useReplace,
+                                quizId: qid,
+                            },
+                        })
+                    );
                     navigate(navigateTo, { replace: useReplace });
                     return;
                 }

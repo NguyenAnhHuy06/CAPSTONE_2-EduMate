@@ -37,6 +37,7 @@ interface QuizAnswer {
 const LETTERS = ['A', 'B', 'C', 'D'];
 const STUDENT_QUIZ_GENERATING_KEY = 'edumate_student_quiz_generating';
 const STUDENT_QUIZ_AUTOSTART_KEY = 'edumate_student_quiz_autostart';
+const STUDENT_QUIZ_AUTOSTART_EVENT = 'edumate:student-quiz-autostart';
 const STUDENT_QUIZ_RESULT_CACHE_KEY = 'edumate_student_quiz_result_cache';
 /** quizId → ISO sharedAt — one share per quiz (survives retakes / new attempts). */
 const STUDENT_SHARED_QUIZ_IDS_KEY = 'edumate_student_shared_quiz_ids';
@@ -1259,7 +1260,7 @@ export function StudentQuizSection({
 
     const setQuizGeneratingStatus = (
         status: StudentQuizJobStatus,
-        extra?: { jobId?: string; title?: string; error?: string }
+        extra?: { jobId?: string; title?: string; error?: string; quizId?: number | null }
     ) => {
         setIsGeneratingQuiz(status === 'running');
         const prevRaw = localStorage.getItem(STUDENT_QUIZ_GENERATING_KEY);
@@ -1519,9 +1520,6 @@ export function StudentQuizSection({
             try {
                 const raw = localStorage.getItem(STUDENT_QUIZ_AUTOSTART_KEY);
                 if (!raw) return;
-                // Disable silent auto-open on page load; only start quiz when user clicks Take Quiz.
-                localStorage.removeItem(STUDENT_QUIZ_AUTOSTART_KEY);
-                return;
                 const payload = JSON.parse(raw);
                 const quizId = Number(payload?.quizId);
                 if (!Number.isFinite(quizId) || quizId <= 0) {
@@ -1573,8 +1571,11 @@ export function StudentQuizSection({
             }
         };
         void runAutoStart();
+        const onAutostart = () => void runAutoStart();
+        window.addEventListener(STUDENT_QUIZ_AUTOSTART_EVENT, onAutostart);
         return () => {
             cancelled = true;
+            window.removeEventListener(STUDENT_QUIZ_AUTOSTART_EVENT, onAutostart);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -2238,7 +2239,23 @@ export function StudentQuizSection({
             setQuizGeneratingStatus('completed', {
                 jobId: newJobId,
                 title: String(quiz?.title || 'AI Quiz'),
+                quizId: resolvedPersistId,
             });
+            try {
+                localStorage.setItem(
+                    STUDENT_QUIZ_AUTOSTART_KEY,
+                    JSON.stringify({
+                        quizId: resolvedPersistId,
+                        title: String(quiz?.title || 'AI Quiz'),
+                        passPercentage: Number(quiz.passPercentage ?? 70),
+                        duration: Number(generatedQuiz.duration || 10),
+                        updatedAt: Date.now(),
+                    })
+                );
+                window.dispatchEvent(new Event(STUDENT_QUIZ_AUTOSTART_EVENT));
+            } catch {
+                // ignore storage failures
+            }
 
             const timer = setInterval(() => {
                 setTimeRemaining((prev) => {

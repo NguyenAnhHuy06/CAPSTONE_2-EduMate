@@ -365,7 +365,8 @@ export function InstructorDashboard({
             <UploadDocument user={user} userRole="instructor" onUploadComplete={() => setActiveTab('documents')} />
           )}
 
-          {activeTab === 'quizzes' && (
+          {/* Keep mounted while generating so AI job + localStorage updates survive tab switches */}
+          <div className={activeTab === 'quizzes' ? '' : 'hidden'} aria-hidden={activeTab !== 'quizzes'}>
             <QuizManagement
               user={user}
               focusQuizId={focusQuizId}
@@ -374,7 +375,7 @@ export function InstructorDashboard({
               fileHighlightRequest={fileHighlightRequest}
               onFileHighlightConsumed={clearFileHighlightRequest}
             />
-          )}
+          </div>
 
           {activeTab === 'profile' && (
             <Profile user={user} onUserUpdate={onUserUpdate} />
@@ -408,10 +409,24 @@ export function InstructorDashboard({
                   ? 'Generation finished successfully.'
                   : (quizJobState.error || 'Could not generate quiz. Please try again.')}
             </p>
-            <div className="mt-3 flex items-center justify-between">
+            <div className="mt-3 flex items-center justify-between gap-2">
               <span className="text-[11px] text-gray-500">
                 {quizJobState.updatedAt ? new Date(quizJobState.updatedAt).toLocaleTimeString() : 'Processing...'}
               </span>
+              {quizJobState.status === 'completed' &&
+                String(quizJobState.navigateTo || '').trim() && (
+                  <button
+                    type="button"
+                    className="text-xs font-medium text-blue-600 hover:text-blue-800"
+                    onClick={() => {
+                      const to = String(quizJobState.navigateTo || '').trim();
+                      if (!to) return;
+                      navigate(to, { replace: quizJobState.navigateReplace !== false });
+                    }}
+                  >
+                    Open quiz
+                  </button>
+                )}
             </div>
           </div>
         )}
