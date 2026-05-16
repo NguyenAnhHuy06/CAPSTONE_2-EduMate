@@ -62,6 +62,22 @@ router.patch("/users/:id/activate", auth, rbac("ADMIN"), async (req, res) => {
     }
 });
 
+// Delete user
+router.delete("/users/:id", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        const user = await User.findByPk(req.params.id);
+        if (!user) return res.status(404).json({ success: false, message: "User not found." });
+        
+        await user.destroy();
+        
+        logActivity(req.user.id, "delete_user", `Admin deleted account ${user.email}`, req.ip);
+        
+        return res.json({ success: true, message: "User deleted successfully." });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 // List pending documents for moderation (Design: UC04)
 router.get("/documents/pending", auth, rbac("ADMIN"), async (req, res) => {
     try {
@@ -73,6 +89,23 @@ router.get("/documents/pending", auth, rbac("ADMIN"), async (req, res) => {
              LEFT JOIN users u ON doc.uploader_id = u.user_id 
              WHERE doc.status = 'pending' 
              ORDER BY doc.document_id DESC LIMIT 100`
+        );
+        return res.json({ success: true, data: docs });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// List all documents for library management
+router.get("/documents", auth, rbac("ADMIN"), async (req, res) => {
+    try {
+        const db = require("../config/teamDb");
+        if (!db.isConfigured()) return res.status(503).json({ success: false, message: "Database not configured." });
+        const [docs] = await db.getPool().execute(
+            `SELECT doc.*, u.name as uploader_name, u.email as uploader_email 
+             FROM documents doc 
+             LEFT JOIN users u ON doc.uploader_id = u.user_id 
+             ORDER BY doc.document_id DESC LIMIT 200`
         );
         return res.json({ success: true, data: docs });
     } catch (err) {
@@ -217,66 +250,102 @@ router.get("/logs/stats", auth, rbac("ADMIN"), async (req, res) => {
 });
 
 // Archive now (Export logs older than X days to S3, then delete from DB)
+async function archiveLogsInternal(retentionDays) {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    
+    // 1. Fetch logs to archive
+    const logsToArchive = await ActivityLog.findAll({
+        where: {
+            created_at: {
+                [require("sequelize").Op.lt]: cutoff
+            }
+        },
+        include: [{ model: require("../models/User"), attributes: ["email"] }],
+        order: [["created_at", "ASC"]]
+    });
+
+    if (logsToArchive.length === 0) {
+        return { count: 0, message: `No logs older than ${retentionDays} days were found.` };
+    }
+
+    // 2. Format as CSV (Excel compatible)
+    const csvRows = [];
+    csvRows.push(['USER', 'ACTION', 'DETAILS', 'TIMESTAMP'].join(','));
+    
+    logsToArchive.forEach(log => {
+        const userEmail = log.User ? log.User.email : 'System';
+        const action = log.action || '';
+        const details = log.details || '';
+        const timestamp = new Date(log.created_at).toLocaleString('en-US');
+        
+        const escapedUser = `"${userEmail.replace(/"/g, '""')}"`;
+        const escapedAction = `"${action.replace(/"/g, '""')}"`;
+        const escapedDetails = `"${details.replace(/"/g, '""')}"`;
+        const escapedTimestamp = `"${timestamp.replace(/"/g, '""')}"`;
+        
+        csvRows.push([escapedUser, escapedAction, escapedDetails, escapedTimestamp].join(','));
+    });
+    
+    const archiveData = csvRows.join('\n');
+    const timestampStr = new Date().toISOString().replace(/T/, '_').replace(/\..+/, '').replace(/:/g, '-');
+    const fileName = `activity_logs_${timestampStr}.csv`;
+    const s3Key = `LOGS/archive/${fileName}`;
+
+    // 3. Upload to S3
+    const s3 = require("../services/s3Upload");
+    if (s3.isS3Configured()) {
+        await s3.uploadDocumentBuffer({
+            buffer: Buffer.from(archiveData),
+            key: s3Key,
+            contentType: "text/csv"
+        });
+    } else {
+        console.warn("[ArchiveLogs] S3 not configured, logs deleted from DB without backup.");
+    }
+
+    // 4. Delete from DB
+    const deletedCount = await ActivityLog.destroy({
+        where: {
+            created_at: {
+                [require("sequelize").Op.lt]: cutoff
+            }
+        }
+    });
+
+    return { count: deletedCount, fileName, s3Key };
+}
+
 router.post("/logs/archive-now", auth, rbac("ADMIN"), async (req, res) => {
     try {
         const { retentionDays = 30 } = req.body;
-        const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+        const result = await archiveLogsInternal(retentionDays);
         
-        // 1. Fetch logs to archive
-        const logsToArchive = await ActivityLog.findAll({
-            where: {
-                created_at: {
-                    [require("sequelize").Op.lt]: cutoff
-                }
-            },
-            include: [{ model: require("../models/User"), attributes: ["email"] }],
-            order: [["created_at", "ASC"]]
-        });
-
-        if (logsToArchive.length === 0) {
-            return res.json({ 
-                success: true, 
-                message: `No logs older than ${retentionDays} days were found. Nothing to archive.` 
-            });
+        if (result.count === 0) {
+            return res.json({ success: true, message: result.message });
         }
-
-        // 2. Format as JSON
-        const archiveData = JSON.stringify(logsToArchive, null, 2);
-        const timestamp = new Date().toISOString().replace(/T/, '_').replace(/\..+/, '').replace(/:/g, '-');
-        const fileName = `activity_logs_${timestamp}.json`;
-        const s3Key = `LOGS/archive/${fileName}`;
-
-        // 3. Upload to S3
-        const s3 = require("../services/s3Upload");
-        if (s3.isS3Configured()) {
-            await s3.uploadDocumentBuffer({
-                buffer: Buffer.from(archiveData),
-                key: s3Key,
-                contentType: "application/json"
-            });
-        } else {
-            console.warn("[ArchiveNow] S3 not configured, logs deleted from DB without backup.");
-        }
-
-        // 4. Delete from DB
-        const deletedCount = await ActivityLog.destroy({
-            where: {
-                created_at: {
-                    [require("sequelize").Op.lt]: cutoff
-                }
-            }
-        });
-
+        
         return res.json({ 
             success: true, 
-            message: `Archiving completed. ${deletedCount} log(s) exported to S3 and removed from database.`,
-            data: { fileName, s3Key, deletedCount }
+            message: `Archiving completed. ${result.count} log(s) exported to S3 and removed from database.`,
+            data: { fileName: result.fileName, s3Key: result.s3Key, deletedCount: result.count }
         });
     } catch (err) {
         console.error("[ArchiveNow] Error:", err);
         return res.status(500).json({ success: false, message: err.message });
     }
 });
+
+// Auto archive logs older than 30 days every 24 hours
+const AUTO_ARCHIVE_INTERVAL = 24 * 60 * 60 * 1000;
+setInterval(async () => {
+    try {
+        console.log("[AutoArchive] Running daily log archive (30+ days)...");
+        const result = await archiveLogsInternal(30);
+        console.log(`[AutoArchive] Completed. Archived ${result.count} logs.`);
+    } catch (err) {
+        console.error("[AutoArchive] Error:", err);
+    }
+}, AUTO_ARCHIVE_INTERVAL);
 
 // System stats
 router.get("/stats", auth, rbac("ADMIN"), async (req, res) => {
