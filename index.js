@@ -525,7 +525,7 @@ function mapUserForClient(row) {
   if (!Number.isFinite(userId)) return null;
   /** Display name: single source of truth is MySQL `users.name` (full name = name). */
   const display =
-    String(row.name || row.display_name || "").trim() || "User";
+    String(row.name || row.display_name || row.full_name || "").trim() || "User";
   return {
     user_id: userId,
     id: userId,
@@ -580,24 +580,68 @@ function getBearerClaims(req) {
   return null;
 }
 
+/** Public: check if student/lecturer ID (user_code) is already taken (normalized match). */
+app.get("/api/auth/check-user-code", async (req, res) => {
+  try {
+    if (!db.isConfigured()) {
+      return res.status(503).json({ success: false, available: false, message: MSG_UNAVAILABLE });
+    }
+    const raw = req.query.user_code ?? req.query.userCode ?? req.query.code ?? "";
+    const normalized = db.normalizeStudentIdForUniqueness(raw);
+    if (!normalized) {
+      return res.status(200).json({ success: true, available: true, normalized: null });
+    }
+    const taken = await db.findUserByStudentCode(normalized);
+    return res.status(200).json({
+      success: true,
+      available: !taken,
+      normalized,
+    });
+  } catch (e) {
+    console.error("[api/auth/check-user-code]", e);
+    return res.status(500).json({ success: false, available: false, message: MSG_TRY_AGAIN });
+  }
+});
+
 app.post("/api/auth/register", async (req, res) => {
   try {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const fullName = String(req.body.name || req.body.full_name || "").trim();
+    const fullName = String(
+      req.body.name ?? req.body.full_name ?? req.body.fullName ?? ""
+    ).trim();
     const email = String(req.body.email ?? "").trim().toLowerCase();
     const password = String(req.body.password ?? "").trim();
     /** Public registration must not allow role escalation — always STUDENT in MySQL `users.role`. */
     const role = "STUDENT";
     const userCode = req.body.user_code ?? req.body.userCode ?? null;
 
-    if (!fullName || !email || password.length < 8) {
-      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+    if (!fullName) {
+      return res.status(400).json({
+        success: false,
+        code: "MISSING_NAME",
+        message: "Please enter your full name.",
+      });
+    }
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        code: "MISSING_EMAIL",
+        message: "Please enter your email.",
+      });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        code: "WEAK_PASSWORD",
+        message: "Password must be at least 8 characters.",
+      });
     }
     if (!isAllowedStudentEmail(email)) {
       return res.status(400).json({
         success: false,
+        code: "INVALID_EMAIL_DOMAIN",
         message: "Registration email must end with @dtu.edu.vn.",
       });
     }
@@ -606,12 +650,31 @@ app.post("/api/auth/register", async (req, res) => {
     if (existing) {
       return res.status(409).json({
         success: false,
+        code: "EMAIL_IN_USE",
         message: "Email has already been used.",
       });
     }
 
+    const normalizedStudentId = db.normalizeStudentIdForUniqueness(userCode);
+    if (normalizedStudentId) {
+      const idTaken = await db.findUserByStudentCode(normalizedStudentId);
+      if (idTaken) {
+        return res.status(409).json({
+          success: false,
+          code: "STUDENT_ID_IN_USE",
+          message: "This student ID is already registered to another account.",
+        });
+      }
+    }
+
     const encryptedPassword = await bcrypt.hash(password, 10);
-    await db.createUser({ fullName, email, password: encryptedPassword, role, userCode });
+    await db.createUser({
+      fullName,
+      email,
+      password: encryptedPassword,
+      role,
+      userCode,
+    });
     const code = generateOtpCode();
     const expiresAt = Date.now() + otpExpiryMs();
     otpStore.set(email, { code, expiresAt, purpose: "register" });
@@ -626,6 +689,17 @@ app.post("/api/auth/register", async (req, res) => {
     });
   } catch (err) {
     console.error("[api/auth/register]", err);
+    const dupMsg = String(err.sqlMessage || "");
+    if (
+      err.code === "ER_DUP_ENTRY" &&
+      (dupMsg.includes("user_code") || dupMsg.includes("uq_users_user_code"))
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: "STUDENT_ID_IN_USE",
+        message: "This student ID is already registered.",
+      });
+    }
     return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
   }
 });
@@ -712,10 +786,14 @@ app.post("/api/auth/login", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(503).json({ success: false, message: MSG_UNAVAILABLE });
     }
-    const email = String(req.body.email ?? "").trim().toLowerCase();
+    const email = normalizeEmail(req.body.email);
     const password = String(req.body.password ?? "").trim();
     if (!email || !password) {
-      return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+      return res.status(400).json({
+        success: false,
+        code: "MISSING_CREDENTIALS",
+        message: "Email and password are required.",
+      });
     }
     const userRow = await db.findUserByEmail(email);
     if (!userRow) {
@@ -724,6 +802,13 @@ app.post("/api/auth/login", async (req, res) => {
         success: false,
         code: "UNKNOWN_EMAIL",
         message: MSG_LOGIN_NO_ACCOUNT,
+      });
+    }
+    if (await db.isUserAccountDeactivated(userRow.user_id)) {
+      return res.status(403).json({
+        success: false,
+        code: "ACCOUNT_DISABLED",
+        message: "Your account has been deactivated by an administrator.",
       });
     }
     const stored = String(userRow.password || "");
@@ -755,9 +840,13 @@ app.post("/api/auth/login", async (req, res) => {
       });
     }
     const user = mapUserForClient(userRow);
-    const token = jwt.sign({ sub: user.user_id, role: user.role }, authJwtSecret(), {
-      expiresIn: "7d",
-    });
+    const token = jwt.sign(
+      { sub: user.user_id, id: user.user_id, user_id: user.user_id, role: user.role },
+      authJwtSecret(),
+      {
+        expiresIn: "7d",
+      }
+    );
 
     activityLog.logActivity(user.user_id, "login", `User logged in: ${user.email}`, req.ip);
 

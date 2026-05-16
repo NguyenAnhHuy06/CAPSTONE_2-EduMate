@@ -335,6 +335,11 @@ async function initDb() {
   } catch (e) {
     console.warn("ensureQuestionBankTables (init):", e.message);
   }
+  try {
+    await ensureUserCodeUniqueIndex();
+  } catch (e) {
+    console.warn("ensureUserCodeUniqueIndex (init):", e.message);
+  }
   const [[row]] = await p.execute(
     `SELECT COUNT(*) AS c FROM information_schema.tables
      WHERE table_schema = DATABASE() AND table_name IN ('documents','document_segments')`
@@ -1542,6 +1547,40 @@ async function findUserByEmail(email) {
   }
 }
 
+/**
+ * Canonical student/lecturer ID for uniqueness (trim, strip whitespace, max 64).
+ * " 12 34 " / "1234" / "12 34" → same key "1234"
+ */
+function normalizeStudentIdForUniqueness(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  const noZw = s.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  const compact = noZw.replace(/\s+/g, "");
+  if (!compact) return null;
+  return compact.slice(0, 64);
+}
+
+/** Student / lecturer ID stored in `users.user_code` (not used for login — email only). */
+async function findUserByStudentCode(userCode) {
+  const key = normalizeStudentIdForUniqueness(userCode);
+  if (!key) return null;
+  const p = getPool();
+  const keyLower = key.toLowerCase();
+  try {
+    const [rows] = await p.execute(
+      `SELECT user_id, email FROM users
+       WHERE user_code IS NOT NULL
+         AND LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(user_code), ' ', ''), CHAR(9), ''), CHAR(10), ''), CHAR(13), '')) = ?
+       LIMIT 1`,
+      [keyLower]
+    );
+    return rows.length ? rows[0] : null;
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") return null;
+    throw e;
+  }
+}
+
 async function getUserById(userId) {
   const uid = parseOptionalInt(userId);
   if (uid == null) return null;
@@ -1600,7 +1639,7 @@ async function createUser({ name, fullName, email, password, role, userCode }) {
   const normalizedFullName = String(fullName || name || "").trim() || null;
   const nm = normalizedFullName;
   const fn = normalizedFullName;
-  const code = userCode != null && String(userCode).trim() ? String(userCode).trim().slice(0, 64) : null;
+  const code = normalizeStudentIdForUniqueness(userCode);
   const p = getPool();
   let hdr;
   try {
@@ -1678,6 +1717,22 @@ async function updateUserPassword(userId, hashedPassword) {
     uid,
   ]);
   return true;
+}
+
+/** Returns true if account should not log in (deactivated). Missing column → false. */
+async function isUserAccountDeactivated(userId) {
+  const uid = parseOptionalInt(userId);
+  if (uid == null) return false;
+  try {
+    const [rows] = await getPool().execute(
+      `SELECT COALESCE(is_active, 1) AS ia FROM users WHERE user_id = ? LIMIT 1`,
+      [uid]
+    );
+    if (!rows.length) return false;
+    return Number(rows[0].ia) === 0;
+  } catch {
+    return false;
+  }
 }
 
 function isLecturerRole(role) {
@@ -1826,6 +1881,31 @@ async function ensureQuestionBankQuizForUser(userId) {
   }
   if (!hdr) throw lastErr || new Error("Could not create question bank quiz.");
   return Number(hdr.insertId);
+}
+
+/** Enforce one row per canonical `user_code` when the table has no duplicate values yet. */
+async function ensureUserCodeUniqueIndex() {
+  const p = getPool();
+  try {
+    const [rows] = await p.execute(
+      `SELECT 1 AS ok FROM information_schema.statistics
+       WHERE table_schema = DATABASE() AND table_name = 'users' AND index_name = 'uq_users_user_code'
+       LIMIT 1`
+    );
+    if (rows.length) return;
+    await p.execute("ALTER TABLE users ADD UNIQUE INDEX uq_users_user_code (user_code)");
+  } catch (e) {
+    const msg = String(e.sqlMessage || e.message || "");
+    if (e.code === "ER_DUP_KEYNAME" || msg.includes("Duplicate key name")) return;
+    if (e.code === "ER_DUP_ENTRY" || e.errno === 1062) {
+      console.warn(
+        "ensureUserCodeUniqueIndex: duplicate user_code values exist; clean DB then restart to add UNIQUE index:",
+        msg
+      );
+      return;
+    }
+    throw e;
+  }
 }
 
 async function ensureQuestionBankTables() {
@@ -3855,11 +3935,14 @@ module.exports = {
   scoreToPercent,
   getUserRole,
   findUserByEmail,
+  findUserByStudentCode,
+  normalizeStudentIdForUniqueness,
   getUserById,
   updateUserProfile,
   createUser,
   markUserEmailVerified,
   updateUserPassword,
+  isUserAccountDeactivated,
   canUserManageQuiz,
   replaceQuizQuestions,
   updateQuizTitle,

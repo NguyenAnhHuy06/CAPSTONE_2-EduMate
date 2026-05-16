@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const validator = require('validator');
 const User = require('../models/User');
+const db = require('../../db');
 const generateOtp = require('../utils/generateOtp');
 const { sendOtpEmail } = require('../services/emailService');
 const { logActivity } = require('../middleware/activityLog');
@@ -52,6 +53,23 @@ const register = async (req, res) => {
             });
         }
 
+        const normalizedCode = db.normalizeStudentIdForUniqueness(user_code);
+        if (normalizedCode) {
+            const row = await db.findUserByStudentCode(normalizedCode);
+            if (row != null) {
+                const sameAccount =
+                    existingUser != null &&
+                    Number(existingUser.user_id) === Number(row.user_id);
+                if (!sameAccount) {
+                    return res.status(409).json({
+                        success: false,
+                        code: 'STUDENT_ID_IN_USE',
+                        message: 'This student ID is already registered to another account.',
+                    });
+                }
+            }
+        }
+
         console.log('[Register] Hashing password...');
         const salt = await bcrypt.genSalt(10);
         const password_hash = await bcrypt.hash(password, salt);
@@ -61,7 +79,7 @@ const register = async (req, res) => {
             existingUser.password_hash = password_hash;
             existingUser.full_name = full_name;
             existingUser.role = role || 'STUDENT';
-            existingUser.user_code = user_code;
+            existingUser.user_code = normalizedCode;
             existingUser.otp_code = otp_code;
             existingUser.otp_expires_at = otp_expires_at;
             await existingUser.save();
@@ -72,7 +90,7 @@ const register = async (req, res) => {
                 password_hash,
                 full_name,
                 role: role || 'STUDENT',
-                user_code,
+                user_code: normalizedCode,
                 otp_code,
                 otp_expires_at
             });
