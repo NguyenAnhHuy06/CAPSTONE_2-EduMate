@@ -3627,6 +3627,8 @@ app.post(
     const {
       title,
       category,
+      year,
+      semester,
       subjectCode,
       subjectName,
       tags,
@@ -3636,7 +3638,8 @@ app.post(
     } = req.body;
 
     try {
-      if (!s3.isS3Configured()) {
+      const s3Docs = require("./src/services/s3Upload");
+      if (!s3Docs.isS3Configured()) {
         return res.status(503).json({
           success: false,
           message: MSG_UNAVAILABLE,
@@ -3661,6 +3664,8 @@ app.post(
       if (
         isEmpty(title) ||
         isEmpty(category) ||
+        isEmpty(year) ||
+        isEmpty(semester) ||
         isEmpty(subjectCode) ||
         isEmpty(subjectName) ||
         isEmpty(tags)
@@ -3671,8 +3676,14 @@ app.post(
         });
       }
 
-      const key = s3.buildDocumentKey(req.file.originalname);
-      const up = await s3.uploadDocumentBuffer({
+      const yearLabel = String(year).trim();
+      const semesterLabel = String(semester).trim();
+      const key = s3Docs.buildDocumentKey(req.file.originalname, {
+        year: yearLabel,
+        semester: semesterLabel,
+        fileDisplayName: String(title).trim(),
+      });
+      const up = await s3Docs.uploadDocumentBuffer({
         buffer: req.file.buffer,
         key,
         contentType: detectedType.mime
@@ -3707,12 +3718,43 @@ app.post(
         uploaderId: resolvedUploaderId,
         description: String(description || "").trim(),
         category: String(category || "").trim(),
+        year: yearLabel,
+        semester: semesterLabel,
+        courseCode: String(subjectCode).trim(),
+        courseName: String(subjectName).trim(),
         status: moderationStatus,
       };
 
       let documentId = null;
-      if (db.isConfigured()) {
-        documentId = await db.upsertDocument(row);
+      if (teamDb.isConfigured()) {
+        try {
+          documentId = await teamDb.upsertDocument(row);
+        } catch (dbErr) {
+          console.warn("[api/documents/upload] teamDb.upsertDocument:", dbErr.message);
+          if (db.isConfigured()) {
+            documentId = await db.upsertDocument({
+              s3Key: key,
+              title: row.title,
+              courseId: resolvedCourseId,
+              uploaderId: resolvedUploaderId,
+              description: row.description,
+              category: row.category,
+              status: moderationStatus,
+            });
+          } else {
+            throw dbErr;
+          }
+        }
+      } else if (db.isConfigured()) {
+        documentId = await db.upsertDocument({
+          s3Key: key,
+          title: row.title,
+          courseId: resolvedCourseId,
+          uploaderId: resolvedUploaderId,
+          description: row.description,
+          category: row.category,
+          status: moderationStatus,
+        });
       }
 
       const highCredibility = isLecturerRole(uploaderRole);
@@ -3721,6 +3763,8 @@ app.post(
         id: documentId != null ? documentId : key,
         title: row.title,
         category: category.trim(),
+        year: yearLabel,
+        semester: semesterLabel,
         subjectCode: subjectCode.trim(),
         subjectName: subjectName.trim(),
         tags: normalizeTags(tags),
@@ -3752,9 +3796,12 @@ app.post(
       });
     } catch (err) {
       console.error("[api/documents/upload]", err);
+      const msg = String(err?.message || "").trim();
+      const clientHint =
+        msg && !/sql|mysql|er_|duplicate|constraint/i.test(msg) ? msg : MSG_TRY_AGAIN;
       return res.status(500).json({
         success: false,
-        message: MSG_TRY_AGAIN,
+        message: clientHint,
       });
     }
   }

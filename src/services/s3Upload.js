@@ -93,6 +93,115 @@ function safeFolderName(value, fallback = "GENERAL") {
     .trim() || fallback;
 }
 
+/**
+ * capstoneedumate bucket layout (see S3 console):
+ *   DATA / YEAR 1 / SEMESTER 1 / {course folder} / file.pdf
+ */
+const DEFAULT_YEAR_FOLDER_MAP = {
+  "YEAR 1": "YEAR 1",
+  "YEAR 2": "YEAR 2",
+  "YEAR 3": "YEAR 3",
+  "YEAR 4": "YEAR 4",
+  "1": "YEAR 1",
+  "2": "YEAR 2",
+  "3": "YEAR 3",
+  "4": "YEAR 4",
+  // Legacy / alternate labels → same English folders
+  "NAM 1": "YEAR 1",
+  "NAM 2": "YEAR 2",
+  "NAM 3": "YEAR 3",
+  "NAM 4": "YEAR 4",
+  "NAM 1 (2024-2025)": "YEAR 1",
+  "NĂM 1": "YEAR 1",
+  "NĂM 2": "YEAR 2",
+  "NĂM 3": "YEAR 3",
+  "NĂM 4": "YEAR 4",
+};
+
+const DEFAULT_SEMESTER_FOLDER_MAP = {
+  "SEMESTER 1": "SEMESTER 1",
+  "SEMESTER 2": "SEMESTER 2",
+  "1": "SEMESTER 1",
+  "2": "SEMESTER 2",
+  "HOC KI 1": "SEMESTER 1",
+  "HOC KI 2": "SEMESTER 2",
+  "HỌC KÌ 1": "SEMESTER 1",
+  "HỌC KÌ 2": "SEMESTER 2",
+};
+
+function normalizeFolderKey(value) {
+  return String(value || "")
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+}
+
+function mapYearToS3Folder(year) {
+  const raw = String(year || "").trim();
+  if (!raw) return safeFolderName("", "YEAR 1");
+  const key = normalizeFolderKey(raw);
+  const fromEnv = process.env.S3_YEAR_FOLDER_MAP;
+  if (fromEnv) {
+    try {
+      const parsed = JSON.parse(fromEnv);
+      if (parsed && typeof parsed === "object" && parsed[key]) {
+        return safeFolderName(parsed[key], parsed[key]);
+      }
+    } catch (_) {
+      /* ignore invalid JSON */
+    }
+  }
+  if (DEFAULT_YEAR_FOLDER_MAP[key]) {
+    return safeFolderName(DEFAULT_YEAR_FOLDER_MAP[key]);
+  }
+  const yearNum = key.match(/^YEAR\s*(\d+)$/) || key.match(/^(\d+)$/);
+  if (yearNum) {
+    return safeFolderName(`YEAR ${yearNum[1]}`);
+  }
+  return safeFolderName(raw, "YEAR 1");
+}
+
+function mapSemesterToS3Folder(semester) {
+  const raw = String(semester || "").trim();
+  if (!raw) return safeFolderName("", "SEMESTER 1");
+  const key = normalizeFolderKey(raw);
+  const fromEnv = process.env.S3_SEMESTER_FOLDER_MAP;
+  if (fromEnv) {
+    try {
+      const parsed = JSON.parse(fromEnv);
+      if (parsed && typeof parsed === "object" && parsed[key]) {
+        return safeFolderName(parsed[key], parsed[key]);
+      }
+    } catch (_) {
+      /* ignore invalid JSON */
+    }
+  }
+  if (DEFAULT_SEMESTER_FOLDER_MAP[key]) {
+    return safeFolderName(DEFAULT_SEMESTER_FOLDER_MAP[key]);
+  }
+  const semNum = key.match(/^SEMESTER\s*(\d+)$/) || key.match(/^(\d+)$/);
+  if (semNum) {
+    return safeFolderName(`SEMESTER ${semNum[1]}`);
+  }
+  return safeFolderName(raw, "SEMESTER 1");
+}
+
+function buildSubjectFolder(subjectCode, subjectName) {
+  const codeRaw = String(subjectCode || "").trim();
+  const nameRaw = String(subjectName || "").trim();
+  if (/^\d+\.\s/.test(codeRaw)) {
+    return safeFolderName(codeRaw, "GENERAL");
+  }
+  const code = safeFolderName(codeRaw, "GENERAL");
+  const name = safeFolderName(nameRaw, "");
+  if (name && name !== "Course" && name !== code) {
+    return `${code} - ${name}`;
+  }
+  return code;
+}
+
 function safeFileBaseName(originalName, displayName = "") {
   const ext = path.extname(originalName).toLowerCase();
 
@@ -114,15 +223,12 @@ function safeFileBaseName(originalName, displayName = "") {
 function buildDocumentKey(originalName, meta = {}) {
   const { safe, ext } = safeFileBaseName(originalName, meta.fileDisplayName);
 
-  const year = safeFolderName(meta.year, "YEAR 1");
-  const semester = safeFolderName(meta.semester, "SEMESTER 1");
-
-  const subjectCode = safeFolderName(meta.subjectCode, "GENERAL");
-  const subjectName = safeFolderName(meta.subjectName, "Course");
-  const subjectFolder = `${subjectCode} - ${subjectName}`;
+  const year = mapYearToS3Folder(meta.year);
+  const semester = mapSemesterToS3Folder(meta.semester);
 
   const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
 
+  // AWS layout: DATA / YEAR n / SEMESTER n / file.pdf (no per-course subfolders)
   return `DATA/${year}/${semester}/${unique}-${safe}${ext}`;
 }
 
@@ -201,6 +307,9 @@ module.exports = {
   uploadDocumentBuffer,
   buildObjectPublicUrl,
   buildDocumentKey,
+  mapYearToS3Folder,
+  mapSemesterToS3Folder,
+  buildSubjectFolder,
   getBucket,
   listDocuments,
   listLogArchives,

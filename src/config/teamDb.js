@@ -186,11 +186,23 @@ async function upsertDocument(row) {
         [courseName || "", courseId]
       );
     } else {
-      const [courseHdr] = await p.execute(
-        "INSERT INTO courses (course_code, course_name, description) VALUES (?, ?, NULL)",
-        [courseCode, courseName || courseCode]
-      );
-      courseId = courseHdr.insertId;
+      try {
+        const [courseHdr] = await p.execute(
+          "INSERT INTO courses (course_code, course_name, description) VALUES (?, ?, NULL)",
+          [courseCode, courseName || courseCode]
+        );
+        courseId = courseHdr.insertId;
+      } catch (e) {
+        if (e.code === "ER_BAD_FIELD_ERROR") {
+          const [courseHdr] = await p.execute(
+            "INSERT INTO courses (course_code, course_name) VALUES (?, ?)",
+            [courseCode, courseName || courseCode]
+          );
+          courseId = courseHdr.insertId;
+        } else {
+          throw e;
+        }
+      }
     }
   }
 
@@ -202,32 +214,87 @@ async function upsertDocument(row) {
   if (existing.length) {
     const id = existing[0].document_id;
 
-    await p.execute(
-      `UPDATE documents
-      SET title = ?,
-          version = IFNULL(version, 0) + 1,
-          course_id = COALESCE(?, course_id),
-          uploader_id = COALESCE(?, uploader_id),
-          status = ?,
-          category = ?,
-          year = ?,
-          semester = ?,
-          description = ?
-      WHERE document_id = ?`,
-      [title, courseId || null, uploaderId || null, status, category, year, semester, description, id]
-    );
+    try {
+      await p.execute(
+        `UPDATE documents
+        SET title = ?,
+            version = IFNULL(version, 0) + 1,
+            course_id = COALESCE(?, course_id),
+            uploader_id = COALESCE(?, uploader_id),
+            status = ?,
+            category = ?,
+            year = ?,
+            semester = ?,
+            description = ?
+        WHERE document_id = ?`,
+        [title, courseId || null, uploaderId || null, status, category, year, semester, description, id]
+      );
+    } catch (e) {
+      if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
+      try {
+        await p.execute(
+          `UPDATE documents
+          SET title = ?,
+              version = IFNULL(version, 0) + 1,
+              course_id = COALESCE(?, course_id),
+              uploader_id = COALESCE(?, uploader_id),
+              status = ?,
+              category = ?,
+              description = ?
+          WHERE document_id = ?`,
+          [title, courseId || null, uploaderId || null, status, category, description, id]
+        );
+      } catch (e2) {
+        if (e2.code === "ER_BAD_FIELD_ERROR") {
+          await p.execute(
+            `UPDATE documents
+            SET title = ?,
+                version = IFNULL(version, 0) + 1,
+                course_id = COALESCE(?, course_id),
+                uploader_id = COALESCE(?, uploader_id),
+                description = ?
+            WHERE document_id = ?`,
+            [title, courseId || null, uploaderId || null, description, id]
+          );
+        } else {
+          throw e2;
+        }
+      }
+    }
 
     return id;
   }
 
-  const [hdr] = await p.execute(
-    `INSERT INTO documents
-      (title, course_id, uploader_id, file_url, version, status, category, year, semester, description)
-    VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-    [title, courseId || null, uploaderId || null, key, status, category, year, semester, description]
-  );
-
-  return hdr.insertId;
+  try {
+    const [hdr] = await p.execute(
+      `INSERT INTO documents
+        (title, course_id, uploader_id, file_url, version, status, category, year, semester, description)
+      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+      [title, courseId || null, uploaderId || null, key, status, category, year, semester, description]
+    );
+    return hdr.insertId;
+  } catch (e) {
+    if (e.code !== "ER_BAD_FIELD_ERROR") throw e;
+    try {
+      const [hdr] = await p.execute(
+        `INSERT INTO documents
+          (title, course_id, uploader_id, file_url, version, status, category, description)
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+        [title, courseId || null, uploaderId || null, key, status, category, description]
+      );
+      return hdr.insertId;
+    } catch (e2) {
+      if (e2.code === "ER_BAD_FIELD_ERROR") {
+        const [hdr] = await p.execute(
+          `INSERT INTO documents (title, course_id, uploader_id, file_url, version)
+          VALUES (?, ?, ?, ?, 1)`,
+          [title, courseId || null, uploaderId || null, key]
+        );
+        return hdr.insertId;
+      }
+      throw e2;
+    }
+  }
 }
 
 async function ensureDocumentStub(s3Key, partial = {}) {

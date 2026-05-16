@@ -296,7 +296,7 @@ const getS3Documents = async (req, res) => {
       .map(o => {
         const m = metaMap.get(o.key);
         const parts = o.key.split('/');
-        // expected: ["DATA", "NĂM 1 (...", "HỌC KÌ 1", "1. CS 201", "file.pdf"]
+        // expected: ["DATA", "YEAR 1", "SEMESTER 1", "CS 201 - Course", "file.pdf"]
         const fileName = path.basename(o.key);
         let subject = "General";
         let year = "";
