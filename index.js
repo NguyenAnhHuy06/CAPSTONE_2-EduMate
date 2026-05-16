@@ -3867,12 +3867,27 @@ async function start() {
   io.use((socket, next) => {
     try {
       const authHeader = String(socket.handshake.headers?.authorization || "");
-      const authToken = String(socket.handshake.auth?.token || socket.handshake.query?.token || "");
+      const authToken = String(
+        socket.handshake.auth?.token || socket.handshake.query?.token || ""
+      );
+      const cookieHeader = String(socket.handshake.headers?.cookie || "");
+      let cookieToken = "";
+      if (cookieHeader) {
+        for (const part of cookieHeader.split(";")) {
+          const idx = part.indexOf("=");
+          if (idx <= 0) continue;
+          const key = part.slice(0, idx).trim();
+          if (key === "token" || key === "accessToken" || key === "access_token") {
+            cookieToken = decodeURIComponent(part.slice(idx + 1).trim());
+            break;
+          }
+        }
+      }
       const bearer = /^Bearer\s+(.+)$/i.exec(authHeader);
-      const raw = (bearer?.[1] || authToken || "").trim();
+      const raw = (bearer?.[1] || authToken || cookieToken || "").trim();
       if (!raw) return next();
-      const decoded = jwt.verify(raw, authJwtSecret());
-      const uid = Number(decoded?.sub);
+      const claims = getBearerClaims({ headers: { authorization: `Bearer ${raw}` } });
+      const uid = Number(claims?.id);
       if (Number.isFinite(uid) && uid > 0) {
         socket.data.userId = uid;
       }
