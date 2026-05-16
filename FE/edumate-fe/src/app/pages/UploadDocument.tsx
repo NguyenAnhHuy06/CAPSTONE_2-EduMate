@@ -15,11 +15,13 @@ export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocum
   const [formData, setFormData] = useState({
     type: 'general',
     year: '',
+    semester: '',
     courseCode: '',
     courseName: '',
     topicTitle: '',
     description: '',
   });
+
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
@@ -61,6 +63,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     form.append("title", formData.topicTitle);
     form.append("category", formData.type);
     form.append("year", formData.year);
+    form.append("semester", formData.semester);
     form.append("subjectCode", formData.courseCode);
     form.append("subjectName", formData.courseName);
     form.append("tags", formData.courseCode);
@@ -109,6 +112,7 @@ const handleSubmit = async (e: React.FormEvent) => {
       setFormData({
         type: 'general',
         year: '',
+        semester: '',
         courseCode: '',
         courseName: '',
         topicTitle: '',
@@ -214,11 +218,30 @@ const handleSubmit = async (e: React.FormEvent) => {
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
           >
-            <option value="">Select year</option>
-            <option value="NĂM 1 (2022-2023)">Year 1 (2022-2023)</option>
-            <option value="NĂM 2 (2023-2024)">Year 2 (2023-2024)</option>
-            <option value="NĂM 3 (2024-2025)">Year 3 (2024-2025)</option>
-            <option value="NĂM 4 (2025-2026)">Year 4 (2025-2026)</option>
+          <option value="">Select year</option>
+          <option value="YEAR 1">Year 1</option>
+          <option value="YEAR 2">Year 2</option>
+          <option value="YEAR 3">Year 3</option>
+          <option value="YEAR 4">Year 4</option>
+          </select>
+        </div>
+
+        {/* Semester */}
+        <div className="mb-4">
+          <label className="block text-gray-700 text-lg mb-2">
+            Semester *
+          </label>
+          <select
+            name="semester"
+            aria-label="Select semester"
+            value={formData.semester}
+            onChange={handleInputChange}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+            required
+          >
+            <option value="">Select semester</option>
+            <option value="SEMESTER 1">Semester 1</option>
+            <option value="SEMESTER 2">Semester 2</option>
           </select>
         </div>
 
