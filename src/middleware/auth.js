@@ -96,12 +96,13 @@ const authMiddleware = async (req, res, next) => {
             attributes: ['user_id', 'email', 'full_name', 'role', 'user_code', 'is_verified', 'is_active']
         });
         console.log('[AuthMiddleware] Found user:', user ? user.user_id : 'null');
+        if (user) console.log('[AuthMiddleware] user.is_active:', user.is_active);
 
         if (!user) {
             return res.status(401).json({ success: false, message: 'User no longer exists.' });
         }
 
-        if (user.is_active === false || user.is_active === 0) {
+        if (user.is_active === false || user.is_active === 0 || user.is_active === '0') {
             return res.status(403).json({ success: false, message: 'Your account has been deactivated by an administrator.' });
         }
 
