@@ -47,6 +47,7 @@ const uploadDocument = [
       title,
       category,
       year,
+      semester,
       subjectCode,
       subjectName,
       tags,
@@ -65,6 +66,7 @@ const uploadDocument = [
         isEmpty(title) ||
         isEmpty(category) ||
         isEmpty(year) ||
+        isEmpty(semester) ||
         isEmpty(subjectCode) ||
         isEmpty(subjectName) ||
         isEmpty(tags)
@@ -75,7 +77,14 @@ const uploadDocument = [
         });
       }
 
-      const key = s3.buildDocumentKey(req.file.originalname);
+      const key = s3.buildDocumentKey(req.file.originalname, {
+        year,
+        semester,
+        subjectCode,
+        subjectName,
+        fileDisplayName: subjectName
+      });
+      
       const up = await s3.uploadDocumentBuffer({ buffer: req.file.buffer, key, contentType: req.file.mimetype });
 
       // Auto-verify for LECTURER and ADMIN
@@ -85,17 +94,18 @@ const uploadDocument = [
       let documentId = null, dbNote = "";
       if (db.isConfigured()) {
         documentId = await db.upsertDocument({
-          s3Key: key,
-          title: title.trim(),
-          category: category.trim(),
-          year: year.trim(),
-          courseCode: subjectCode.trim(),
-          courseName: subjectName.trim(),
-          description: String(description || "").trim(),
-          courseId,
-          uploaderId: req.user.id,
-          status
-        });
+        s3Key: key,
+        title: title.trim(),
+        category: category.trim(),
+        year: year.trim(),
+        semester: semester.trim(),
+        courseCode: subjectCode.trim(),
+        courseName: subjectName.trim(),
+        description: String(description || "").trim(),
+        courseId,
+        uploaderId: req.user.id ?? req.user.user_id,
+        status
+      });
         dbNote = ` Đã ghi vào bảng documents (MySQL) với trạng thái: ${status}.`;
       } else {
         dbNote = " (MySQL chưa cấu hình.)";
@@ -125,6 +135,7 @@ const uploadDocument = [
           title: title.trim(),
           category: category.trim(),
           year: year.trim(),
+          semester: semester.trim(),
           subjectCode: subjectCode.trim(),
           subjectName: subjectName.trim(),
           tags: normalizeTags(tags),
@@ -172,41 +183,53 @@ const S3_LIST_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".docm", ".dotx", "
 
 const getDocumentsForQuiz = async (req, res) => {
   try {
-    if (!s3.isS3Configured()) {
-      return res.status(200).json({ success: true, data: [], message: "S3 chưa cấu hình." });
-    }
-    const rows = await s3.listDocuments({ prefix: "", maxKeys: 5000 });
-    const filtered = rows.filter(o => S3_LIST_EXTENSIONS.has(path.extname(o.key || "").toLowerCase()));
-
-    let metaMap = new Map();
-    if (db.isConfigured()) {
-      try { metaMap = await db.getMetaMapForS3Keys(filtered.map(o => o.key)); } catch (_) { /* ignore */ }
+    if (!db.isConfigured()) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        message: "MySQL chưa cấu hình."
+      });
     }
 
-    const data = filtered
-      .map(o => {
-        const m = metaMap.get(o.key);
+    const rows = await db.listCourseMaterialDocuments(500);
 
-        // Only allow verified documents that exist in DB
-        if (!m) return null;
+    const requesterRole = String(req.user?.role || "").toUpperCase();
+    const requesterId = Number(req.user?.id ?? req.user?.user_id ?? req.user?.userId);
+    const isStaff = requesterRole === "LECTURER" || requesterRole === "ADMIN";
 
+    const data = rows
+      .map((m) => {
         const documentId = m?.document_id != null ? Number(m.document_id) : null;
+        if (!documentId) return null;
+
+        const status = String(m?.status || "").toLowerCase();
+        const uploaderId = Number(m?.uploader_id);
+
+        const isVerified = status === "verified";
+        const isOwner =
+          Number.isFinite(requesterId) &&
+          Number.isFinite(uploaderId) &&
+          requesterId === uploaderId;
+
+        // verified: ai cũng thấy
+        // pending: người upload + Lecturer/Admin thấy
+        // rejected: người upload + Lecturer/Admin thấy
+        if (!isVerified && !isOwner && !isStaff) return null;
+
+        const s3Key = String(m.file_url || "").trim();
+        const fileName = path.basename(s3Key);
+        const ext = path.extname(s3Key).replace(/^\./, "").toUpperCase() || "FILE";
         const chunks = Number(m?.chunk_count || 0);
 
-        if (!documentId || chunks <= 0) return null;
-
-        // Only allow documents that were indexed successfully
-        if (!documentId || chunks <= 0) return null;
-
-        const ext = path.extname(o.key).replace(/^\./, "").toUpperCase() || "FILE";
-        const estimatedQuestions = Math.min(30, Math.max(5, 5 + Math.floor(chunks / 4)));
+        const estimatedQuestions =
+          chunks > 0 ? Math.min(30, Math.max(5, 5 + Math.floor(chunks / 4))) : 0;
 
         return {
           storage: "s3",
-          s3Key: o.key,
-          fileName: path.basename(o.key),
+          s3Key,
+          fileName,
 
-          title: m?.title || path.basename(o.key),
+          title: m?.title || path.parse(fileName).name,
           category: m?.category || null,
           year: m?.year || null,
           semester: m?.semester || null,
@@ -225,9 +248,9 @@ const getDocumentsForQuiz = async (req, res) => {
           uploaderRole: m?.uploader_role || "",
 
           status: m?.status || null,
-          size: o.size,
-          lastModified: o.lastModified || m?.created_at,
-          fileUrl: s3.buildObjectPublicUrl(o.key),
+          size: 0,
+          lastModified: m?.created_at,
+          fileUrl: s3.buildObjectPublicUrl(s3Key),
           inDatabase: true,
           chunkCount: chunks,
           estimatedQuestions,
@@ -242,11 +265,17 @@ const getDocumentsForQuiz = async (req, res) => {
       })
       .filter(Boolean);
 
-    data.sort((a, b) => new Date(b.lastModified || 0).getTime() - new Date(a.lastModified || 0).getTime());
-    return res.status(200).json({ success: true, data });
+    return res.status(200).json({
+      success: true,
+      data
+    });
   } catch (err) {
     console.error(err);
-    return res.status(200).json({ success: true, data: [], message: "Danh sách tài liệu đang tạm thời chưa sẵn sàng." });
+    return res.status(200).json({
+      success: true,
+      data: [],
+      message: "Danh sách tài liệu đang tạm thời chưa sẵn sàng."
+    });
   }
 };
 
@@ -272,12 +301,15 @@ const getS3Documents = async (req, res) => {
         let subject = "General";
         let year = "";
         let semester = "";
-        if (parts.length >= 5) {
-          year = parts[1];
-          semester = parts[2];
-          subject = parts[parts.length - 2].replace(/ \u2713|\u2714/g, '').trim(); // Remove checkmarks that might be in folder names
-        } else if (parts.length >= 2) {
-          subject = parts[parts.length - 2];
+        if (parts[0] === "DATA") {
+          year = parts[1] || "";
+          semester = parts[2] || "";
+
+          if (parts.length >= 5) {
+            subject = parts[parts.length - 2].replace(/ \u2713|\u2714/g, "").trim();
+          } else if (parts.length >= 4) {
+            subject = path.parse(fileName).name;
+          }
         }
         
         return {

@@ -164,6 +164,7 @@ async function upsertDocument(row) {
 
   const category = String(row.category || "").trim() || null;
   const year = String(row.year || "").trim() || null;
+  const semester = String(row.semester || "").trim() || null;
   const description = String(row.description || "").trim() || null;
 
   const courseCode = String(row.courseCode || row.subjectCode || "").trim() || null;
@@ -181,12 +182,12 @@ async function upsertDocument(row) {
     if (courseRows.length) {
       courseId = Number(courseRows[0].course_id);
       await p.execute(
-        "UPDATE courses SET course_name = COALESCE(NULLIF(?, ''), course_name), updated_at = NOW() WHERE course_id = ?",
+        "UPDATE courses SET course_name = COALESCE(NULLIF(?, ''), course_name) WHERE course_id = ?",
         [courseName || "", courseId]
       );
     } else {
       const [courseHdr] = await p.execute(
-        "INSERT INTO courses (course_code, course_name, description, created_at, updated_at) VALUES (?, ?, NULL, NOW(), NOW())",
+        "INSERT INTO courses (course_code, course_name, description) VALUES (?, ?, NULL)",
         [courseCode, courseName || courseCode]
       );
       courseId = courseHdr.insertId;
@@ -203,16 +204,17 @@ async function upsertDocument(row) {
 
     await p.execute(
       `UPDATE documents
-       SET title = ?,
-           version = IFNULL(version, 0) + 1,
-           course_id = COALESCE(?, course_id),
-           uploader_id = COALESCE(?, uploader_id),
-           status = ?,
-           category = ?,
-           year = ?,
-           description = ?
-       WHERE document_id = ?`,
-      [title, courseId || null, uploaderId || null, status, category, year, description, id]
+      SET title = ?,
+          version = IFNULL(version, 0) + 1,
+          course_id = COALESCE(?, course_id),
+          uploader_id = COALESCE(?, uploader_id),
+          status = ?,
+          category = ?,
+          year = ?,
+          semester = ?,
+          description = ?
+      WHERE document_id = ?`,
+      [title, courseId || null, uploaderId || null, status, category, year, semester, description, id]
     );
 
     return id;
@@ -220,9 +222,9 @@ async function upsertDocument(row) {
 
   const [hdr] = await p.execute(
     `INSERT INTO documents
-      (title, course_id, uploader_id, file_url, version, status, category, year, description)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-    [title, courseId || null, uploaderId || null, key, status, category, year, description]
+      (title, course_id, uploader_id, file_url, version, status, category, year, semester, description)
+    VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+    [title, courseId || null, uploaderId || null, key, status, category, year, semester, description]
   );
 
   return hdr.insertId;
@@ -315,6 +317,7 @@ async function getMetaMapForS3Keys(keys) {
         d.status,
         d.category,
         d.year,
+        d.semester,
         d.description,
         d.download_count,
         c.course_code,
@@ -388,6 +391,47 @@ async function listDocumentsRecent(limit = 10) {
           OR (dc.document_id IS NULL AND dc.file_url = d.file_url)) AS comments_count
     FROM documents d
     ORDER BY d.created_at DESC
+    LIMIT ${safeLimit}
+  `;
+
+  const [rows] = await getPool().query(sql);
+  return rows;
+}
+
+async function listCourseMaterialDocuments(limit = 500) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 500, 1), 1000);
+
+  const sql = `
+    SELECT
+      d.document_id,
+      d.title,
+      d.file_url,
+      d.course_id,
+      d.uploader_id,
+      d.created_at,
+      d.status,
+      d.category,
+      d.year,
+      d.semester,
+      d.description,
+      d.download_count,
+      c.course_code,
+      c.course_name,
+      u.name AS uploader_name,
+      u.role AS uploader_role,
+      (SELECT COUNT(*)
+       FROM document_segments s
+       WHERE s.document_id = d.document_id) AS chunk_count,
+      (SELECT COUNT(*)
+       FROM document_comments dc
+       WHERE dc.document_id = d.document_id
+          OR (dc.document_id IS NULL AND dc.file_url = d.file_url)) AS comments_count
+    FROM documents d
+    LEFT JOIN courses c ON c.course_id = d.course_id
+    LEFT JOIN users u ON u.user_id = d.uploader_id
+    WHERE d.file_url IS NOT NULL
+      AND TRIM(d.file_url) <> ''
+    ORDER BY d.created_at DESC, d.document_id DESC
     LIMIT ${safeLimit}
   `;
 
@@ -2534,5 +2578,5 @@ module.exports = {
   shareQuizForReview,
   markQuizEditedByLecturer,
   listEditedSharedQuizzesByStudent,
-  getAttemptResult,
+  getAttemptResult, listCourseMaterialDocuments,
 };

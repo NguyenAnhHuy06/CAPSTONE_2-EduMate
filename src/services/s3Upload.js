@@ -81,17 +81,49 @@ async function buildInlineSignedUrl(key, expiresSeconds = 3600) {
   }
 }
 
-function buildDocumentKey(originalName) {
+function safeFolderName(value, fallback = "GENERAL") {
+  const s = String(value || "").trim();
+  if (!s) return fallback;
+
+  return s
+    .replace(/[\\]/g, "/")
+    .replace(/\.\./g, "")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/[<>:"|?*]/g, "")
+    .trim() || fallback;
+}
+
+function safeFileBaseName(originalName, displayName = "") {
   const ext = path.extname(originalName).toLowerCase();
-  const base = path.basename(originalName, ext);
-  const safe = base
+
+  // Ưu tiên dùng Course Name làm tên file.
+  // Nếu Course Name rỗng thì mới fallback về tên file gốc.
+  const rawBase = String(displayName || "").trim()
+    || path.basename(originalName, ext);
+
+  const safe = rawBase
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || "document";
+
+  return { safe, ext };
+}
+
+function buildDocumentKey(originalName, meta = {}) {
+  const { safe, ext } = safeFileBaseName(originalName, meta.fileDisplayName);
+
+  const year = safeFolderName(meta.year, "YEAR 1");
+  const semester = safeFolderName(meta.semester, "SEMESTER 1");
+
+  const subjectCode = safeFolderName(meta.subjectCode, "GENERAL");
+  const subjectName = safeFolderName(meta.subjectName, "Course");
+  const subjectFolder = `${subjectCode} - ${subjectName}`;
+
   const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-  return `documents/${unique}-${safe}${ext}`;
+
+  return `DATA/${year}/${semester}/${unique}-${safe}${ext}`;
 }
 
 async function uploadDocumentBuffer({ buffer, key, contentType }) {
