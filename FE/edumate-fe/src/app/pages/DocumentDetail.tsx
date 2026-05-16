@@ -15,10 +15,11 @@ import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator, type FlashcardInitialEdit } from '../pages/FlashcardCreator';
 import { FlashcardViewer } from '../pages/student/FlashcardViewer';
 import { AIChatPanel, AIChatLauncher } from './AIChatPanel';
-import api from '@/services/api';
+import api, { getStoredAuthToken } from '@/services/api';
 import { useNotification } from './NotificationContext';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { renderAsync } from 'docx-preview';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerSrc;
 
@@ -71,6 +72,175 @@ function displayCourseName(courseCode: string | undefined, courseName: string | 
   return raw;
 }
 
+async function fetchPreviewBlob(url: string): Promise<Blob> {
+  const token = getStoredAuthToken();
+  const headers: HeadersInit = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(url, { headers, credentials: 'same-origin' });
+  if (!res.ok) throw new Error(`Failed to load file (${res.status})`);
+  return res.blob();
+}
+
+type DocumentFileRef = { documentId: number | null; s3Key: string };
+
+async function parseBlobError(blob: Blob): Promise<string> {
+  try {
+    const text = await blob.text();
+    if (text.trim().startsWith('{')) {
+      const j = JSON.parse(text) as { message?: string; error?: string };
+      return String(j?.message || j?.error || '').trim();
+    }
+    return text.trim().slice(0, 160);
+  } catch {
+    return '';
+  }
+}
+
+/** Load file bytes through the API proxy (same as Download) — avoids CORS on :3001/uploads. */
+async function fetchDocumentBlobViaApi(ref: DocumentFileRef): Promise<Blob> {
+  const params =
+    ref.documentId != null ? { documentId: ref.documentId } : ref.s3Key ? { s3Key: ref.s3Key } : null;
+  if (!params) throw new Error('No document reference for preview.');
+
+  const blob = (await api.get('/documents/download-file', {
+    params,
+    responseType: 'blob',
+    timeout: 180_000,
+  })) as unknown as Blob;
+
+  if (!(blob instanceof Blob) || blob.size === 0) {
+    throw new Error('File is empty or missing on the server.');
+  }
+
+  const type = (blob.type || '').toLowerCase();
+  if (type.includes('json') || type.includes('html') || type.includes('text/plain')) {
+    const serverMsg = await parseBlobError(blob);
+    throw new Error(serverMsg || 'Could not load file from server.');
+  }
+
+  return blob;
+}
+
+async function fetchDocumentBlobForPreview(
+  ref: DocumentFileRef,
+  fallbackUrl: string
+): Promise<Blob> {
+  try {
+    return await fetchDocumentBlobViaApi(ref);
+  } catch (apiErr) {
+    const direct = String(fallbackUrl || '').trim();
+    if (!direct) throw apiErr;
+    try {
+      return await fetchPreviewBlob(direct);
+    } catch {
+      throw apiErr;
+    }
+  }
+}
+
+const WORD_PREVIEW_EXTS = new Set(['doc', 'docx', 'docm', 'dotx', 'dotm']);
+const DOCX_PAGED_EXTS = new Set(['docx', 'docm', 'dotx', 'dotm']);
+
+function extensionFromPath(value: string): string {
+  const clean = value.split('?')[0].split('#')[0];
+  const base = clean.split('/').pop() || clean;
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0 || dot === base.length - 1) return '';
+  return base.slice(dot + 1).toLowerCase();
+}
+
+function extensionFromMime(mime: string): string {
+  const m = mime.toLowerCase();
+  if (m.includes('pdf')) return 'pdf';
+  if (m.includes('wordprocessingml') || m.includes('macroenabled')) return 'docx';
+  if (m === 'application/msword') return 'doc';
+  return '';
+}
+
+function resolvePreviewFileExtension(document: any, previewExtension?: string): string {
+  const fromApi = String(previewExtension || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\./, '');
+  if (fromApi) return fromApi;
+  const paths = [
+    document?.s3Key,
+    document?.storedFileName,
+    document?.originalFileName,
+    document?.fileName,
+    document?.title,
+    document?.fileUrl,
+  ];
+  for (const p of paths) {
+    const ext = extensionFromPath(String(p || ''));
+    if (ext) return ext;
+  }
+  return extensionFromMime(String(document?.fileType || document?.mimeType || ''));
+}
+
+function collectWordPageSections(host: HTMLElement): HTMLElement[] {
+  const inWrapper = host.querySelectorAll<HTMLElement>('.docx-wrapper > section.docx');
+  if (inWrapper.length) return Array.from(inWrapper);
+  return Array.from(host.querySelectorAll<HTMLElement>('section.docx'));
+}
+
+type WordPagingState = {
+  mode: 'sections' | 'virtual';
+  pageHeight: number;
+  section?: HTMLElement;
+};
+
+function measureWordPaging(host: HTMLElement): WordPagingState & { total: number } {
+  const sections = collectWordPageSections(host);
+  if (sections.length > 1) {
+    return { total: sections.length, mode: 'sections', pageHeight: 0 };
+  }
+  if (sections.length === 1) {
+    const section = sections[0];
+    const rectH = section.getBoundingClientRect().height;
+    const styleMin = parseFloat(section.style.minHeight || '');
+    const pageHeight = Math.max(480, rectH || styleMin || 1056);
+    const contentHeight = section.scrollHeight;
+    if (contentHeight > pageHeight * 1.15) {
+      return {
+        total: Math.max(1, Math.ceil(contentHeight / pageHeight)),
+        mode: 'virtual',
+        pageHeight,
+        section,
+      };
+    }
+    return { total: 1, mode: 'sections', pageHeight: 0, section };
+  }
+  return { total: 0, mode: 'sections', pageHeight: 0 };
+}
+
+function applyWordPageVisibility(
+  host: HTMLElement,
+  page: number,
+  paging: WordPagingState
+) {
+  const sections = collectWordPageSections(host);
+  if (!sections.length) return;
+
+  if (paging.mode === 'sections') {
+    const idx = Math.min(Math.max(page, 1), sections.length) - 1;
+    sections.forEach((el, i) => {
+      el.style.display = i === idx ? 'flex' : 'none';
+    });
+    return;
+  }
+
+  if (paging.mode === 'virtual' && paging.section) {
+    sections.forEach((el) => {
+      el.style.display = 'flex';
+    });
+    const { pageHeight, section } = paging;
+    section.style.overflow = 'hidden';
+    section.style.height = `${pageHeight}px`;
+    section.scrollTop = (Math.min(Math.max(page, 1), Math.ceil(section.scrollHeight / pageHeight)) - 1) * pageHeight;
+  }
+}
+
 function triggerBrowserDownload(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -115,6 +285,7 @@ export function DocumentDetail ({
   const [docStatus, setDocStatus] = useState(document?.status || 'pending');
   const [isVerifying, setIsVerifying] = useState(false);
   const [previewUrl, setPreviewUrl] = useState('');
+  const [previewFileExt, setPreviewFileExt] = useState('');
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
   const [previewRetry, setPreviewRetry] = useState(0);
@@ -124,6 +295,13 @@ export function DocumentDetail ({
   const [pdfRendering, setPdfRendering] = useState(false);
   const [pdfRenderError, setPdfRenderError] = useState('');
   const pdfCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pdfObjectUrlRef = useRef('');
+  const wordPreviewRef = useRef<HTMLDivElement | null>(null);
+  const wordPagingRef = useRef<WordPagingState>({ mode: 'sections', pageHeight: 0 });
+  const [wordPage, setWordPage] = useState(1);
+  const [wordTotalPages, setWordTotalPages] = useState(0);
+  const [wordRendering, setWordRendering] = useState(false);
+  const [wordRenderError, setWordRenderError] = useState('');
   const [didAutoOpenFlashcard, setDidAutoOpenFlashcard] = useState(false);
 
   // Report Flow States
@@ -144,10 +322,12 @@ export function DocumentDetail ({
     onAutoOpenFlashcardHandled?.();
   }, [autoOpenFlashcardMode, didAutoOpenFlashcard, onAutoOpenFlashcardHandled]);
 
-  const fileName = String(document?.s3Key || document?.storedFileName || document?.originalFileName || '');
-  const fileExt = fileName.includes('.') ? fileName.split('.').pop()?.toLowerCase() || '' : '';
+  const fileExt = resolvePreviewFileExtension(document, previewFileExt);
   const isPdfPreview = fileExt === 'pdf';
-  const isWordPreview = ['doc', 'docx', 'docm', 'dotx', 'dotm'].includes(fileExt);
+  const isWordPreview = WORD_PREVIEW_EXTS.has(fileExt);
+  /** Legacy `.doc` — browser iframe only; `.docx` uses paginated in-app renderer. */
+  const isLegacyWordDoc = fileExt === 'doc';
+  const isDocxPagedPreview = isWordPreview && !isLegacyWordDoc && DOCX_PAGED_EXTS.has(fileExt);
   const canInlinePreview = isPdfPreview || isWordPreview;
   const trustedBadgeVisible =
     !!document.isLecturerUpload ||
@@ -266,6 +446,7 @@ export function DocumentDetail ({
     const loadPreviewUrl = async () => {
       if (!canInlinePreview) {
         setPreviewUrl('');
+        setPreviewFileExt('');
         setPreviewError('');
         return;
       }
@@ -296,15 +477,22 @@ export function DocumentDetail ({
           data?.sourceFileUrl,
         ];
         const url = String(urlCandidates.find((v) => typeof v === 'string' && String(v).trim()) || '').trim();
+        const extFromApi = String(data?.extension || '')
+          .trim()
+          .toLowerCase()
+          .replace(/^\./, '');
         if (!url) {
           setPreviewUrl('');
+          setPreviewFileExt('');
           setPreviewError('Could not load preview. Try downloading the file.');
           return;
         }
+        setPreviewFileExt(extFromApi);
         setPreviewUrl(url);
       } catch {
         if (!cancelled) {
           setPreviewUrl('');
+          setPreviewFileExt('');
           setPreviewError('Could not load preview right now.');
         }
       } finally {
@@ -322,14 +510,32 @@ export function DocumentDetail ({
     let cancelled = false;
 
     const loadPdfDocument = async () => {
-      if (!isPdfPreview || !previewUrl || previewLoading || !!previewError) {
+      if (!isPdfPreview || previewLoading || !!previewError) {
+        if (pdfObjectUrlRef.current) {
+          URL.revokeObjectURL(pdfObjectUrlRef.current);
+          pdfObjectUrlRef.current = '';
+        }
         setPdfDoc(null);
         setPdfTotalPages(0);
         setPdfPage(1);
         return;
       }
+      const { documentId, s3Key } = documentRefKey();
+      if (documentId == null && !s3Key && !previewUrl) {
+        setPdfDoc(null);
+        setPdfTotalPages(0);
+        return;
+      }
       try {
-        const task = pdfjsLib.getDocument(previewUrl);
+        const blob = await fetchDocumentBlobForPreview(
+          { documentId, s3Key },
+          previewUrl
+        );
+        if (cancelled) return;
+        if (pdfObjectUrlRef.current) URL.revokeObjectURL(pdfObjectUrlRef.current);
+        const objectUrl = URL.createObjectURL(blob);
+        pdfObjectUrlRef.current = objectUrl;
+        const task = pdfjsLib.getDocument(objectUrl);
         const doc = await task.promise;
         if (cancelled) return;
         setPdfDoc(doc);
@@ -348,8 +554,12 @@ export function DocumentDetail ({
     void loadPdfDocument();
     return () => {
       cancelled = true;
+      if (pdfObjectUrlRef.current) {
+        URL.revokeObjectURL(pdfObjectUrlRef.current);
+        pdfObjectUrlRef.current = '';
+      }
     };
-  }, [isPdfPreview, previewUrl, previewLoading, previewError]);
+  }, [isPdfPreview, previewUrl, previewLoading, previewError, documentRefKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -386,6 +596,98 @@ export function DocumentDetail ({
       cancelled = true;
     };
   }, [isPdfPreview, pdfDoc, pdfPage]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const waitForHost = async (): Promise<HTMLDivElement | null> => {
+      for (let i = 0; i < 30; i++) {
+        if (cancelled) return null;
+        const host = wordPreviewRef.current;
+        if (host) return host;
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => resolve());
+        });
+      }
+      return wordPreviewRef.current;
+    };
+
+    const loadWordPreview = async () => {
+      const { documentId, s3Key } = documentRefKey();
+      const canLoadBytes = documentId != null || !!s3Key || !!previewUrl;
+      if (!isDocxPagedPreview || !canLoadBytes || previewLoading || !!previewError) {
+        setWordTotalPages(0);
+        setWordPage(1);
+        setWordRenderError('');
+        wordPagingRef.current = { mode: 'sections', pageHeight: 0 };
+        if (wordPreviewRef.current) wordPreviewRef.current.innerHTML = '';
+        return;
+      }
+
+      setWordRendering(true);
+      setWordRenderError('');
+      setWordTotalPages(0);
+      setWordPage(1);
+
+      const host = await waitForHost();
+      if (!host || cancelled) {
+        if (!cancelled) setWordRendering(false);
+        return;
+      }
+
+      host.innerHTML = '';
+      try {
+        const { documentId, s3Key } = documentRefKey();
+        const blob = await fetchDocumentBlobForPreview(
+          { documentId, s3Key },
+          previewUrl
+        );
+        if (cancelled || !wordPreviewRef.current) return;
+        await renderAsync(blob, wordPreviewRef.current, undefined, {
+          className: 'docx',
+          inWrapper: true,
+          breakPages: true,
+          ignoreLastRenderedPageBreak: false,
+          useBase64URL: true,
+        });
+        if (cancelled || !wordPreviewRef.current) return;
+
+        const paging = measureWordPaging(wordPreviewRef.current);
+        wordPagingRef.current = {
+          mode: paging.mode,
+          pageHeight: paging.pageHeight,
+          section: paging.section,
+        };
+        const total = Math.max(1, paging.total);
+        setWordTotalPages(total);
+        setWordPage(1);
+        applyWordPageVisibility(wordPreviewRef.current, 1, wordPagingRef.current);
+      } catch (err) {
+        if (!cancelled) {
+          const detail =
+            err instanceof Error && err.message.trim()
+              ? err.message.trim()
+              : 'Could not render this Word document in the browser.';
+          setWordRenderError(detail);
+          setWordTotalPages(0);
+          wordPagingRef.current = { mode: 'sections', pageHeight: 0 };
+        }
+      } finally {
+        if (!cancelled) setWordRendering(false);
+      }
+    };
+
+    void loadWordPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [isDocxPagedPreview, previewUrl, previewLoading, previewError, previewRetry, documentRefKey]);
+
+  useEffect(() => {
+    const host = wordPreviewRef.current;
+    if (!host || !isDocxPagedPreview || wordTotalPages <= 0 || wordRendering) return;
+    applyWordPageVisibility(host, wordPage, wordPagingRef.current);
+  }, [wordPage, wordTotalPages, isDocxPagedPreview, wordRendering]);
 
   const handleOpenQuizFlow = () => {
     if (onCreateQuizWithAi) {
@@ -938,13 +1240,63 @@ export function DocumentDetail ({
           </div>
         ) : previewUrl ? (
           <div className="rounded-lg border border-gray-200 overflow-hidden bg-gray-50 h-[560px]">
-            {isWordPreview ? (
-              <iframe
-                src={previewUrl || undefined}
-                title={`${document?.title || 'Document'} preview`}
-                className="w-full h-full border-0"
-                loading="lazy"
-              />
+            {isDocxPagedPreview ? (
+              <div className="h-full flex flex-col">
+                <div className="px-3 py-2 border-b border-gray-200 bg-white flex items-center justify-between text-sm">
+                  <span className="text-gray-700">
+                    Word page {wordTotalPages ? `${wordPage} / ${wordTotalPages}` : '—'}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setWordPage((p) => Math.max(1, p - 1))}
+                      disabled={wordRendering || wordPage <= 1}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Prev
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWordPage((p) => Math.min(wordTotalPages || 1, p + 1))}
+                      disabled={wordRendering || wordPage >= (wordTotalPages || 1)}
+                      className="px-2 py-1 rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+                <div className="flex-1 relative min-h-0 bg-gray-100 p-3">
+                  <div
+                    ref={wordPreviewRef}
+                    className={`docx-preview-host h-full overflow-auto bg-white shadow-sm max-w-full mx-auto [&_.docx-wrapper]:!bg-white [&_.docx-wrapper]:!py-4 ${
+                      wordRendering ? 'invisible' : ''
+                    }`}
+                  />
+                  {wordRendering ? (
+                    <div className="absolute inset-0 flex items-center justify-center gap-2 text-gray-600 bg-gray-100">
+                      <Loader2 size={18} className="animate-spin" />
+                      <span>Rendering document…</span>
+                    </div>
+                  ) : null}
+                  {wordRenderError ? (
+                    <div className="absolute inset-0 flex items-center justify-center p-4 bg-gray-100">
+                      <p className="text-red-700 text-sm text-center max-w-md">{wordRenderError}</p>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : isLegacyWordDoc ? (
+              <div className="h-full flex flex-col">
+                <div className="px-3 py-2 border-b border-amber-200 bg-amber-50 text-sm text-amber-900">
+                  File .doc — preview cuộn liên tục. Lưu sang .docx để xem phân trang trong app.
+                </div>
+                <iframe
+                  src={previewUrl || undefined}
+                  title={`${document?.title || 'Document'} preview`}
+                  className="w-full flex-1 border-0"
+                  loading="lazy"
+                />
+              </div>
             ) : (
               <div className="h-full flex flex-col">
                 <div className="px-3 py-2 border-b border-gray-200 bg-white flex items-center justify-between text-sm">

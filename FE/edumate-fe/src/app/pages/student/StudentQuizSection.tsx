@@ -81,9 +81,18 @@ function formatDateTimeWithSeconds(raw: unknown): string {
     return `${date} ${time}`;
 }
 
-function readQuizResultCache(): QuizResultCacheItem[] {
+function cacheKeyForUser(baseKey: string, viewerUserId: string | null): string | null {
+    if (viewerUserId == null) return null;
+    const s = String(viewerUserId).trim();
+    if (!s) return null;
+    return `${baseKey}:u:${s}`;
+}
+
+function readQuizResultCache(viewerUserId: string | null): QuizResultCacheItem[] {
+    const key = cacheKeyForUser(STUDENT_QUIZ_RESULT_CACHE_KEY, viewerUserId);
+    if (!key) return [];
     try {
-        const raw = localStorage.getItem(STUDENT_QUIZ_RESULT_CACHE_KEY);
+        const raw = localStorage.getItem(key);
         const parsed = raw ? JSON.parse(raw) : [];
         return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -91,9 +100,11 @@ function readQuizResultCache(): QuizResultCacheItem[] {
     }
 }
 
-function writeQuizResultCache(items: QuizResultCacheItem[]) {
+function writeQuizResultCache(items: QuizResultCacheItem[], viewerUserId: string | null) {
+    const key = cacheKeyForUser(STUDENT_QUIZ_RESULT_CACHE_KEY, viewerUserId);
+    if (!key) return;
     try {
-        localStorage.setItem(STUDENT_QUIZ_RESULT_CACHE_KEY, JSON.stringify(items.slice(0, 100)));
+        localStorage.setItem(key, JSON.stringify(items.slice(0, 100)));
     } catch {
         // ignore storage failures
     }
@@ -108,10 +119,12 @@ function rowHasSharedFlags(row?: Record<string, unknown> | null): boolean {
     return Boolean(row?.sharedForReview || row?.sharedFromStudent);
 }
 
-function readSharedQuizIdMap(): Map<number, string> {
+function readSharedQuizIdMap(viewerUserId: string | null): Map<number, string> {
     const out = new Map<number, string>();
+    const key = cacheKeyForUser(STUDENT_SHARED_QUIZ_IDS_KEY, viewerUserId);
+    if (!key) return out;
     try {
-        const raw = localStorage.getItem(STUDENT_SHARED_QUIZ_IDS_KEY);
+        const raw = localStorage.getItem(key);
         const parsed = raw ? JSON.parse(raw) : {};
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             for (const [k, v] of Object.entries(parsed as Record<string, string>)) {
@@ -127,22 +140,24 @@ function readSharedQuizIdMap(): Map<number, string> {
     return out;
 }
 
-function markQuizSharedInStorage(quizId: number, sharedAt?: string) {
+function markQuizSharedInStorage(quizId: number, sharedAt: string | undefined, viewerUserId: string | null) {
     const qid = Number(quizId);
     if (!Number.isFinite(qid) || qid <= 0) return;
+    const storageKey = cacheKeyForUser(STUDENT_SHARED_QUIZ_IDS_KEY, viewerUserId);
+    if (!storageKey) return;
     const at = String(sharedAt || '').trim() || new Date().toISOString();
     try {
-        const prev = Object.fromEntries(readSharedQuizIdMap());
+        const prev = Object.fromEntries(readSharedQuizIdMap(viewerUserId));
         prev[String(qid)] = at;
-        localStorage.setItem(STUDENT_SHARED_QUIZ_IDS_KEY, JSON.stringify(prev));
+        localStorage.setItem(storageKey, JSON.stringify(prev));
     } catch {
         // ignore
     }
 }
 
 /** Propagate shared flags to every completed row for the same quizId. */
-function applySharedFlagsToQuizRows(rows: any[]): any[] {
-    const stored = readSharedQuizIdMap();
+function applySharedFlagsToQuizRows(rows: any[], viewerUserId: string | null): any[] {
+    const stored = readSharedQuizIdMap(viewerUserId);
     const sharedByQuiz = new Map<number, string>(stored);
 
     for (const r of rows) {
@@ -150,7 +165,7 @@ function applySharedFlagsToQuizRows(rows: any[]): any[] {
         if (!qid || !rowHasSharedFlags(r)) continue;
         const at = String((r as any)?.sharedAt || '').trim() || sharedByQuiz.get(qid) || new Date().toISOString();
         sharedByQuiz.set(qid, at);
-        markQuizSharedInStorage(qid, at);
+        markQuizSharedInStorage(qid, at, viewerUserId);
     }
 
     return rows.map((r) => {
@@ -166,13 +181,13 @@ function applySharedFlagsToQuizRows(rows: any[]): any[] {
     });
 }
 
-function upsertQuizResultCache(entry: QuizResultCacheItem) {
-    appendQuizResultCache(entry);
+function upsertQuizResultCache(entry: QuizResultCacheItem, viewerUserId: string | null) {
+    appendQuizResultCache(entry, viewerUserId);
 }
 
 /** Keep prior attempts; replace only the same resultId or attemptId. */
-function appendQuizResultCache(entry: QuizResultCacheItem) {
-    const prev = readQuizResultCache();
+function appendQuizResultCache(entry: QuizResultCacheItem, viewerUserId: string | null) {
+    const prev = readQuizResultCache(viewerUserId);
     const resultKey = String(entry.resultId || '').trim();
     const aid = Number(entry.attemptId);
     const next = prev.filter((x) => {
@@ -181,7 +196,7 @@ function appendQuizResultCache(entry: QuizResultCacheItem) {
         return true;
     });
     next.unshift(entry);
-    writeQuizResultCache(next);
+    writeQuizResultCache(next, viewerUserId);
 }
 
 function stripCompletedAttemptFields(row: Record<string, unknown> | null | undefined) {
@@ -278,11 +293,14 @@ function mergeCompletedWithCache(apiRows: any[], cacheRows: QuizResultCacheItem[
     });
 }
 
-function findQuizResultCacheEntry(opts: {
-    attemptId?: unknown;
-    quizId?: unknown;
-}): QuizResultCacheItem | null {
-    const rows = readQuizResultCache();
+function findQuizResultCacheEntry(
+    opts: {
+        attemptId?: unknown;
+        quizId?: unknown;
+    },
+    viewerUserId: string | null
+): QuizResultCacheItem | null {
+    const rows = readQuizResultCache(viewerUserId);
     const aid = Number(opts.attemptId);
     if (Number.isFinite(aid) && aid > 0) {
         const byAttempt = rows.find((x) => Number(x.attemptId) === aid);
@@ -720,6 +738,16 @@ function QuizQuestionMediaImg({ src }: { src: string }) {
     );
 }
 
+/** Positive integer quiz id for POST /quiz/attempts (reject document placeholders like "doc-1"). */
+function coercePositiveQuizId(raw: unknown): number | null {
+    if (raw == null || raw === '') return null;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.trunc(raw);
+    const s = String(raw).trim();
+    if (!/^\d+$/.test(s)) return null;
+    const n = Number(s);
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
+
 /** Unwrap GET /quizzes/:id — backends nest payload differently. */
 function unwrapQuizDetailPayload(res: any): {
     quiz_id?: number;
@@ -772,7 +800,9 @@ function unwrapQuizDetailPayload(res: any): {
     const passRaw = payload?.pass_percentage ?? payload?.passPercentage ?? nestedQuiz?.pass_percentage;
     const passN = Number(passRaw);
     return {
-        quiz_id: Number(payload?.quiz_id ?? payload?.quizId ?? payload?.id ?? nestedQuiz?.id) || undefined,
+        quiz_id:
+            coercePositiveQuizId(payload?.quiz_id ?? payload?.quizId ?? payload?.id ?? nestedQuiz?.id) ??
+            undefined,
         title: String(payload?.title ?? nestedQuiz?.title ?? payload?.quiz_title ?? '').trim() || undefined,
         questions,
         duration_minutes: Number.isFinite(durationN) && durationN > 0 ? durationN : undefined,
@@ -1189,6 +1219,13 @@ export function StudentQuizSection({
     const [highlightedS3Key, setHighlightedS3Key] = useState('');
     const availableCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
+    const viewerIdStr = useMemo((): string | null => {
+        const v = user?.user_id ?? user?.id ?? user?.userId;
+        if (v == null || v === '') return null;
+        const s = String(v).trim();
+        return s || null;
+    }, [user]);
+
     useEffect(() => {
         const raw = fileHighlightRequest?.s3Key?.trim();
         const nonce = fileHighlightRequest?.nonce;
@@ -1256,6 +1293,14 @@ export function StudentQuizSection({
         if (!opts?.quiet) setLoading(true);
         try {
             const uid = user?.user_id ?? user?.id ?? user?.userId;
+            if (viewerIdStr) {
+                try {
+                    localStorage.removeItem(STUDENT_QUIZ_RESULT_CACHE_KEY);
+                    localStorage.removeItem(STUDENT_SHARED_QUIZ_IDS_KEY);
+                } catch {
+                    /* ignore */
+                }
+            }
             const [docsRes, historyRes, publishedRes] = await Promise.allSettled([
                 // Ask backend to include moderation-verified materials (some APIs omit them by default).
                 api.get('/documents/for-quiz', {
@@ -1274,13 +1319,19 @@ export function StudentQuizSection({
             const publishedData: any = publishedRes.status === 'fulfilled' ? publishedRes.value : null;
 
             const rowsRaw = Array.isArray(historyData?.data) ? historyData.data : [];
-            const cacheRows = readQuizResultCache();
+            const historyScoped = Boolean(historyData?.scopedToAttemptUser);
+            const cacheRows = readQuizResultCache(viewerIdStr);
             const uidStr = uid != null ? String(uid) : '';
             const rows = rowsRaw.filter((h: any) => {
                 if (isQuizMarkedDeleted(h)) return false;
                 if (!uidStr) return true;
-                const owner = h?.userId ?? h?.user_id ?? h?.ownerId ?? h?.studentId ?? h?.createdBy;
-                if (owner == null || owner === '') return true; // keep legacy rows with no owner info
+                if (historyScoped) {
+                    const ao = h?.attemptUserId ?? h?.attempt_user_id;
+                    if (ao == null || ao === '') return false;
+                    return String(ao) === uidStr;
+                }
+                const owner = h?.userId ?? h?.user_id ?? h?.ownerId ?? h?.studentId;
+                if (owner == null || owner === '') return true;
                 return String(owner) === uidStr;
             });
             const attemptsByTitle = new Map<string, number>();
@@ -1329,7 +1380,7 @@ export function StudentQuizSection({
                 const hidAttempt = h?.attemptId ?? h?.lastAttemptId ?? null;
                 const hidQuiz = h?.quizId || h?.quiz_id || h?.id;
                 const cacheMatch =
-                    findQuizResultCacheEntry({ attemptId: hidAttempt, quizId: hidQuiz }) ??
+                    findQuizResultCacheEntry({ attemptId: hidAttempt, quizId: hidQuiz }, viewerIdStr) ??
                     (hidAttempt != null && hidAttempt !== ''
                         ? cacheRows.find((c) => Number(c.attemptId) === Number(hidAttempt))
                         : null);
@@ -1377,7 +1428,7 @@ export function StudentQuizSection({
                             : [],
                 };
             });
-            setCompletedQuizzes(applySharedFlagsToQuizRows(mergeCompletedWithCache(mappedCompleted, cacheRows)));
+            setCompletedQuizzes(applySharedFlagsToQuizRows(mergeCompletedWithCache(mappedCompleted, cacheRows), viewerIdStr));
             const editedRows = rows.filter(
                 (h: any) =>
                     Boolean(h?.sharedForReview) ||
@@ -1570,7 +1621,10 @@ export function StudentQuizSection({
             setTimerId(null);
         }
         setShowResults(false);
-        setSelectedQuiz(quiz);
+        const resolvedId = coercePositiveQuizId(quiz?.quizId ?? quiz?.id);
+        const normalizedQuiz =
+            resolvedId != null ? { ...quiz, id: resolvedId, quizId: resolvedId } : quiz;
+        setSelectedQuiz(normalizedQuiz);
         setCurrentQuestionIndex(0);
         setAnswers([]);
         setTimeRemaining((finiteQuizMinutes(quiz?.duration, 10) || 10) * 60);
@@ -1634,10 +1688,13 @@ export function StudentQuizSection({
         regeneratedQuizId?: number;
     }> => {
         const quizId = Number(quizRow?.quizId ?? quizRow?.id);
-        const cache = findQuizResultCacheEntry({
-            attemptId: (quizRow as any)?.attemptId,
-            quizId: Number.isFinite(quizId) ? quizId : undefined,
-        });
+        const cache = findQuizResultCacheEntry(
+            {
+                attemptId: (quizRow as any)?.attemptId,
+                quizId: Number.isFinite(quizId) ? quizId : undefined,
+            },
+            viewerIdStr
+        );
         const snapshotRaw =
             (Array.isArray((quizRow as any)?.questionsSnapshot) && (quizRow as any).questionsSnapshot.length
                 ? (quizRow as any).questionsSnapshot
@@ -1702,7 +1759,7 @@ export function StudentQuizSection({
     const isQuizAlreadyShared = (quizRow?: any) => {
         const qid = resolveStudentQuizId(quizRow || selectedQuiz);
         if (!qid) return rowHasSharedFlags(quizRow) || rowHasSharedFlags(selectedQuiz);
-        if (readSharedQuizIdMap().has(qid)) return true;
+        if (readSharedQuizIdMap(viewerIdStr).has(qid)) return true;
         if (rowHasSharedFlags(quizRow)) return true;
         return completedQuizzes.some(
             (q) => resolveStudentQuizId(q) === qid && rowHasSharedFlags(q)
@@ -1713,7 +1770,7 @@ export function StudentQuizSection({
         const qid = Number(quizId);
         if (!Number.isFinite(qid) || qid <= 0) return;
         const at = String(sharedAt || '').trim() || new Date().toISOString();
-        markQuizSharedInStorage(qid, at);
+        markQuizSharedInStorage(qid, at, viewerIdStr);
         const withFlags = (row: any) => ({
             ...row,
             sharedForReview: true,
@@ -1740,8 +1797,8 @@ export function StudentQuizSection({
         const existing = Number((quizRow as any)?.attemptId);
         if (Number.isFinite(existing) && existing > 0) return existing;
 
-        const quizId = Number((quizRow as any)?.quizId ?? quizRow?.id);
-        if (!Number.isFinite(quizId) || quizId <= 0) return null;
+        const quizId = coercePositiveQuizId((quizRow as any)?.quizId ?? quizRow?.id);
+        if (quizId == null) return null;
 
         const answersSource: QuizAnswer[] = Array.isArray(quizResult?.answers)
             ? quizResult.answers
@@ -1768,7 +1825,13 @@ export function StudentQuizSection({
         try {
             const attemptRes: any = await api.post('/quiz/attempts', {
                 quizId,
-                score: Number(quizResult?.score ?? (quizRow as any)?.myScore ?? 0),
+                quiz_id: quizId,
+                userId: user?.user_id ?? user?.id ?? user?.userId,
+                user_id: user?.user_id ?? user?.id ?? user?.userId,
+                score: (() => {
+                    const s = Number(quizResult?.score ?? (quizRow as any)?.myScore ?? 0);
+                    return Number.isFinite(s) && s >= 0 ? s : 0;
+                })(),
                 answers: answersForSubmit,
                 timeTaken: Number(
                     quizResult?.timeTaken ??
@@ -1793,7 +1856,7 @@ export function StudentQuizSection({
 
     const shareQuizWithLecturer = async (quizRow?: any) => {
         const row = quizRow || selectedQuiz;
-        const quizId = Number((row as any)?.quizId ?? row?.id);
+        const quizId = coercePositiveQuizId((row as any)?.quizId ?? row?.id);
         const resultKey = String((row as any)?.resultId || '').trim();
 
         if (isQuizAlreadyShared(row)) {
@@ -1814,7 +1877,7 @@ export function StudentQuizSection({
             return;
         }
 
-        if (!Number.isFinite(quizId) || quizId <= 0) {
+        if (quizId == null) {
             showNotification({
                 type: 'warning',
                 title: 'Share Quiz',
@@ -1916,10 +1979,19 @@ export function StudentQuizSection({
                 return;
             }
 
-            const quizId = Number(
-                regeneratedQuizId ?? detail?.quiz_id ?? quizRow?.quizId ?? quizRow?.id ?? cache?.quizId
-            );
-            const quizToTake = {
+        const quizId = coercePositiveQuizId(
+            regeneratedQuizId ?? detail?.quiz_id ?? quizRow?.quizId ?? quizRow?.id ?? cache?.quizId
+        );
+        if (quizId == null) {
+            showNotification({
+                type: 'warning',
+                title: 'Retake Quiz',
+                message: 'Could not resolve a valid quiz id for this quiz.',
+            });
+            return;
+        }
+
+        const quizToTake = {
                 ...stripCompletedAttemptFields(quizRow),
                 id: quizId,
                 quizId,
@@ -1958,9 +2030,9 @@ export function StudentQuizSection({
     };
 
     const recordAttemptStart = async (quizId: string | number | undefined) => {
-        const id = Number(quizId);
-        if (!Number.isFinite(id) || id <= 0) return;
-        
+        const id = coercePositiveQuizId(quizId);
+        if (id == null) return;
+
         try {
             console.log('[recordAttemptStart] payload =', {
                 quizId: id,
@@ -1970,13 +2042,15 @@ export function StudentQuizSection({
 
             await api.post('/quiz/attempts', {
                 quizId: id,
+                quiz_id: id,
                 userId: user?.user_id ?? user?.id ?? user?.userId,
+                user_id: user?.user_id ?? user?.id ?? user?.userId,
                 phase: 'start',
             });
             // Refresh list in background; do not block opening the quiz modal.
             void loadConnectedData({ quiet: true });
         } catch (err: unknown) {
-            console.warn('[recordAttemptStart] failed (quiz can still open):', err);
+            console.warn('[recordAttemptStart] failed (quiz can still open):', err, getApiErrorMessage(err));
         }
     };
 
@@ -1995,9 +2069,19 @@ export function StudentQuizSection({
                     });
                     return;
                 }
+                const resolvedId = coercePositiveQuizId(detail.quiz_id ?? quiz.id);
+                if (resolvedId == null) {
+                    showNotification({
+                        type: 'warning',
+                        title: 'Take Quiz',
+                        message: 'Could not resolve a valid quiz id for this quiz.',
+                    });
+                    return;
+                }
                 const generatedQuiz = {
                     ...quiz,
-                    id: detail.quiz_id || quiz.id,
+                    id: resolvedId,
+                    quizId: resolvedId,
                     title: detail.title || quiz.title,
                     questions,
                     passPercentage: finitePassPercent(
@@ -2119,11 +2203,27 @@ export function StudentQuizSection({
                 return;
             }
 
+            const resolvedPersistId = coercePositiveQuizId(persistedQuizId);
+            if (resolvedPersistId == null) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Generate Quiz',
+                    message: 'Backend returned an invalid quiz id after generation.',
+                });
+                setQuizGeneratingStatus('failed', {
+                    jobId: newJobId,
+                    title: String(quiz?.title || 'AI Quiz'),
+                    error: 'Invalid quiz id from server.',
+                });
+                return;
+            }
+
             const finalQuestions = questions;
 
             const generatedQuiz = {
                 ...quiz,
-                id: persistedQuizId,
+                id: resolvedPersistId,
+                quizId: resolvedPersistId,
                 questions: finalQuestions,
                 passPercentage: Number(quiz.passPercentage ?? 70),
             };
@@ -2281,7 +2381,8 @@ export function StudentQuizSection({
             passThreshold,
             passed,
         };
-        appendQuizResultCache({
+        appendQuizResultCache(
+            {
             attemptId: null,
             quizId: Number(selectedQuiz.id),
             resultId,
@@ -2294,14 +2395,16 @@ export function StudentQuizSection({
             passPercentage: Number(selectedQuiz?.passPercentage ?? 70),
             duration: Number(selectedQuiz?.duration ?? 10),
             myScore: score,
-        });
+            },
+            viewerIdStr
+        );
 
         setQuizResult(result);
         setShowQuizTaking(false);
 
         const submitQuizId = resolveStudentQuizId(selectedQuiz);
         const priorSharedAt =
-            submitQuizId != null ? readSharedQuizIdMap().get(submitQuizId) : undefined;
+            submitQuizId != null ? readSharedQuizIdMap(viewerIdStr).get(submitQuizId) : undefined;
         const alreadySharedQuiz =
             Boolean(priorSharedAt) ||
             (submitQuizId != null &&
@@ -2371,10 +2474,27 @@ export function StudentQuizSection({
                       }
                     : {}),
             }));
+            const scorePayload = Number(scorePercent);
+            const safeScore = Number.isFinite(scorePayload) && scorePayload >= 0 ? scorePayload : 0;
+            const quizIdNum = coercePositiveQuizId((selectedQuiz as any)?.quizId ?? selectedQuiz?.id);
+            if (quizIdNum == null) {
+                console.warn('[handleSubmitQuiz] skip attempt save: invalid quiz id', selectedQuiz?.id);
+                showNotification({
+                    type: 'warning',
+                    title: 'Quiz result not saved',
+                    message:
+                        'Could not save your attempt because the quiz id is invalid. Try starting the quiz again from Available quizzes.',
+                });
+                await loadConnectedData({ quiet: true });
+                return;
+            }
+            const uidForAttempt = user?.user_id ?? user?.id ?? user?.userId;
             const attemptRes: any = await api.post('/quiz/attempts', {
-                quizId: selectedQuiz.id,
-                userId: user?.user_id ?? user?.id ?? user?.userId,
-                score: scorePercent,
+                quizId: quizIdNum,
+                quiz_id: quizIdNum,
+                userId: uidForAttempt,
+                user_id: uidForAttempt,
+                score: safeScore,
                 answers: answersForSubmit,
                 timeTaken: result.timeTaken,
                 phase: 'complete',
@@ -2417,10 +2537,11 @@ export function StudentQuizSection({
                 attemptRes?.attemptId ??
                 null;
             if (createdAttemptId != null) {
-                const serverResultId = `${selectedQuiz.id}-${createdAttemptId}`;
-                appendQuizResultCache({
+                const serverResultId = `${quizIdNum}-${createdAttemptId}`;
+                appendQuizResultCache(
+                    {
                     attemptId: Number(createdAttemptId),
-                    quizId: Number(selectedQuiz.id),
+                    quizId: quizIdNum,
                     resultId: serverResultId,
                     answersSnapshot: answers,
                     questionsSnapshot: safeQuizQuestions,
@@ -2431,7 +2552,9 @@ export function StudentQuizSection({
                     passPercentage: Number(selectedQuiz?.passPercentage ?? 70),
                     duration: Number(selectedQuiz?.duration ?? 10),
                     myScore: Number((quizResult as any)?.score ?? result.score),
-                });
+                    },
+                    viewerIdStr
+                );
                 const nowIso = new Date().toISOString();
                 const scorePct = Number((quizResult as any)?.score ?? result.score);
                 setCompletedQuizzes((prev) =>
@@ -2454,7 +2577,7 @@ export function StudentQuizSection({
             }
             await loadConnectedData({ quiet: true });
         } catch (err) {
-        console.error('[handleSubmitQuiz] save attempt failed:', err);
+            console.error('[handleSubmitQuiz] save attempt failed:', err, getApiErrorMessage(err));
         showNotification({
             type: 'warning',
             title: 'Quiz result not saved',
@@ -2595,10 +2718,13 @@ export function StudentQuizSection({
                                 let reviewPayload: any = null;
                                 let reviewData: any = null;
                                 let hasReviewQuestions = false;
-                                const rowCache = findQuizResultCacheEntry({
-                                    attemptId,
-                                    quizId,
-                                });
+                                const rowCache = findQuizResultCacheEntry(
+                                    {
+                                        attemptId,
+                                        quizId,
+                                    },
+                                    viewerIdStr
+                                );
                                 const snapshotQuestionsRaw = Array.isArray((quiz as any)?.questionsSnapshot)
                                     ? (quiz as any).questionsSnapshot
                                     : Array.isArray(rowCache?.questionsSnapshot)

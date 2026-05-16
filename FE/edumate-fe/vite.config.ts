@@ -27,6 +27,11 @@ export default defineConfig(({ mode }) => {
           timeout: 180_000,
           proxyTimeout: 180_000,
         },
+        '/uploads': {
+          target: proxyTarget,
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
     test: {

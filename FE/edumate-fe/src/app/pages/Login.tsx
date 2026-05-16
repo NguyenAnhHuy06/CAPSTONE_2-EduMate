@@ -46,7 +46,9 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
       const msg = data?.message != null ? String(data.message).trim() : '';
       const code = data?.code;
 
-      if (status === 401) {
+      if (status === 403) {
+        setError(msg || 'Please verify your email before signing in.');
+      } else if (status === 401) {
         if (msg) {
           setError(msg);
         } else if (code === 'WRONG_PASSWORD') {

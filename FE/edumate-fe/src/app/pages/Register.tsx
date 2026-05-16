@@ -53,8 +53,8 @@ export function Register({ onBackToLogin }: RegisterProps) {
 
     if (!formData.password) {
       newErrors.password = 'Password is required';
-    } else if (formData.password.length < 6) {
-      newErrors.password = 'Password must be at least 6 characters';
+    } else if (formData.password.length < 8) {
+      newErrors.password = 'Password must be at least 8 characters';
     }
 
     if (!formData.confirmPassword) {
@@ -107,7 +107,10 @@ export function Register({ onBackToLogin }: RegisterProps) {
         user_code: formData.id,
       });
       if (!res?.success) {
-        setErrors({ email: 'Registration failed.' });
+        const msg = String(res?.message || '').trim();
+        setErrors({
+          email: msg || 'Registration failed.',
+        });
         return;
       }
       setStep('otp');

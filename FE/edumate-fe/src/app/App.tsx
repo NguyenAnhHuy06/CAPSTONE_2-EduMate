@@ -80,7 +80,7 @@ export default function App() {
     setShowRegister(false);
   };
 
-  const handleRegister = (role: 'instructor' | 'student', data: any) => {
+  const handleRegister = (role: 'instructor' | 'student' | 'admin', data: any) => {
     setUserRole(role);
     setUserData(data);
     setIsLoggedIn(true);

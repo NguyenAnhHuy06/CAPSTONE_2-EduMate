@@ -506,6 +506,10 @@ app.post("/api/auth/register", async (req, res) => {
   if (existed) {
     return res.status(409).json({ success: false, message: "Email already registered." });
   }
+  const codeTaken = users.some((u) => String(u.user_code || "").trim().toLowerCase() === code.toLowerCase());
+  if (codeTaken) {
+    return res.status(409).json({ success: false, message: "This Student/Lecturer ID is already registered." });
+  }
   const otp = String(Math.floor(100000 + Math.random() * 900000));
   const password_hash = await bcrypt.hash(pw, 10);
   pendingRegs.set(em, {
@@ -1213,10 +1217,21 @@ function historyOwnerMatchesQuery(uid, createdBy) {
  * Shape matches FE usage in Generate-Quizz.html.
  */
 app.get("/api/quizzes/history", (req, res) => {
-  const uid = req.query?.userId != null ? String(req.query.userId) : null;
+  const uid = req.query?.userId != null ? String(req.query.userId).trim() : null;
   const ownerOnly =
     String(req.query?.ownerOnly ?? "false").toLowerCase() === "true" ||
     String(req.query?.onlyMine ?? "false").toLowerCase() === "true";
+  /** Student / profile: ?userId=… without ownerOnly — only quizzes this user completed. */
+  const studentAttemptMode = Boolean(uid) && !ownerOnly;
+
+  function attemptUserMatches(aUserId, queryUid) {
+    if (queryUid == null || String(queryUid).trim() === "") return false;
+    const q = String(queryUid).trim();
+    const a = aUserId;
+    if (a == null || a === "") return false;
+    return String(a).trim() === q || Number(a) === Number(q);
+  }
+
   const attemptsByQuiz = new Map();
   for (const a of quizAttempts) {
     if (String(a.status || "") !== "completed") continue;
@@ -1227,6 +1242,10 @@ app.get("/api/quizzes/history", (req, res) => {
 
   const historyRows = quizzes
     .filter((q) => {
+      if (studentAttemptMode) {
+        const mine = (attemptsByQuiz.get(q.id) || []).filter((a) => attemptUserMatches(a.userId, uid));
+        return mine.length > 0;
+      }
       if (!ownerOnly || !uid) return true;
       // Keep published list behavior as before (shared/global),
       // only restrict non-published rows to owner.
@@ -1234,6 +1253,18 @@ app.get("/api/quizzes/history", (req, res) => {
       return historyOwnerMatchesQuery(uid, q.createdBy);
     })
     .map((q) => {
+      const allAttempts = attemptsByQuiz.get(q.id) || [];
+      let relevantAttempts = allAttempts;
+      if (studentAttemptMode) {
+        relevantAttempts = allAttempts.filter((a) => attemptUserMatches(a.userId, uid));
+      }
+      relevantAttempts = [...relevantAttempts].sort((a, b) => {
+        const ta = new Date(a.completedAt || a.createdAt || 0).getTime();
+        const tb = new Date(b.completedAt || b.createdAt || 0).getTime();
+        return tb - ta;
+      });
+      const latest = relevantAttempts[0] || null;
+
       const sharedByUserId = Number(q.sharedByUserId ?? 0) || null;
       const sharedUser =
         sharedByUserId != null
@@ -1255,13 +1286,21 @@ app.get("/api/quizzes/history", (req, res) => {
         createdAt: q.createdAt,
         publishedAt: q.publishedAt || null,
         isPublished: Boolean(q.isPublished),
-        lastAttemptAt: q.lastAttemptAt,
-        scorePercent: q.scorePercent,
+        lastAttemptAt:
+          latest?.completedAt ||
+          latest?.createdAt ||
+          q.lastAttemptAt,
+        scorePercent:
+          latest != null && latest.scorePercent != null ? latest.scorePercent : q.scorePercent,
         questionCount: q.questionsCount,
-        attemptsCount: (attemptsByQuiz.get(q.id) || []).length,
-        lastAttemptId: ((attemptsByQuiz.get(q.id) || [])[0] || {}).id || null,
+        attemptsCount: studentAttemptMode ? relevantAttempts.length : allAttempts.length,
+        lastAttemptId: latest?.id ?? null,
+        timeTakenSeconds: latest?.time_taken_seconds ?? null,
+        time_taken_seconds: latest?.time_taken_seconds ?? null,
         courseCode: q.courseCode || "DOC",
         createdBy: q.createdBy ?? null,
+        /** Present when list is scoped to one student's attempts (mock student history). */
+        attemptUserId: studentAttemptMode && uid ? Number(uid) || uid : null,
         sharedForReview: Boolean(q.sharedForReview),
         sharedFromStudent: Boolean(q.sharedForReview),
         sharedAt: q.sharedAt || null,
@@ -1270,6 +1309,8 @@ app.get("/api/quizzes/history", (req, res) => {
         sharedByUserCode: resolvedSharedCode,
         lecturerEdited: Boolean(q.lecturerEdited),
         lecturerEditedAt: q.lecturerEditedAt || null,
+        s3Key: q.sourceKey ?? q.s3Key ?? null,
+        sourceKey: q.sourceKey ?? q.s3Key ?? null,
       };
     });
 
@@ -1277,6 +1318,7 @@ app.get("/api/quizzes/history", (req, res) => {
     success: true,
     total: historyRows.length,
     data: historyRows,
+    scopedToAttemptUser: Boolean(studentAttemptMode),
   });
 });
 
@@ -2080,13 +2122,16 @@ app.delete("/api/questions/bank/:id", async (req, res) => {
  * FE sends { quizId, userId, score }.
  */
 app.post("/api/quiz/attempts", (req, res) => {
-  const { quizId, userId, score, phase, answers, timeTaken } = req.body || {};
-  const qid = Number(quizId);
+  const body = req.body || {};
+  const { score, phase, answers, timeTaken } = body;
+  const quizIdRaw = body.quizId ?? body.quiz_id;
+  const userIdRaw = body.userId ?? body.user_id;
+  const qid = Number(quizIdRaw);
   const answersLen = Array.isArray(answers) ? answers.length : 0;
   console.log("[QUIZ_ATTEMPT]", {
     phase: String(phase || "complete"),
     quizId: qid,
-    userId: userId ?? null,
+    userId: userIdRaw ?? null,
     answersLen,
   });
 
@@ -2097,7 +2142,7 @@ app.post("/api/quiz/attempts", (req, res) => {
     });
   }
 
-  const quizRow = quizzes.find((q) => q.id === qid);
+  const quizRow = quizzes.find((q) => Number(q.id) === Number(qid));
   if (!quizRow) {
     return res.status(404).json({
       success: false,
@@ -2110,7 +2155,7 @@ app.post("/api/quiz/attempts", (req, res) => {
     quizAttempts.unshift({
       id: Date.now(),
       quizId: qid,
-      userId: userId ?? null,
+      userId: userIdRaw ?? null,
       score: null,
       scorePercent: null,
       totalQuestions: Number(quizRow.questionsCount) || 0,
@@ -2204,7 +2249,7 @@ app.post("/api/quiz/attempts", (req, res) => {
   quizAttempts.unshift({
     id: attemptId,
     quizId: qid,
-    userId: userId ?? null,
+    userId: userIdRaw ?? null,
     score: finalScore,
     scorePercent,
     totalQuestions: questionsCount,
