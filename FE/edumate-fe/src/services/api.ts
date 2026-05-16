@@ -53,9 +53,78 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+function showCustomModal(message: string, callback?: () => void) {
+  if (typeof document === 'undefined') return;
+  const overlay = document.createElement('div');
+  overlay.style.position = 'fixed';
+  overlay.style.inset = '0';
+  overlay.style.backgroundColor = 'rgba(0,0,0,0.5)';
+  overlay.style.display = 'flex';
+  overlay.style.alignItems = 'center';
+  overlay.style.justifyContent = 'center';
+  overlay.style.zIndex = '99999';
+
+  const modal = document.createElement('div');
+  modal.style.backgroundColor = 'white';
+  modal.style.padding = '24px';
+  modal.style.borderRadius = '12px';
+  modal.style.maxWidth = '400px';
+  modal.style.width = '100%';
+  modal.style.boxShadow = '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)';
+  modal.style.margin = '0 16px';
+
+  const title = document.createElement('h3');
+  title.innerText = 'EduMate Notification';
+  title.style.fontSize = '18px';
+  title.style.fontWeight = 'bold';
+  title.style.marginBottom = '12px';
+  title.style.color = '#111827';
+  title.style.fontFamily = 'sans-serif';
+
+  const text = document.createElement('p');
+  text.innerText = message;
+  text.style.color = '#4b5563';
+  text.style.marginBottom = '24px';
+  text.style.fontSize = '14px';
+  text.style.fontFamily = 'sans-serif';
+
+  const btn = document.createElement('button');
+  btn.innerText = 'OK';
+  btn.style.backgroundColor = '#2563eb';
+  btn.style.color = 'white';
+  btn.style.padding = '10px 16px';
+  btn.style.borderRadius = '6px';
+  btn.style.fontSize = '14px';
+  btn.style.fontWeight = '500';
+  btn.style.border = 'none';
+  btn.style.cursor = 'pointer';
+  btn.style.width = '100%';
+  btn.style.fontFamily = 'sans-serif';
+
+  btn.onclick = () => {
+    document.body.removeChild(overlay);
+    if (callback) callback();
+  };
+
+  modal.appendChild(title);
+  modal.appendChild(text);
+  modal.appendChild(btn);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
 api.interceptors.response.use(
   (res) => res.data,
-  (err) => Promise.reject(err)
+  (err) => {
+    if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+      showCustomModal('Your session has expired or account is deactivated. Redirecting to login.', () => {
+        const candidates = ['edumate_token', 'accessToken', 'token'];
+        candidates.forEach(key => localStorage.removeItem(key));
+        window.location.href = '/login';
+      });
+    }
+    return Promise.reject(err);
+  }
 )
 
 /**

@@ -6,6 +6,9 @@ import {
   BookOpen, 
   UserPlus, 
   UserMinus, 
+  UserX,
+  UserCheck,
+  Trash2,
   CheckCircle, 
   XCircle, 
   Clock, 
@@ -38,7 +41,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
   // Data States
   const [stats, setStats] = useState<any>(null);
   const [users, setUsers] = useState<any[]>([]);
-  const [pendingDocs, setPendingDocs] = useState<any[]>([]);
+  const [documents, setDocuments] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
   const [reports, setReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,11 +53,13 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
   const [logStats, setLogStats] = useState<any>(null);
   const [archiving, setArchiving] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState<string | null>(null);
+  const [deleteConfirmUser, setDeleteConfirmUser] = useState<string | null>(null);
+  const [successModal, setSuccessModal] = useState<{ title: string; message: string } | null>(null);
 
   const menuItems = [
     { id: 'overview', label: 'Overview', icon: Home },
     { id: 'users', label: 'User Management', icon: Users },
-    { id: 'moderation', label: 'Document Moderation', icon: ShieldCheck },
+    { id: 'moderation', label: 'Document Library Management', icon: ShieldCheck },
     { id: 'donations', label: 'Donation Management', icon: Heart },
     { id: 'logs', label: 'Activity Logs', icon: Activity },
     { id: 'donate', label: 'Donate', icon: Heart },
@@ -70,8 +75,8 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
         const res: any = await api.get('/admin/users');
         setUsers(res.data || []);
       } else if (activeTab === 'moderation') {
-        const res: any = await api.get('/admin/documents/pending');
-        setPendingDocs(res.data || []);
+        const res: any = await api.get('/admin/documents');
+        setDocuments(res.data || []);
       } else if (activeTab === 'reports') {
         const res: any = await api.get('/admin/reports');
         setReports(res.data || []);
@@ -89,8 +94,13 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
         const res: any = await api.get(`/donations/admin${query}`);
         setDonations(res.data || []);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error fetching admin data:', err);
+      if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+        alert('Your session has expired or account is deactivated. Redirecting to login.');
+        localStorage.removeItem('token');
+        window.location.href = '/login';
+      }
     } finally {
       setLoading(false);
     }
@@ -109,20 +119,41 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
     }
   };
 
-  const handleToggleUserStatus = async (userId: string, currentStatus: boolean) => {
+  const handleBanUser = async (userId: string, currentStatus: boolean) => {
     try {
-      await api.patch(`/admin/users/${userId}/status`, { is_active: !currentStatus });
+      await api.patch(`/admin/users/${userId}/activate`, { is_active: !currentStatus });
       setUsers(users.map(u => u.user_id === userId ? { ...u, is_active: !currentStatus } : u));
     } catch (err) {
-      alert('Failed to toggle status');
+      alert('Failed to update user status');
+    }
+  };
+
+  const handleDeleteUser = (userId: string) => {
+    setDeleteConfirmUser(userId);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteConfirmUser) return;
+    try {
+      await api.delete(`/admin/users/${deleteConfirmUser}`);
+      setUsers(users.filter(u => u.user_id !== deleteConfirmUser));
+    } catch (err) {
+      alert('Failed to delete user');
+    } finally {
+      setDeleteConfirmUser(null);
     }
   };
 
   const handleModerateDoc = async (docId: number, action: 'verify' | 'reject') => {
     try {
+      const doc = documents.find(d => d.document_id === docId);
       await api.patch(`/admin/documents/${docId}/${action}`);
-      setPendingDocs(pendingDocs.filter(d => d.document_id !== docId));
+      setDocuments(documents.filter(d => d.document_id !== docId));
       if (activeTab === 'overview') fetchData(); // Refresh stats
+      setSuccessModal({
+        title: 'EduMate Notification',
+        message: `Document "${doc?.title || docId}" has been ${action === 'verify' ? 'verified' : 'rejected'} successfully.`
+      });
     } catch (err) {
       alert(`Failed to ${action} document`);
     }
@@ -171,7 +202,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
     setArchiving(true);
     setArchiveMessage(null);
     try {
-      const res: any = await api.post('/admin/logs/archive-now', { retentionDays: 30 });
+      const res: any = await api.post('/admin/logs/archive-now', { retentionDays: 0 });
       setArchiveMessage(res.message || 'Archiving complete.');
       fetchData(); // Refresh archives and logs
     } catch (err: any) {
@@ -317,18 +348,27 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
                           </select>
                         </td>
                         <td className="p-4">
-                          <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${u.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                          <span className={`inline-flex justify-center items-center w-[85px] py-1 rounded-full text-[10px] font-bold ${u.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                             {u.is_active ? 'ACTIVE' : 'DEACTIVATED'}
                           </span>
                         </td>
                         <td className="p-4 text-right">
-                          <button 
-                            onClick={() => handleToggleUserStatus(u.user_id, u.is_active)}
-                            className={`p-2 rounded-lg transition-colors ${u.is_active ? 'text-red-600 hover:bg-red-50' : 'text-green-600 hover:bg-green-50'}`}
-                            title={u.is_active ? 'Deactivate' : 'Activate'}
-                          >
-                            {u.is_active ? <UserMinus size={18} /> : <UserPlus size={18} />}
-                          </button>
+                          <div className="flex justify-end gap-2">
+                            <button 
+                              onClick={() => handleBanUser(u.user_id, u.is_active)}
+                              className={`p-2 rounded-lg transition-colors ${u.is_active ? 'text-orange-600 hover:bg-orange-50' : 'text-green-600 hover:bg-green-50'}`}
+                              title={u.is_active ? 'Ban User' : 'Unban User'}
+                            >
+                              {u.is_active ? <UserX size={18} /> : <UserCheck size={18} />}
+                            </button>
+                            <button 
+                              onClick={() => handleDeleteUser(u.user_id)}
+                              className="p-2 rounded-lg transition-colors text-red-600 hover:bg-red-50"
+                              title="Delete User"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -340,10 +380,10 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
 
           {activeTab === 'moderation' && (
             <div className="space-y-6">
-              <div className="bg-yellow-50 border border-yellow-100 p-4 rounded-lg flex items-start gap-3">
-                <Clock className="text-yellow-600 shrink-0" size={20} />
-                <p className="text-yellow-800 text-sm">
-                  Documents listed here are pending review. Verification triggers the AI indexing and embedding process.
+              <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg flex items-start gap-3">
+                <BookOpen className="text-blue-600 shrink-0" size={20} />
+                <p className="text-blue-800 text-sm">
+                  Document library management. View all documents and their verification status.
                 </p>
               </div>
 
@@ -351,47 +391,43 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
                 <table className="w-full text-left">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-100">
-                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Title / Course</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Document</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Status</th>
                       <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Uploader</th>
                       <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Date</th>
-                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase text-right">Moderation</th>
+                      <th className="p-4 text-xs font-semibold text-gray-500 uppercase">Time</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {pendingDocs.length === 0 ? (
+                    {documents.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="p-8 text-center text-gray-400">No documents pending moderation.</td>
+                        <td colSpan={5} className="p-8 text-center text-gray-400">No documents found.</td>
                       </tr>
-                    ) : pendingDocs.map((doc) => (
-                      <tr key={doc.document_id} className="border-b border-gray-50 hover:bg-gray-50">
-                        <td className="py-3 px-4 font-medium text-sm">
-                          <div className="text-gray-900">{doc.title}</div>
-                          {(doc.course_code || doc.course_name) && (
-                            <div className="text-[11px] text-gray-400 font-normal mt-0.5">
-                              {doc.course_code || ''} {doc.course_code && doc.course_name ? '•' : ''} {doc.course_name || ''}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 text-sm">{doc.uploader_name || 'System'}</td>
-                        <td className="py-3 px-4 text-sm text-gray-400">{new Date(doc.created_at).toLocaleDateString()}</td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="flex justify-end gap-2">
-                            <button 
-                              onClick={() => handleModerateDoc(doc.document_id, 'verify')}
-                              className="flex items-center gap-1 px-2.5 py-1 bg-green-600 text-white rounded text-[11px] font-medium hover:bg-green-700 transition-colors"
-                            >
-                              <CheckCircle size={13} /> Verify
-                            </button>
-                            <button 
-                              onClick={() => handleModerateDoc(doc.document_id, 'reject')}
-                              className="flex items-center gap-1 px-2.5 py-1 bg-red-600 text-white rounded text-[11px] font-medium hover:bg-red-700 transition-colors"
-                            >
-                              <XCircle size={13} /> Reject
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                    ) : documents.map((doc) => {
+                      const dateObj = new Date(doc.created_at);
+                      const dateStr = dateObj.toLocaleDateString();
+                      const timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                      return (
+                        <tr key={doc.document_id} className="border-b border-gray-50 hover:bg-gray-50">
+                          <td className="py-3 px-4 font-medium text-sm">
+                            <div className="text-gray-900">{doc.title}</div>
+                            {(doc.course_code || doc.course_name) && (
+                              <div className="text-[11px] text-gray-400 font-normal mt-0.5">
+                                {doc.course_code || ''} {doc.course_code && doc.course_name ? '•' : ''} {doc.course_name || ''}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-sm">
+                            <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${doc.status === 'verified' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                              {doc.status === 'verified' ? 'VERIFIED' : 'PENDING'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-sm">{doc.uploader_name || 'System'}</td>
+                          <td className="py-3 px-4 text-sm text-gray-500">{dateStr}</td>
+                          <td className="py-3 px-4 text-sm text-gray-500">{timeStr}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -503,7 +539,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
                     ) : (
                       <Archive size={16} />
                     )}
-                    {archiving ? 'Archiving...' : 'Archive Now (30+ days)'}
+                    {archiving ? 'Archiving...' : 'Archive All Logs Now'}
                   </button>
                 </div>
                 {archiveMessage && (
@@ -741,6 +777,58 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
           )}
         </div>
       </div>
+
+      {/* Custom Delete Modal */}
+      {deleteConfirmUser && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 shadow-xl transform transition-all">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-red-100 rounded-full text-red-600">
+                <AlertCircle size={24} />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900">EduMate Confirm</h3>
+            </div>
+            <p className="text-gray-600 mb-6">Are you sure you want to delete this user? This action cannot be undone.</p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteConfirmUser(null)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="px-4 py-2 bg-red-600 border border-transparent rounded-lg text-sm font-medium text-white hover:bg-red-700 transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Success Modal */}
+      {successModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full mx-4 shadow-xl transform transition-all">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-green-100 rounded-full text-green-600">
+                <CheckCircle size={24} />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900">{successModal.title}</h3>
+            </div>
+            <p className="text-gray-600 mb-6">{successModal.message}</p>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setSuccessModal(null)}
+                className="px-4 py-2 bg-blue-600 border border-transparent rounded-lg text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
