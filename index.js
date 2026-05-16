@@ -32,7 +32,7 @@ const { normalizeQuestionsForClient } = require("./src/utils/normalizeQuizClient
 require("./src/models/associations");
 
 const app = express();
-const PORT = Number(process.env.PORT || 5000);
+const PORT = Number(process.env.PORT || 3001);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 /** Client-facing copy only — never include stack traces, SQL, or infra names. */
