@@ -8,6 +8,7 @@ import { Profile } from '../Profile';
 import { QuizManagement, type InitialAiDocumentPayload } from '../lecturer/QuizManagement';
 import api from '@/services/api';
 import { NotificationBell } from '@/app/components/NotificationBell';
+import { storeCommentNavigateTarget } from '@/app/utils/commentNavigation';
 
 const LECTURER_QUIZ_GENERATING_KEY = 'edumate_lecturer_quiz_generating';
 const LECTURER_QUIZ_AUTOSTART_KEY = 'edumate_lecturer_quiz_autostart';
@@ -295,7 +296,16 @@ export function InstructorDashboard({
         {/* Top Bar for Mobile and User Info */}
         <div className="bg-white border-b border-gray-200 p-4 lg:flex lg:justify-end hidden">
           <div className="flex items-center gap-3">
-            <NotificationBell />
+            <NotificationBell
+              onOpenServerNotification={(action) => {
+                storeCommentNavigateTarget({
+                  documentId: action.documentId ?? null,
+                  s3Key: action.s3Key ?? null,
+                  commentId: action.commentId ?? null,
+                });
+                setActiveTab('documents');
+              }}
+            />
 
             <div className="text-right">
               <p className="text-gray-900">{user.name}</p>

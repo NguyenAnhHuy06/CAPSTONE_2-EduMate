@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Bell } from 'lucide-react';
 import api from '@/services/api';
+import {
+  parseDocumentCommentAction,
+  type DocumentCommentAction,
+} from '@/app/utils/commentNavigation';
 
 type ServerNotification = {
   notification_id: number;
@@ -11,6 +15,7 @@ type ServerNotification = {
   message?: string;
   is_read?: boolean;
   created_at?: string;
+  action_payload?: unknown;
 };
 
 type LocalNotification = {
@@ -26,12 +31,17 @@ type NotificationBellProps = {
   localNotifications?: LocalNotification[];
   onClearLocalNotifications?: () => void;
   onOpenLocalNotification?: (notification: LocalNotification) => void;
+  onOpenServerNotification?: (
+    action: DocumentCommentAction,
+    notification: ServerNotification
+  ) => void;
 };
 
 export function NotificationBell({
   localNotifications = [],
   onClearLocalNotifications,
   onOpenLocalNotification,
+  onOpenServerNotification,
 }: NotificationBellProps) {
   const [open, setOpen] = useState(false);
   const [serverNotifs, setServerNotifs] = useState<ServerNotification[]>([]);
@@ -59,6 +69,29 @@ export function NotificationBell({
       setLoading(false);
     }
   }, []);
+
+  const markServerNotificationRead = useCallback(async (notificationId: number) => {
+    try {
+      await api.patch(`/notifications/${notificationId}/read`);
+      setServerNotifs((prev) => prev.filter((n) => n.notification_id !== notificationId));
+    } catch (err) {
+      console.error('Failed to mark notification as read:', err);
+    }
+  }, []);
+
+  const handleOpenServerNotification = useCallback(
+    async (notification: ServerNotification) => {
+      const action = parseDocumentCommentAction(notification.action_payload);
+      if (action?.kind === 'document_comment') {
+        onOpenServerNotification?.(action, notification);
+        await markServerNotificationRead(notification.notification_id);
+        setOpen(false);
+        return;
+      }
+      await markServerNotificationRead(notification.notification_id);
+    },
+    [markServerNotificationRead, onOpenServerNotification]
+  );
 
   const clearServerNotifications = useCallback(async () => {
     try {
@@ -145,10 +178,17 @@ export function NotificationBell({
                           ? 'text-yellow-700'
                           : 'text-blue-700';
 
+                  const commentAction = parseDocumentCommentAction(n.action_payload);
+                  const isClickable = commentAction?.kind === 'document_comment';
+
                   return (
-                    <div
+                    <button
                       key={`server-${n.notification_id}`}
-                      className={`w-full text-left px-3 py-2 border-b border-gray-100 last:border-0 ${typeClass}`}
+                      type="button"
+                      onClick={() => void handleOpenServerNotification(n)}
+                      className={`w-full text-left px-3 py-2 border-b border-gray-100 last:border-0 transition-colors ${
+                        isClickable ? 'hover:bg-gray-50 cursor-pointer' : ''
+                      } ${typeClass}`}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <p className="text-sm text-gray-900 font-medium">
@@ -168,7 +208,10 @@ export function NotificationBell({
                           {new Date(n.created_at).toLocaleString('en-US')}
                         </p>
                       ) : null}
-                    </div>
+                      {isClickable ? (
+                        <p className="text-[11px] text-blue-600 mt-1">Tap to view comment</p>
+                      ) : null}
+                    </button>
                   );
                 })}
 

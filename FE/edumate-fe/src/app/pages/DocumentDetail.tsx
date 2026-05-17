@@ -40,6 +40,9 @@ interface DocumentDetailProps {
   /** Update comment/download count as soon as back to list */
   onCommentCountChange?: (count: number) => void;
   onDownloadSuccess?: () => void;
+  /** Scroll to and highlight a comment (e.g. from notification deep-link). */
+  highlightCommentId?: number | null;
+  onHighlightCommentHandled?: () => void;
 }
 
 type DiscussionComment = {
@@ -265,6 +268,8 @@ export function DocumentDetail ({
   onAutoOpenFlashcardHandled,
   onCommentCountChange,
   onDownloadSuccess,
+  highlightCommentId,
+  onHighlightCommentHandled,
 }: DocumentDetailProps) {
 
   const { showNotification } = useNotification()
@@ -303,6 +308,8 @@ export function DocumentDetail ({
   const [wordRendering, setWordRendering] = useState(false);
   const [wordRenderError, setWordRenderError] = useState('');
   const [didAutoOpenFlashcard, setDidAutoOpenFlashcard] = useState(false);
+  const discussionSectionRef = useRef<HTMLDivElement | null>(null);
+  const [highlightedCommentId, setHighlightedCommentId] = useState<number | null>(null);
 
   // Report Flow States
   const [showReportModal, setShowReportModal] = useState(false);
@@ -321,6 +328,30 @@ export function DocumentDetail ({
     setDidAutoOpenFlashcard(true);
     onAutoOpenFlashcardHandled?.();
   }, [autoOpenFlashcardMode, didAutoOpenFlashcard, onAutoOpenFlashcardHandled]);
+
+  useEffect(() => {
+    const targetId = Number(highlightCommentId);
+    if (!Number.isFinite(targetId) || targetId <= 0 || commentsLoading) return;
+
+    const scrollToComment = () => {
+      discussionSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const el = window.document.getElementById(`comment-${targetId}`);
+      if (el) {
+        window.setTimeout(() => {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setHighlightedCommentId(targetId);
+          window.setTimeout(() => setHighlightedCommentId(null), 2800);
+        }, 120);
+        onHighlightCommentHandled?.();
+        return true;
+      }
+      return false;
+    };
+
+    if (scrollToComment()) return;
+    discussionSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    onHighlightCommentHandled?.();
+  }, [highlightCommentId, commentsLoading, comments, onHighlightCommentHandled]);
 
   const fileExt = resolvePreviewFileExtension(document, previewFileExt);
   const isPdfPreview = fileExt === 'pdf';
@@ -1373,7 +1404,10 @@ export function DocumentDetail ({
         </div>
       </div>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
+      <div
+        ref={discussionSectionRef}
+        className="bg-white rounded-lg border border-gray-200 p-6"
+      >
         <h3 className="mb-4 flex items-center gap-2">
           <MessageSquare size={24} />
           Discussion ({comments.length})
@@ -1387,7 +1421,15 @@ export function DocumentDetail ({
 
         <div className="space-y-4 mb-6">
           {comments.map((comment) => (
-            <div key={comment.id} className="border-b border-gray-100 pb-4 last:border-0">
+            <div
+              key={comment.id}
+              id={`comment-${comment.id}`}
+              className={`border-b border-gray-100 pb-4 last:border-0 rounded-lg transition-colors ${
+                highlightedCommentId === comment.id
+                  ? 'bg-blue-50 ring-2 ring-blue-400 px-2 -mx-2'
+                  : ''
+              }`}
+            >
               <div className="flex flex-wrap items-center gap-2 mb-2">
                 <p className="text-gray-900 font-medium">{comment.author}</p>
                 <span

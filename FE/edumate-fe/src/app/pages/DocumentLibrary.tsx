@@ -3,6 +3,11 @@ import { Search, Filter, FileText, Download, MessageSquare, Eye, CheckCircle, Ch
 import { DocumentDetail } from '../pages/DocumentDetail'
 import api from '@/services/api'
 import { useNotification } from '../pages/NotificationContext'
+import {
+  EDUMATE_COMMENT_NAVIGATE_KEY,
+  clearCommentNavigateTarget,
+  type CommentNavigateTarget,
+} from '@/app/utils/commentNavigation'
 
 interface DocumentLibraryProps {
   userRole: 'instructor' | 'student'
@@ -225,6 +230,9 @@ export function DocumentLibrary({
   const [pendingFlashcardTarget, setPendingFlashcardTarget] = useState<any>(null)
   const [autoOpenFlashcardDocKey, setAutoOpenFlashcardDocKey] = useState<string | null>(null)
   const [autoOpenFlashcardMode, setAutoOpenFlashcardMode] = useState<'creator' | 'viewer' | null>(null)
+  const [pendingCommentTarget, setPendingCommentTarget] =
+    useState<CommentNavigateTarget | null>(null)
+  const [highlightCommentId, setHighlightCommentId] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -390,13 +398,64 @@ export function DocumentLibrary({
     localStorage.removeItem(STUDENT_FLASHCARD_NAVIGATE_KEY)
   }, [pendingFlashcardTarget, loading, documents])
 
+  useEffect(() => {
+    const readTarget = () => {
+      try {
+        const raw = localStorage.getItem(EDUMATE_COMMENT_NAVIGATE_KEY)
+        if (!raw) return
+        const parsed = JSON.parse(raw) as CommentNavigateTarget
+        setPendingCommentTarget(parsed)
+      } catch {
+        // ignore invalid payload
+      }
+    }
+    readTarget()
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === EDUMATE_COMMENT_NAVIGATE_KEY) readTarget()
+    }
+    const onCustom = () => readTarget()
+    window.addEventListener('storage', onStorage)
+    window.addEventListener('edumate:comment-navigate', onCustom)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('edumate:comment-navigate', onCustom)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!pendingCommentTarget || loading) return
+    const targetDocId = Number(pendingCommentTarget?.documentId)
+    const targetS3 = String(pendingCommentTarget?.s3Key || '').trim()
+    const targetCommentId = Number(pendingCommentTarget?.commentId)
+    const found = documents.find((d) => {
+      const docId = Number(d?.documentId ?? d?.id)
+      if (Number.isFinite(targetDocId) && Number.isFinite(docId) && docId === targetDocId) {
+        return true
+      }
+      if (targetS3 && String(d?.s3Key || '').trim() === targetS3) return true
+      return false
+    })
+    if (!found) return
+    setSelectedDocument(found)
+    if (Number.isFinite(targetCommentId) && targetCommentId > 0) {
+      setHighlightCommentId(targetCommentId)
+    }
+    setPendingCommentTarget(null)
+    clearCommentNavigateTarget()
+  }, [pendingCommentTarget, loading, documents])
+
   if (selectedDocument) {
     return (
       <DocumentDetail
         document={selectedDocument}
         userRole={userRole}
         user={user}
-        onBack={() => setSelectedDocument(null)}
+        onBack={() => {
+          setSelectedDocument(null)
+          setHighlightCommentId(null)
+        }}
+        highlightCommentId={highlightCommentId}
+        onHighlightCommentHandled={() => setHighlightCommentId(null)}
         onCommentCountChange={(count) => {
           const key = buildDocFocusKey(selectedDocument)
           setDocuments((prev) =>

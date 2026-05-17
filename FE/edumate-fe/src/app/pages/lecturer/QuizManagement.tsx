@@ -1137,10 +1137,12 @@ export function QuizManagement({
                         ? res.items
                         : [];
             const rows = rawRows.map((c: any, idx: number) => ({
-                id: c?.id ?? `comment-${idx}`,
-                author: c?.author ?? c?.createdByName ?? c?.userName ?? 'Lecturer',
+                id: String(c?.commentId ?? c?.id ?? `comment-${idx}`),
+                author: String(
+                    c?.authorLabel ?? c?.author ?? c?.createdByName ?? c?.userName ?? 'Lecturer'
+                ).trim(),
                 createdAt: c?.createdAt ?? c?.created_at ?? c?.time ?? '',
-                text: c?.text ?? c?.comment ?? c?.content ?? c?.body ?? '',
+                text: String(c?.text ?? c?.content ?? c?.comment ?? c?.body ?? '').trim(),
             }));
             setSharedComments(rows);
         } catch {

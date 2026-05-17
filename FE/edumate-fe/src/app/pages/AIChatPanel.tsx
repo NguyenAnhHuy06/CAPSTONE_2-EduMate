@@ -1,19 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Bot, Loader2, BookOpen, Minus, X, MessageCircle } from 'lucide-react';
+import { Bot, Loader2, Minus, X, MessageCircle } from 'lucide-react';
 import api from '../../services/api';
-
-interface Citation {
-  citation_id: number;
-  excerpt: string;
-  segment_id: number;
-}
 
 interface Message {
   message_id: number;
   role: 'user' | 'assistant';
   message_text: string;
-  citations?: Citation[];
   created_at?: string;
 }
 
@@ -50,6 +43,7 @@ export function AIChatPanel({
   const [minimized, setMinimized] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const prepareStartedRef = useRef(false);
 
   const scrollMessagesToBottom = (behavior: ScrollBehavior = 'smooth') => {
     const el = messagesContainerRef.current;
@@ -67,6 +61,34 @@ export function AIChatPanel({
     ta.style.height = 'auto';
     ta.style.height = `${Math.min(ta.scrollHeight, 88)}px`;
   }, [input]);
+
+  /** Index/embed in background when panel opens — first question is faster. */
+  useEffect(() => {
+    const hasDoc =
+      (s3Key != null && String(s3Key).trim() !== '') ||
+      (documentId != null && Number.isFinite(Number(documentId)));
+    if (!hasDoc || prepareStartedRef.current) return;
+
+    prepareStartedRef.current = true;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const payload: Record<string, unknown> = {};
+        if (s3Key != null && String(s3Key).trim() !== '') payload.s3Key = s3Key;
+        if (documentId != null && Number.isFinite(Number(documentId))) {
+          payload.documentId = Number(documentId);
+        }
+        await api.post('/chat/prepare', payload);
+      } catch {
+        /* silent — indexing still runs on first question if needed */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [s3Key, documentId]);
 
   const handleSend = async () => {
     const question = input.trim();
@@ -99,11 +121,17 @@ export function AIChatPanel({
       if (res.success && res.data) {
         if (!sessionId && res.data.sessionId) setSessionId(res.data.sessionId);
 
+        const contextFound = res.data.contextFound !== false;
+        let answerText = res.data.answer;
+        if (!contextFound && s3Key) {
+          answerText +=
+            '\n\n_(Note: This answer is not grounded in the open document. The file may have no extractable text or indexing failed.)_';
+        }
+
         const aiMsg: Message = {
           message_id: res.data.messageId || Date.now() + 1,
           role: 'assistant',
-          message_text: res.data.answer,
-          citations: res.data.citations || [],
+          message_text: answerText,
         };
         setMessages((prev) => [...prev, aiMsg]);
       } else {
@@ -229,21 +257,6 @@ export function AIChatPanel({
                     >
                       <p className="whitespace-pre-wrap m-0">{msg.message_text}</p>
                     </div>
-                    {msg.citations && msg.citations.length > 0 && (
-                      <div className="mt-1.5 space-y-1 pl-1">
-                        <p className="text-[10px] font-semibold text-gray-500 uppercase flex items-center gap-1 m-0">
-                          <BookOpen size={10} /> Sources
-                        </p>
-                        {msg.citations.map((cit) => (
-                          <div
-                            key={cit.citation_id}
-                            className="bg-white/90 border border-gray-200/80 px-2 py-1.5 rounded-lg text-[11px] text-gray-600 leading-snug"
-                          >
-                            &ldquo;{cit.excerpt}&rdquo;
-                          </div>
-                        ))}
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
