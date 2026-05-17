@@ -1142,22 +1142,6 @@ export function DocumentDetail ({
               <MessageSquare size={18} />
               Chat with AI
             </button>
-
-            {userRole === 'student' && (() => {
-              const rId = document?.documentId ?? document?.id;
-              const nId = rId != null && rId !== '' && Number.isFinite(Number(rId)) ? Number(rId) : null;
-              return nId !== null;
-            })() && (
-              <button
-                type="button"
-                onClick={() => setShowReportModal(true)}
-                title="Report inappropriate or incorrect content"
-                className="flex items-center gap-2 px-4 py-2 bg-white border border-red-600 text-red-600 rounded-lg hover:bg-red-50 transition-colors ml-auto"
-              >
-                <AlertCircle size={18} />
-                Report
-              </button>
-            )}
           </div>
 
           {userRole === 'instructor' && docStatus === 'pending' && (
@@ -1455,44 +1439,6 @@ export function DocumentDetail ({
           <p className="text-gray-400 text-xs mt-2">Tip: Ctrl+Enter to post</p>
         </div>
       </div>
-
-      {showReportModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full">
-            <h3 className="text-lg font-semibold mb-4 text-gray-900">Report Document</h3>
-            <p className="text-gray-600 mb-4 text-sm">
-              Please provide a reason for reporting this document. This will be reviewed by administrators.
-            </p>
-            <textarea
-              value={reportReason}
-              onChange={(e) => setReportReason(e.target.value)}
-              placeholder="E.g., Inappropriate content, incorrect information, spam..."
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-600 resize-none mb-4"
-              rows={4}
-            />
-            <div className="flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowReportModal(false);
-                  setReportReason('');
-                }}
-                className="px-4 py-2 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleReport()}
-                disabled={isReporting || !reportReason.trim()}
-                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
-              >
-                {isReporting ? 'Submitting...' : 'Submit Report'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
