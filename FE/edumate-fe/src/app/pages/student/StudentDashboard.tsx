@@ -24,6 +24,7 @@ import { ProgressTracker } from '../student/ProgressTracker';
 import { StudentQuizSection } from '../student/StudentQuizSection';
 import api from '../../../services/api';
 import { NotificationBell } from '@/app/components/NotificationBell';
+import { storeCommentNavigateTarget } from '@/app/utils/commentNavigation';
 
 interface StudentDashboardProps {
   user: any;
@@ -554,6 +555,14 @@ export function StudentDashboard({ user, onLogout, onUserUpdate, onOpenDonate }:
               onClearLocalNotifications={() => {
                 setSuccessNotifs([]);
                 localStorage.removeItem(STUDENT_SUCCESS_NOTIFICATIONS_KEY);
+              }}
+              onOpenServerNotification={(action) => {
+                storeCommentNavigateTarget({
+                  documentId: action.documentId ?? null,
+                  s3Key: action.s3Key ?? null,
+                  commentId: action.commentId ?? null,
+                });
+                setActiveTab('documents');
               }}
               onOpenLocalNotification={(n) => {
                 markNotificationAsRead(n.id);

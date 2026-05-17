@@ -11,6 +11,8 @@ import {
     X,
     Lightbulb,
     Share2,
+    RefreshCw,
+    MessageSquare,
 } from 'lucide-react';
 import { useNotification } from '../NotificationContext';
 import api, { getApiBaseUrl, getApiErrorMessage, getStoredAuthToken } from '@/services/api';
@@ -65,6 +67,26 @@ function formatHourMinute(raw: unknown): string {
     const d = new Date(t);
     if (Number.isNaN(d.getTime())) return t;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function mapQuizCommentRows(raw: unknown): { id: string; author: string; createdAt: string; text: string }[] {
+    const rows = Array.isArray(raw)
+        ? raw
+        : Array.isArray((raw as any)?.data)
+          ? (raw as any).data
+          : Array.isArray((raw as any)?.data?.items)
+            ? (raw as any).data.items
+            : Array.isArray((raw as any)?.items)
+              ? (raw as any).items
+              : [];
+    return rows.map((c: any, idx: number) => ({
+        id: String(c?.commentId ?? c?.id ?? `comment-${idx}`),
+        author: String(
+            c?.authorLabel ?? c?.author ?? c?.createdByName ?? c?.userName ?? 'User'
+        ).trim(),
+        createdAt: String(c?.createdAt ?? c?.created_at ?? c?.time ?? '').trim(),
+        text: String(c?.text ?? c?.content ?? c?.comment ?? c?.body ?? '').trim(),
+    }));
 }
 
 function formatDateTimeWithSeconds(raw: unknown): string {
@@ -1216,6 +1238,7 @@ export function StudentQuizSection({
     const [practiceQuizzes, setPracticeQuizzes] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [resultComments, setResultComments] = useState<any[]>([]);
+    const [resultCommentsLoading, setResultCommentsLoading] = useState(false);
     const [sharingQuiz, setSharingQuiz] = useState(false);
     const [highlightedS3Key, setHighlightedS3Key] = useState('');
     const availableCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -1226,6 +1249,30 @@ export function StudentQuizSection({
         const s = String(v).trim();
         return s || null;
     }, [user]);
+
+    const loadResultComments = async (quizRow?: any) => {
+        const qid = coercePositiveQuizId(
+            (quizRow as any)?.quizId ?? quizRow?.id ?? selectedQuiz?.quizId ?? selectedQuiz?.id
+        );
+        if (qid == null) {
+            setResultComments([]);
+            return;
+        }
+        setResultCommentsLoading(true);
+        try {
+            const commentsRes: any = await api.get(`/quizzes/${qid}/comments`);
+            setResultComments(mapQuizCommentRows(commentsRes));
+        } catch {
+            setResultComments([]);
+        } finally {
+            setResultCommentsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!showResults || !selectedQuiz) return;
+        void loadResultComments(selectedQuiz);
+    }, [showResults, selectedQuiz?.id, (selectedQuiz as any)?.quizId]);
 
     useEffect(() => {
         const raw = fileHighlightRequest?.s3Key?.trim();
@@ -1933,6 +1980,7 @@ export function StudentQuizSection({
                 message: String(res?.message || 'Your quiz was shared with your lecturer successfully.'),
             });
             markQuizSharedForStudent(quizId, sharedAt);
+            void loadResultComments(row);
             void loadConnectedData({ quiet: true });
         } catch (err: unknown) {
             const status = Number((err as any)?.response?.status || 0);
@@ -1944,6 +1992,7 @@ export function StudentQuizSection({
                     message: apiMsg || 'This quiz was already shared with your lecturer.',
                 });
                 markQuizSharedForStudent(quizId, new Date().toISOString());
+                void loadResultComments(row);
             } else if (status === 403) {
                 showNotification({
                     type: 'warning',
@@ -3112,19 +3161,7 @@ export function StudentQuizSection({
                                 if (quizId != null) {
                                     try {
                                         const commentsRes: any = await api.get(`/quizzes/${quizId}/comments`);
-                                        const rawRows = Array.isArray(commentsRes?.data)
-                                            ? commentsRes.data
-                                            : Array.isArray(commentsRes?.data?.items)
-                                                ? commentsRes.data.items
-                                                : Array.isArray(commentsRes?.items)
-                                                    ? commentsRes.items
-                                                    : [];
-                                        loadedComments = rawRows.map((c: any, idx: number) => ({
-                                            id: c?.id ?? `comment-${idx}`,
-                                            author: c?.author ?? c?.createdByName ?? c?.userName ?? 'Lecturer',
-                                            createdAt: c?.createdAt ?? c?.created_at ?? c?.time ?? '',
-                                            text: c?.text ?? c?.comment ?? c?.content ?? c?.body ?? '',
-                                        }));
+                                        loadedComments = mapQuizCommentRows(commentsRes);
                                     } catch {
                                         loadedComments = [];
                                     }
@@ -3679,21 +3716,56 @@ export function StudentQuizSection({
                                 })}
                             </div>
                         </div>
-                        {resultComments.length > 0 && (
-                            <div className="mt-8">
-                                <h3 className="mb-4">Comments from Lecturer</h3>
+                        <div className="mt-8 border-t border-gray-200 pt-6">
+                            <div className="flex items-center justify-between gap-3 mb-4">
+                                <h3 className="flex items-center gap-2 m-0">
+                                    <MessageSquare size={20} className="text-blue-600" />
+                                    {isQuizAlreadyShared(selectedQuiz)
+                                        ? 'Comments with lecturer'
+                                        : 'Comments'}
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={() => void loadResultComments(selectedQuiz)}
+                                    disabled={resultCommentsLoading}
+                                    className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                                >
+                                    <RefreshCw
+                                        size={14}
+                                        className={resultCommentsLoading ? 'animate-spin' : ''}
+                                    />
+                                    Refresh
+                                </button>
+                            </div>
+                            {isQuizAlreadyShared(selectedQuiz) &&
+                            resultComments.length === 0 &&
+                            !resultCommentsLoading ? (
+                                <p className="text-sm text-gray-500 mb-3">
+                                    Your quiz was shared. Your lecturer can leave comments here — check back later or tap Refresh.
+                                </p>
+                            ) : null}
+                            {resultCommentsLoading ? (
+                                <p className="text-sm text-gray-500">Loading comments…</p>
+                            ) : resultComments.length === 0 ? (
+                                <p className="text-sm text-gray-500">No comments yet.</p>
+                            ) : (
                                 <div className="space-y-3">
-                                    {resultComments.map((c: any) => (
-                                        <div key={String(c?.id)} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                    {resultComments.map((c) => (
+                                        <div
+                                            key={String(c.id)}
+                                            className="rounded-lg border border-gray-200 bg-gray-50 p-3"
+                                        >
                                             <p className="text-xs text-gray-500">
-                                                {String(c?.author || 'Lecturer')} • {formatHourMinute(c?.createdAt)}
+                                                {c.author} • {formatHourMinute(c.createdAt)}
                                             </p>
-                                            <p className="text-sm text-gray-800 mt-1">{String(c?.text || '')}</p>
+                                            <p className="text-sm text-gray-800 mt-1 whitespace-pre-wrap">
+                                                {c.text}
+                                            </p>
                                         </div>
                                     ))}
                                 </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
 
                     <div className="p-6 border-t border-gray-200 flex items-center gap-3 shrink-0 bg-white relative z-10">
