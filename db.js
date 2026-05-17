@@ -1992,7 +1992,7 @@ async function ensureQuestionBankCorrectAnswerColumn(p) {
     }
   }
   try {
-    await p.execute("ALTER TABLE question_bank_items DROP CHECK chk_qbi_correct_answer");
+    await p.execute("ALTER TABLE question_bank_items DROP CONSTRAINT chk_qbi_correct_answer");
   } catch (e) {
     const msg = String(e?.message || "").toLowerCase();
     const gone =
