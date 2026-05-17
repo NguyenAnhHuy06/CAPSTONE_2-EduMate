@@ -1,9 +1,11 @@
 const path = require("path");
+const crypto = require("crypto");
 const {
   S3Client,
   PutObjectCommand,
   ListObjectsV2Command,
   GetObjectCommand,
+  HeadObjectCommand,
 } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -50,13 +52,72 @@ function buildObjectPublicUrl(key) {
   return `https://${bucket}.s3.${region}.amazonaws.com/${encoded}`;
 }
 
-async function buildSignedUrl(key, expiresSeconds = 3600) {
+function encodeMetadataValue(value) {
+  return encodeURIComponent(String(value || "").trim());
+}
+
+function decodeMetadataValue(value) {
+  try {
+    return decodeURIComponent(String(value || ""));
+  } catch (_) {
+    return String(value || "");
+  }
+}
+
+/** RFC 5987 filename* for Content-Disposition (UTF-8). */
+function contentDispositionFilename(fileName, mode = "inline") {
+  const safe = String(fileName || "document")
+    .replace(/[\r\n"]/g, "_")
+    .trim() || "document";
+  return `${mode}; filename*=UTF-8''${encodeURIComponent(safe)}`;
+}
+
+function shortUniqueSuffix() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+/** Strip trailing __{12-hex} before extension (our collision-safe key suffix). */
+function humanNameFromStorageKey(key) {
+  const base = path.basename(String(key || "").trim());
+  const m = base.match(/^(.+)__[a-f0-9]{12}(\.[^.]+)$/i);
+  if (m) return `${m[1]}${m[2]}`;
+  return base || "document";
+}
+
+async function getObjectDownloadFilename(key) {
+  if (!key) return "document";
+  try {
+    const client = getClient();
+    const resp = await client.send(
+      new HeadObjectCommand({ Bucket: getBucket(), Key: String(key).trim() })
+    );
+    const meta = resp.Metadata || {};
+    const fromMeta =
+      meta["original-filename"] ||
+      meta["originalfilename"] ||
+      meta["document-title"] ||
+      meta["documenttitle"];
+    if (fromMeta) return decodeMetadataValue(fromMeta);
+  } catch (_) {
+    /* fall through */
+  }
+  return humanNameFromStorageKey(key);
+}
+
+async function buildSignedUrl(key, expiresSeconds = 3600, options = {}) {
   if (!key) return null;
+  const downloadName =
+    options.downloadFileName ||
+    (await getObjectDownloadFilename(key).catch(() => humanNameFromStorageKey(key)));
   try {
     const client = getClient();
     const command = new GetObjectCommand({
       Bucket: getBucket(),
       Key: key,
+      ResponseContentDisposition: contentDispositionFilename(
+        downloadName,
+        options.inline ? "inline" : "attachment"
+      ),
     });
     return await getSignedUrl(client, command, { expiresIn: expiresSeconds });
   } catch (err) {
@@ -65,20 +126,8 @@ async function buildSignedUrl(key, expiresSeconds = 3600) {
   }
 }
 
-async function buildInlineSignedUrl(key, expiresSeconds = 3600) {
-  if (!key) return null;
-  try {
-    const client = getClient();
-    const command = new GetObjectCommand({
-      Bucket: getBucket(),
-      Key: key,
-      ResponseContentDisposition: 'inline',
-    });
-    return await getSignedUrl(client, command, { expiresIn: expiresSeconds });
-  } catch (err) {
-    console.error("Lỗi tạo inline signed URL:", err);
-    return null;
-  }
+async function buildInlineSignedUrl(key, expiresSeconds = 3600, options = {}) {
+  return buildSignedUrl(key, expiresSeconds, { ...options, inline: true });
 }
 
 function safeFolderName(value, fallback = "GENERAL") {
@@ -204,46 +253,76 @@ function buildSubjectFolder(subjectCode, subjectName) {
 
 function safeFileBaseName(originalName, displayName = "") {
   const ext = path.extname(originalName).toLowerCase();
-
-  // Ưu tiên dùng Course Name làm tên file.
-  // Nếu Course Name rỗng thì mới fallback về tên file gốc.
-  const rawBase = String(displayName || "").trim()
-    || path.basename(originalName, ext);
+  const rawBase =
+    String(displayName || "").trim() || path.basename(originalName, ext);
 
   const safe = rawBase
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/[<>:"|?*\\\/]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[^a-zA-Z0-9._ -]+/g, "")
+    .replace(/\s+/g, "-")
     .replace(/^-+|-+$/g, "")
+    .slice(0, 120)
     .toLowerCase() || "document";
 
   return { safe, ext };
 }
 
+/**
+ * S3 object key: readable slug + unique suffix → no overwrite when same filename/title.
+ * Example: DATA/YEAR 1/SEMESTER 1/bai-tap-chuong-1__a1b2c3d4e5f6.pdf
+ */
 function buildDocumentKey(originalName, meta = {}) {
   const { safe, ext } = safeFileBaseName(originalName, meta.fileDisplayName);
-
   const year = mapYearToS3Folder(meta.year);
   const semester = mapSemesterToS3Folder(meta.semester);
-
-  const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-
-  // AWS layout: DATA / YEAR n / SEMESTER n / file.pdf (no per-course subfolders)
-  return `DATA/${year}/${semester}/${unique}-${safe}${ext}`;
+  const unique = shortUniqueSuffix();
+  return `DATA/${year}/${semester}/${safe}__${unique}${ext}`;
 }
 
-async function uploadDocumentBuffer({ buffer, key, contentType }) {
+async function uploadDocumentBuffer({
+  buffer,
+  key,
+  contentType,
+  originalFileName,
+  documentTitle,
+}) {
   const client = getClient();
   const bucket = getBucket();
+  const downloadName =
+    String(originalFileName || "").trim() ||
+    (documentTitle
+      ? `${String(documentTitle).trim()}${path.extname(key)}`
+      : humanNameFromStorageKey(key));
+
+  const metadata = {};
+  if (originalFileName) {
+    metadata["original-filename"] = encodeMetadataValue(originalFileName);
+  }
+  if (documentTitle) {
+    metadata["document-title"] = encodeMetadataValue(documentTitle);
+  }
+
   await client.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       Body: buffer,
       ContentType: contentType || "application/octet-stream",
+      ContentDisposition: contentDispositionFilename(downloadName, "inline"),
+      Metadata: Object.keys(metadata).length ? metadata : undefined,
     })
   );
-  return { bucket, key, url: buildObjectPublicUrl(key) };
+  return {
+    bucket,
+    key,
+    url: buildObjectPublicUrl(key),
+    downloadFileName: downloadName,
+    displayFileName: humanNameFromStorageKey(key),
+  };
 }
 
 function documentsPrefix() {
@@ -307,6 +386,9 @@ module.exports = {
   uploadDocumentBuffer,
   buildObjectPublicUrl,
   buildDocumentKey,
+  humanNameFromStorageKey,
+  getObjectDownloadFilename,
+  contentDispositionFilename,
   mapYearToS3Folder,
   mapSemesterToS3Folder,
   buildSubjectFolder,

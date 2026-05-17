@@ -165,17 +165,31 @@ async function putJsonObject({ key, value }) {
   return { bucket, key, url: buildObjectPublicUrl(key) };
 }
 
+function contentDispositionFilename(fileName, mode = "attachment") {
+  const safe = String(fileName || "document")
+    .replace(/[\r\n"]/g, "_")
+    .trim() || "document";
+  return `${mode}; filename*=UTF-8''${encodeURIComponent(safe)}`;
+}
+
 /** Time-limited HTTPS URL for private buckets (GET object). */
-async function getPresignedDownloadUrl(key, expiresInSeconds = 300) {
+async function getPresignedDownloadUrl(key, expiresInSeconds = 300, options = {}) {
   if (!key || String(key).includes("..")) {
     throw new Error("Invalid S3 key.");
   }
   const client = getClient();
   const bucket = getBucket();
-  const command = new GetObjectCommand({
+  const params = {
     Bucket: bucket,
     Key: String(key).trim(),
-  });
+  };
+  if (options.downloadFileName) {
+    params.ResponseContentDisposition = contentDispositionFilename(
+      options.downloadFileName,
+      options.inline ? "inline" : "attachment"
+    );
+  }
+  const command = new GetObjectCommand(params);
   return getSignedUrl(client, command, {
     expiresIn: Math.min(Math.max(Number(expiresInSeconds) || 300, 60), 3600),
   });

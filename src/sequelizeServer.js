@@ -79,6 +79,12 @@ const startServer = async () => {
 
         // 2. Sequelize sync (creates/migrates all model tables)
         await sequelize.sync();
+        const {
+            ensureNotificationActionPayloadColumn,
+            ensureCitationsTable,
+        } = require('./services/notificationSchema');
+        await ensureNotificationActionPayloadColumn();
+        await ensureCitationsTable();
         console.log('Database connected (Squelize).');
         console.log('Database connected and synced (Sequelize).');
 

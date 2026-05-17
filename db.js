@@ -631,10 +631,11 @@ async function insertDocumentComment({ documentId, s3Key, userId, body }) {
   if (docId == null && !fileUrlVal) {
     throw new Error("Missing document reference.");
   }
-  await getPool().execute(
+  const [result] = await getPool().execute(
     `INSERT INTO document_comments (document_id, file_url, user_id, body) VALUES (?,?,?,?)`,
     [docId, fileUrlVal, uid, text]
   );
+  return result?.insertId != null ? Number(result.insertId) : null;
 }
 
 /**
@@ -2407,11 +2408,15 @@ async function listQuizComments(quizId, limit = 100) {
       const authorLabel = authorRole === "LECTURER" ? "Lecturer" : "Student";
       const createdAt = r.created_at || null;
       return {
+    id: Number(r.comment_id),
     commentId: Number(r.comment_id),
     quizId: Number(r.quiz_id),
     userId: Number(r.user_id),
     content: r.content || "",
+    text: r.content || "",
+    body: r.content || "",
     createdAt,
+    author: authorLabel,
     authorRole,
     authorLabel,
     displayMeta: `${authorLabel} • ${createdAt || ""}`,

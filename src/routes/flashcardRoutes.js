@@ -10,6 +10,61 @@ const { runAsyncJob, getAsyncJob } = require("../services/asyncJobStore");
 const db = require("../config/teamDb");
 const { activityLogMiddleware } = require("../middleware/activityLog");
 
+let flashcardSchemaReady = false;
+async function ensureFlashcardSetIdColumn() {
+    if (flashcardSchemaReady) return;
+    if (!db.isConfigured()) {
+        flashcardSchemaReady = true;
+        return;
+    }
+    const p = db.getPool();
+    try {
+        await p.execute(
+            "ALTER TABLE flashcards ADD COLUMN flashcard_set_id VARCHAR(128) NULL DEFAULT NULL"
+        );
+    } catch (e) {
+        if (e.code !== "ER_DUP_FIELDNAME") {
+            console.warn("ensureFlashcardSetIdColumn:", e.message);
+        }
+    }
+    try {
+        await p.execute(
+            "CREATE INDEX idx_flashcards_doc_user_set ON flashcards (document_id, user_id, flashcard_set_id)"
+        );
+    } catch (e) {
+        if (e.code !== "ER_DUP_KEYNAME" && !String(e.message || "").includes("Duplicate key name")) {
+            console.warn("ensureFlashcardSetIdColumn index:", e.message);
+        }
+    }
+    flashcardSchemaReady = true;
+}
+
+function normalizeSetId(raw, fallbackPrefix = "set") {
+    const s = String(raw ?? "").trim();
+    if (s) return s.slice(0, 128);
+    return `${fallbackPrefix}-${Date.now()}-${Math.round(Math.random() * 1e6)}`.slice(0, 128);
+}
+
+function mapFlashcardRowsWithContent(cards, contents) {
+    const byFlashcardId = new Map();
+    for (const c of contents) {
+        const row = typeof c.toJSON === "function" ? c.toJSON() : c;
+        const fid = Number(row?.flashcard_id);
+        if (!Number.isFinite(fid) || byFlashcardId.has(fid)) continue;
+        byFlashcardId.set(fid, row);
+    }
+    return cards.map((card) => {
+        const row = typeof card.toJSON === "function" ? card.toJSON() : card;
+        const firstContent = byFlashcardId.get(Number(row?.flashcard_id)) || null;
+        return {
+            ...row,
+            front_text: String(firstContent?.front_text || ""),
+            back_text: String(firstContent?.back_text || ""),
+            flashcard_set_id: row.flashcard_set_id != null ? String(row.flashcard_set_id) : null,
+        };
+    });
+}
+
 const GENERATION_FAIL_MESSAGE = "Generation failed. Please try again.";
 const FLASHCARD_OPENROUTER_TIMEOUT_MS = Math.max(
     15000,
@@ -438,7 +493,14 @@ async function resolveDocumentIdByS3KeyForFlashcards(s3Key, userId) {
     return Number(createdId);
 }
 
-async function saveGeneratedFlashcardsForUser({ userId, s3Key, documentId, cards }) {
+async function saveGeneratedFlashcardsForUser({
+    userId,
+    s3Key,
+    documentId,
+    cards,
+    flashcardSetId,
+}) {
+    await ensureFlashcardSetIdColumn();
     const uid = Number(userId);
     if (!Number.isFinite(uid) || uid <= 0) throw new Error("Invalid user for saving flashcards.");
     if (!db.isConfigured()) throw new Error("MySQL chưa cấu hình.");
@@ -452,27 +514,36 @@ async function saveGeneratedFlashcardsForUser({ userId, s3Key, documentId, cards
         throw new Error("Cannot resolve document_id for flashcard saving.");
     }
 
+    const setId = normalizeSetId(flashcardSetId, "gen");
+
     const records = (Array.isArray(cards) ? cards : [])
         .map((c) => ({
             user_id: uid,
             document_id: resolvedDocumentId,
+            flashcard_set_id: setId,
             front_text: String(c?.front ?? c?.front_text ?? "").trim(),
             back_text: String(c?.back ?? c?.back_text ?? "").trim(),
         }))
         .filter((r) => r.front_text && r.back_text);
 
-    if (!records.length) return { documentId: resolvedDocumentId, savedCount: 0 };
+    if (!records.length) {
+        return { documentId: resolvedDocumentId, savedCount: 0, flashcardSetId: setId };
+    }
 
-    // Replace old generated cards for this user+document to keep reusable set fresh.
+    // Replace only this set — keep other sets for the same document.
     const transaction = await Flashcard.sequelize.transaction();
     try {
-        await Flashcard.destroy({ where: { user_id: uid, document_id: resolvedDocumentId }, transaction });
+        await Flashcard.destroy({
+            where: { user_id: uid, document_id: resolvedDocumentId, flashcard_set_id: setId },
+            transaction,
+        });
         let savedCount = 0;
         for (const record of records) {
             const createdCard = await Flashcard.create(
                 {
                     user_id: record.user_id,
                     document_id: record.document_id,
+                    flashcard_set_id: record.flashcard_set_id,
                 },
                 { transaction }
             );
@@ -487,7 +558,7 @@ async function saveGeneratedFlashcardsForUser({ userId, s3Key, documentId, cards
             savedCount += 1;
         }
         await transaction.commit();
-        return { documentId: resolvedDocumentId, savedCount };
+        return { documentId: resolvedDocumentId, savedCount, flashcardSetId: setId };
     } catch (err) {
         await transaction.rollback();
         throw err;
@@ -496,18 +567,31 @@ async function saveGeneratedFlashcardsForUser({ userId, s3Key, documentId, cards
 
 async function generateFlashcardsHandler(req, res) {
     try {
+        await ensureFlashcardSetIdColumn();
         const cards = await buildGeneratedFlashcards(req);
         const userId = req.user?.id ?? req.user?.user_id;
+        const setId = normalizeSetId(
+            req.body?.flashcard_set_id ?? req.body?.flashcardSetId ?? req.body?.jobId,
+            "gen"
+        );
         const saved = await saveGeneratedFlashcardsForUser({
             userId,
             s3Key: req.body?.s3Key,
             documentId: req.body?.documentId ?? req.body?.document_id,
             cards,
+            flashcardSetId: setId,
         });
+        const data = cards.map((c, i) => ({
+            ...c,
+            flashcard_set_id: saved.flashcardSetId,
+            setId: saved.flashcardSetId,
+            id: String(i + 1),
+        }));
         return res.json({
             success: true,
-            data: cards,
+            data,
             saved,
+            flashcardSetId: saved.flashcardSetId,
         });
     } catch (err) {
         console.error("[generateFlashcards]", err);
@@ -533,15 +617,26 @@ async function startGenerateFlashcardsAsync(req, res) {
             s3Key: String(req.body?.s3Key || "").trim(),
             userId: req.user?.id ?? req.user?.user_id ?? null,
         },
-        runner: async () => {
+        runner: async ({ jobId: asyncJobId }) => {
             const cards = await buildGeneratedFlashcards(req);
+            const setId = normalizeSetId(
+                req.body?.flashcard_set_id ?? req.body?.flashcardSetId ?? asyncJobId,
+                "gen"
+            );
             const saved = await saveGeneratedFlashcardsForUser({
                 userId: req.user?.id ?? req.user?.user_id,
                 s3Key: req.body?.s3Key,
                 documentId: req.body?.documentId ?? req.body?.document_id,
                 cards,
+                flashcardSetId: setId,
             });
-            return { success: true, data: cards, saved };
+            const data = cards.map((c, i) => ({
+                ...c,
+                flashcard_set_id: saved.flashcardSetId,
+                setId: saved.flashcardSetId,
+                id: String(i + 1),
+            }));
+            return { success: true, data, saved, flashcardSetId: saved.flashcardSetId };
         },
     });
     return res.status(202).json({
@@ -590,8 +685,9 @@ router.get("/generate", (req, res) => {
 });
 
 // Create flashcards (batch)
-router.post("/", async (req, res) => {
+router.post("/", auth, async (req, res) => {
     try {
+        await ensureFlashcardSetIdColumn();
         const { document_id, flashcards, user_id, userId } = req.body;
 
         if (!document_id || !Array.isArray(flashcards) || !flashcards.length) {
@@ -609,6 +705,7 @@ router.post("/", async (req, res) => {
             req.query?.user_id ??
             req.query?.userId ??
             req.user?.id ??
+            req.user?.user_id ??
             process.env.DEFAULT_FLASHCARD_USER_ID;
         const effectiveUserId = await resolveExistingUserId({
             requestedUserId,
@@ -621,25 +718,43 @@ router.post("/", async (req, res) => {
             });
         }
 
-        const records = flashcards.map((f) => ({
-            user_id: effectiveUserId,
-            document_id: Number(document_id),
-            front_text: f.front_text || f.front || f.question || "",
-            back_text: f.back_text || f.back || f.answer || "",
-        })).filter((r) => String(r.front_text || "").trim() && String(r.back_text || "").trim());
+        const setId = normalizeSetId(
+            req.body?.flashcard_set_id ?? req.body?.flashcardSetId,
+            "save"
+        );
+        const docId = Number(document_id);
+
+        const records = flashcards
+            .map((f) => ({
+                user_id: effectiveUserId,
+                document_id: docId,
+                flashcard_set_id: setId,
+                front_text: String(f.front_text || f.front || f.question || "").trim(),
+                back_text: String(f.back_text || f.back || f.answer || "").trim(),
+            }))
+            .filter((r) => r.front_text && r.back_text);
 
         const transaction = await Flashcard.sequelize.transaction();
-        const created = [];
+        const createdPayload = [];
         try {
+            await Flashcard.destroy({
+                where: {
+                    user_id: effectiveUserId,
+                    document_id: docId,
+                    flashcard_set_id: setId,
+                },
+                transaction,
+            });
             for (const record of records) {
                 const createdCard = await Flashcard.create(
                     {
                         user_id: record.user_id,
                         document_id: record.document_id,
+                        flashcard_set_id: record.flashcard_set_id,
                     },
                     { transaction }
                 );
-                await FlashcardContent.create(
+                const contentRow = await FlashcardContent.create(
                     {
                         flashcard_id: createdCard.flashcard_id,
                         front_text: record.front_text,
@@ -647,7 +762,16 @@ router.post("/", async (req, res) => {
                     },
                     { transaction }
                 );
-                created.push(createdCard);
+                const cardJson =
+                    typeof createdCard.toJSON === "function" ? createdCard.toJSON() : createdCard;
+                const contentJson =
+                    typeof contentRow.toJSON === "function" ? contentRow.toJSON() : contentRow;
+                createdPayload.push({
+                    ...cardJson,
+                    front_text: contentJson.front_text,
+                    back_text: contentJson.back_text,
+                    flashcard_set_id: setId,
+                });
             }
             await transaction.commit();
         } catch (innerErr) {
@@ -656,8 +780,9 @@ router.post("/", async (req, res) => {
         }
         return res.status(201).json({
             success: true,
-            data: created,
-            count: created.length
+            data: createdPayload,
+            count: createdPayload.length,
+            flashcardSetId: setId,
         });
     } catch (err) {
         console.error("[flashcards/create]", err.message);
@@ -668,6 +793,7 @@ router.post("/", async (req, res) => {
 // List flashcards for a document (public-friendly so FE can reuse saved cards immediately)
 router.get("/document/:documentId", async (req, res) => {
     try {
+        await ensureFlashcardSetIdColumn();
         const documentId = Number(req.params.documentId);
 
         if (!Number.isFinite(documentId)) {
@@ -691,22 +817,7 @@ router.get("/document/:documentId", async (req, res) => {
                   order: [["content_id", "ASC"]],
               })
             : [];
-        const byFlashcardId = new Map();
-        for (const c of contents) {
-            const row = typeof c.toJSON === "function" ? c.toJSON() : c;
-            const fid = Number(row?.flashcard_id);
-            if (!Number.isFinite(fid) || byFlashcardId.has(fid)) continue;
-            byFlashcardId.set(fid, row);
-        }
-        const data = cards.map((card) => {
-            const row = typeof card.toJSON === "function" ? card.toJSON() : card;
-            const firstContent = byFlashcardId.get(Number(row?.flashcard_id)) || null;
-            return {
-                ...row,
-                front_text: String(firstContent?.front_text || ""),
-                back_text: String(firstContent?.back_text || ""),
-            };
-        });
+        const data = mapFlashcardRowsWithContent(cards, contents);
 
         return res.json({ success: true, data });
     } catch (err) {
@@ -717,6 +828,7 @@ router.get("/document/:documentId", async (req, res) => {
 // List all personal flashcards
 router.get("/mine", auth, async (req, res) => {
     try {
+        await ensureFlashcardSetIdColumn();
         if (!requireStudent(req, res)) return;
 
         const cards = await Flashcard.findAll({
@@ -724,7 +836,17 @@ router.get("/mine", auth, async (req, res) => {
             order: [["created_at", "DESC"]],
             limit: 200,
         });
-        return res.json({ success: true, data: cards });
+        const cardIds = cards
+            .map((card) => Number(card?.flashcard_id))
+            .filter((id) => Number.isFinite(id) && id > 0);
+        const contents = cardIds.length
+            ? await FlashcardContent.findAll({
+                  where: { flashcard_id: cardIds },
+                  attributes: ["content_id", "flashcard_id", "front_text", "back_text"],
+              })
+            : [];
+        const data = mapFlashcardRowsWithContent(cards, contents);
+        return res.json({ success: true, data });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }

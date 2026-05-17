@@ -38,10 +38,33 @@ async function resolveS3KeyFromRequest(req) {
   return String(doc.file_url).trim();
 }
 
-function safeDownloadFileName(key, fallback = "document") {
-  const path = require("path");
-  const fileName = path.basename(String(key || "").trim());
-  return fileName || fallback;
+async function safeDownloadFileName(key, fallback = "document", documentId = null) {
+  const pathMod = require("path");
+  if (documentId != null) {
+    const id = Number(documentId);
+    if (Number.isFinite(id) && id > 0) {
+      try {
+        const Document = require("../models/Document");
+        const doc = await Document.findByPk(id, { attributes: ["title", "file_url"] });
+        const title = doc?.title != null ? String(doc.title).trim() : "";
+        const fileKey = String(doc?.file_url || key || "").trim();
+        const ext = pathMod.extname(fileKey) || "";
+        if (title) {
+          return ext && !title.toLowerCase().endsWith(ext.toLowerCase())
+            ? `${title}${ext}`
+            : title;
+        }
+      } catch (_) {
+        /* fall through */
+      }
+    }
+  }
+  const s3 = require("../services/s3Upload");
+  try {
+    return await s3.getObjectDownloadFilename(key);
+  } catch (_) {
+    return s3.humanNameFromStorageKey(key) || fallback;
+  }
 }
 
 // Upload — any authenticated user can upload (design: students upload, lecturers upload)
@@ -160,7 +183,12 @@ router.get("/download-file", auth, async (req, res) => {
       console.warn("[download-file] could not update download count:", countErr.message);
     }
 
-    const fileName = safeDownloadFileName(key);
+    const rawDocumentId =
+      req.query.documentId ||
+      req.query.document_id ||
+      req.body?.documentId ||
+      req.body?.document_id;
+    const fileName = await safeDownloadFileName(key, "document", rawDocumentId);
 
     res.setHeader("Content-Type", contentType || "application/octet-stream");
     res.setHeader(
@@ -387,6 +415,16 @@ router.post("/comments", auth, async (req, res) => {
        VALUES (?, ?, ?, ?)`,
       [finalDocumentId, finalS3Key, req.user.id, text]
     );
+
+    const { notifyDocumentOwnerOnNewComment } = require("../services/documentCommentNotify");
+    void notifyDocumentOwnerOnNewComment({
+      documentId: finalDocumentId,
+      s3Key: finalS3Key,
+      commentId: result.insertId,
+      commenterUserId: req.user.id,
+      commenterName: req.user.full_name || req.user.name || req.user.email || "Someone",
+      commentPreview: text,
+    });
 
     return res.status(201).json({
       success: true,

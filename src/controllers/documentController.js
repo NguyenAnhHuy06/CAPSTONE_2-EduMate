@@ -82,10 +82,16 @@ const uploadDocument = [
         semester,
         subjectCode,
         subjectName,
-        fileDisplayName: subjectName
+        fileDisplayName: String(title).trim(),
       });
-      
-      const up = await s3.uploadDocumentBuffer({ buffer: req.file.buffer, key, contentType: req.file.mimetype });
+
+      const up = await s3.uploadDocumentBuffer({
+        buffer: req.file.buffer,
+        key,
+        contentType: req.file.mimetype,
+        originalFileName: req.file.originalname,
+        documentTitle: String(title).trim(),
+      });
 
       // Auto-verify for LECTURER and ADMIN
       const uploaderRole = req.user?.role || 'STUDENT';
