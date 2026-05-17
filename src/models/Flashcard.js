@@ -15,6 +15,11 @@ const Flashcard = sequelize.define('Flashcard', {
         type: DataTypes.INTEGER,
         allowNull: false
     },
+    /** Groups cards into one saved set (FE: flashcard_set_id). */
+    flashcard_set_id: {
+        type: DataTypes.STRING(128),
+        allowNull: true,
+    },
     created_at: {
         type: DataTypes.DATE,
         defaultValue: DataTypes.NOW

@@ -328,8 +328,28 @@ async function insertChunk(documentId, _chunkIndex, contentText, embedding) {
 async function getDocumentIdByS3Key(s3Key) {
   const k = String(s3Key || "").trim();
   if (!k) return null;
-  const [rows] = await getPool().execute("SELECT document_id FROM documents WHERE file_url = ? LIMIT 1", [k]);
-  return rows.length ? rows[0].document_id : null;
+  const [rows] = await getPool().execute(
+    "SELECT document_id FROM documents WHERE file_url = ? LIMIT 1",
+    [k]
+  );
+  if (rows.length) return rows[0].document_id;
+
+  let normalized = k;
+  if (/^https?:\/\//i.test(k)) {
+    try {
+      normalized = decodeURIComponent(new URL(k).pathname.replace(/^\/+/, ""));
+    } catch {
+      normalized = k;
+    }
+  }
+  if (normalized && normalized !== k) {
+    const [rows2] = await getPool().execute(
+      "SELECT document_id FROM documents WHERE file_url = ? LIMIT 1",
+      [normalized]
+    );
+    if (rows2.length) return rows2[0].document_id;
+  }
+  return null;
 }
 
 async function countChunksByS3Key(s3Key) {

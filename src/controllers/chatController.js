@@ -8,6 +8,153 @@ const ChatSession = require("../models/ChatSession");
 const ChatMessage = require("../models/ChatMessage");
 const Citation = require("../models/Citation");
 const { retrieveTopChunks } = require("../services/vectorSearch");
+const teamDb = require("../config/teamDb");
+const rootDb = require("../../db");
+const { ensureIndexedForQuiz } = require("../../documentPipeline");
+
+function normalizeS3KeyInput(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    if (/^https?:\/\//i.test(s)) {
+        try {
+            return decodeURIComponent(new URL(s).pathname.replace(/^\/+/, ""));
+        } catch {
+            return s;
+        }
+    }
+    return s;
+}
+
+/** Resolve canonical file_url + document_id for RAG on the open document. */
+async function resolveChatDocumentRef({ s3Key, documentId }) {
+    let key = normalizeS3KeyInput(s3Key);
+    let docId = Number(documentId);
+    if (!Number.isFinite(docId) || docId <= 0) docId = null;
+
+    if (teamDb.isConfigured()) {
+        if (!key && docId) {
+            const doc = await teamDb.getDocumentById(docId);
+            key = normalizeS3KeyInput(doc?.file_url);
+        }
+        if (key && !docId) {
+            const resolved = await teamDb.getDocumentIdByS3Key(key);
+            if (resolved) docId = Number(resolved);
+        }
+        if (docId) {
+            const doc = await teamDb.getDocumentById(docId);
+            const canonical = normalizeS3KeyInput(doc?.file_url);
+            if (canonical) key = canonical;
+        }
+    }
+
+    return { s3Key: key || null, documentId: docId };
+}
+
+async function listSegmentsForDocRef(docRef) {
+    if (docRef.documentId) {
+        if (rootDb.isConfigured()) {
+            const segs = await rootDb.listSegmentsByDocumentId(docRef.documentId);
+            if (segs.length) return segs;
+        }
+        if (teamDb.isConfigured()) {
+            return teamDb.listSegmentsByDocumentId(docRef.documentId);
+        }
+    }
+    if (docRef.s3Key) {
+        if (rootDb.isConfigured()) {
+            const segs = await rootDb.listSegmentsByS3Key(docRef.s3Key);
+            if (segs.length) return segs;
+        }
+        if (teamDb.isConfigured()) {
+            return teamDb.listSegmentsByS3Key(docRef.s3Key);
+        }
+    }
+    return [];
+}
+
+/** Fast check: document_segments exist with non-empty embeddings. */
+async function documentHasReadyEmbeddings(docRef) {
+    const dbReady = rootDb.isConfigured() || teamDb.isConfigured();
+    if (!dbReady) return false;
+
+    if (docRef.s3Key && rootDb.isConfigured()) {
+        const n = await rootDb.countChunksByS3Key(docRef.s3Key);
+        if (n > 0 && (await rootDb.hasCompleteEmbeddingsForS3Key(docRef.s3Key))) {
+            return true;
+        }
+    }
+
+    const segs = await listSegmentsForDocRef(docRef);
+    return (
+        segs.length > 0 &&
+        segs.every((s) => Array.isArray(s.embedding) && s.embedding.length > 0)
+    );
+}
+
+/**
+ * Ensure embeddings exist before RAG/LLM.
+ * First chat on a file may take longer (S3 + chunk + embed); later chats reuse segments.
+ */
+async function ensureDocumentReadyForChat(docRef) {
+    if (!docRef.s3Key && !docRef.documentId) {
+        return {
+            ready: false,
+            indexedNow: false,
+            skipped: true,
+            chunkCount: 0,
+            message: "No document reference.",
+        };
+    }
+
+    if (await documentHasReadyEmbeddings(docRef)) {
+        const segs = await listSegmentsForDocRef(docRef);
+        const chunkCount = segs.length;
+        return {
+            ready: true,
+            indexedNow: false,
+            skipped: true,
+            chunkCount,
+            documentId: docRef.documentId,
+            s3Key: docRef.s3Key,
+        };
+    }
+
+    let key = docRef.s3Key;
+    if (!key && docRef.documentId) {
+        const doc = await teamDb.getDocumentById(docRef.documentId);
+        key = normalizeS3KeyInput(doc?.file_url);
+    }
+    if (!key) {
+        return {
+            ready: false,
+            indexedNow: false,
+            skipped: false,
+            chunkCount: 0,
+            message: "Cannot index: missing S3 file key.",
+        };
+    }
+
+    if (!rootDb.isConfigured()) {
+        return {
+            ready: false,
+            indexedNow: false,
+            skipped: false,
+            chunkCount: 0,
+            message: "MySQL is not configured — cannot index document for chat.",
+        };
+    }
+
+    console.log(`[chat] Indexing document for AI: ${key}`);
+    const r = await ensureIndexedForQuiz(key);
+    return {
+        ready: true,
+        indexedNow: !r.skipped,
+        skipped: !!r.skipped,
+        chunkCount: Number(r.chunkCount || 0),
+        documentId: r.documentId ?? docRef.documentId,
+        s3Key: key,
+    };
+}
 
 function resolveChatUserId(req) {
     const fromAuth = req.user?.id ?? req.user?.user_id;
@@ -124,22 +271,69 @@ function logChatProviderSetup() {
 }
 logChatProviderSetup();
 
-function buildSystemPrompt(hasContext) {
-    return [
+function buildSystemPrompt(hasContext, documentOnly = false) {
+    const lines = [
         "You are EduMate AI Assistant for academic study support.",
         "Always answer in the same language as the user's question.",
-        hasContext
-            ? "Use only the provided document context; if information is missing, explicitly say it is not in the documents."
-            : "No document context is available; provide a general best-effort answer and clearly mention it is not document-grounded.",
-        "Be concise, accurate, and avoid hallucinations.",
-        "When possible, provide actionable steps or examples for students.",
-    ].join("\n");
+    ];
+    if (documentOnly && hasContext) {
+        lines.push(
+            "CRITICAL: Answer ONLY using the document context below. Do NOT use outside or general textbook knowledge.",
+            "If the question is not answered by this document, say clearly that the open document does not cover that topic and stop — do not fill in with general explanations."
+        );
+    } else if (hasContext) {
+        lines.push(
+            "Use only the provided document context. If information is missing, say it is not in the document."
+        );
+    } else if (documentOnly) {
+        lines.push(
+            "A document is open but its text could not be loaded. Do not invent answers; tell the user the file may need indexing or has no extractable text."
+        );
+    } else {
+        lines.push(
+            "No document context is available; provide a general best-effort answer and clearly mention it is not document-grounded."
+        );
+    }
+    lines.push("Be concise, accurate, and avoid hallucinations.");
+    return lines.join("\n");
 }
 
-async function callLLM({ hasContext, context, question }) {
+function isVietnameseQuestion(text) {
+    return /[\u00C0-\u1EF9]/i.test(String(text || ""));
+}
+
+function buildOffTopicDocumentAnswer(question) {
+    if (isVietnameseQuestion(question)) {
+        return (
+            "Câu hỏi này không nằm trong tài liệu bạn đang mở. " +
+            "EduMate AI chỉ trả lời dựa trên nội dung file hiện tại — vui lòng hỏi về chủ đề có trong tài liệu " +
+            "(ví dụ: thiết kế CSDL, yêu cầu hệ thống, bảng dữ liệu, v.v.)."
+        );
+    }
+    return (
+        "This question is not covered by the document you have open. " +
+        "EduMate AI only answers from the current file — please ask about topics that appear in it."
+    );
+}
+
+function buildNoDocumentContextAnswer(question) {
+    if (isVietnameseQuestion(question)) {
+        return (
+            "Không đọc được nội dung tài liệu đang mở (chưa index hoặc file không có text trích xuất được). " +
+            "Vui lòng thử lại sau vài giây hoặc mở lại file; EduMate AI không trả lời kiến thức chung khi bạn đang xem một tài liệu cụ thể."
+        );
+    }
+    return (
+        "Could not load text from the open document (not indexed or no extractable text). " +
+        "Please retry in a moment; EduMate AI will not use general knowledge while a specific document is open."
+    );
+}
+
+async function callLLM({ hasContext, context, question, documentOnly = false }) {
     const configs = getChatProviderConfigs();
     const userMessage = hasContext
-        ? `Document context:\n---\n${context}\n---\n\nQuestion: ${question}`
+        ? `Document context:\n---\n${context}\n---\n\nQuestion: ${question}\n\n` +
+          "Remember: answer ONLY from the document context above. If the document does not contain the answer, say so and do not use outside knowledge."
         : `Question: ${question}`;
     const maxRetries = Math.min(Math.max(Number(process.env.CHAT_MAX_RETRIES) || 3, 1), 6);
     let lastErr = null;
@@ -170,7 +364,10 @@ async function callLLM({ hasContext, context, question }) {
                         temperature: 0.2,
                         max_tokens: 1000,
                         messages: [
-                            { role: "system", content: buildSystemPrompt(hasContext) },
+                            {
+                                role: "system",
+                                content: buildSystemPrompt(hasContext, documentOnly),
+                            },
                             { role: "user", content: userMessage },
                         ],
                     }),
@@ -262,6 +459,36 @@ function mapChatErrorToClient(err) {
     return { httpStatus: 500, message: err?.message || "AI query failed." };
 }
 
+async function saveCitationsForMessage(messageId, chunks) {
+    const records = [];
+    for (const chunk of chunks || []) {
+        const segmentId = Number(chunk.segmentId ?? chunk.segment_id);
+        if (!Number.isFinite(segmentId) || segmentId <= 0) continue;
+        try {
+            const citation = await Citation.create({
+                message_id: messageId,
+                segment_id: segmentId,
+                excerpt: String(chunk.content || "").substring(0, 500),
+            });
+            records.push({
+                citation_id: citation.citation_id,
+                segment_id: segmentId,
+                excerpt: citation.excerpt,
+                similarity: chunk.similarity ?? chunk.score ?? null,
+            });
+        } catch (err) {
+            console.warn(
+                `[chat/ask] Citation insert failed (message=${messageId}, segment=${segmentId}):`,
+                err.message
+            );
+        }
+    }
+    if (records.length) {
+        console.log(`[chat/ask] Saved ${records.length} citation(s) for message ${messageId}`);
+    }
+    return records;
+}
+
 /**
  * POST /api/chat/ask
  * Body: { question, s3Key?, sessionId? }
@@ -270,7 +497,11 @@ function mapChatErrorToClient(err) {
 const askQuestion = async (req, res) => {
     try {
         const userId = resolveChatUserId(req);
-        const { question, s3Key, sessionId } = req.body;
+        const { question, s3Key: rawS3Key, documentId: rawDocumentId, sessionId } = req.body;
+        const docRef = await resolveChatDocumentRef({
+            s3Key: rawS3Key,
+            documentId: rawDocumentId,
+        });
 
         if (!userId) {
             return res.status(401).json({
@@ -302,38 +533,84 @@ const askQuestion = async (req, res) => {
             message_text: question.trim(),
         });
 
-        // 3. Vector search for relevant context
+        // 3. Embed/index first if needed, then vector search (reuse segments on later messages)
         let context = "";
         let matchedChunks = [];
+        let indexMeta = { indexedNow: false, skipped: true, chunkCount: 0 };
+        let relevantToDocument = true;
+        const hasDocumentRef = !!(docRef.s3Key || docRef.documentId);
 
-        if (s3Key) {
-            // Search within a specific document
+        if (hasDocumentRef) {
             try {
+                indexMeta = await ensureDocumentReadyForChat(docRef);
+                if (indexMeta.documentId && !docRef.documentId) {
+                    docRef.documentId = indexMeta.documentId;
+                }
+                if (indexMeta.s3Key && !docRef.s3Key) {
+                    docRef.s3Key = indexMeta.s3Key;
+                }
+
+                const maxChunks = Math.min(
+                    120,
+                    Math.max(1, Number(process.env.CHAT_RAG_MAX_CHUNKS) || 80)
+                );
+                const maxContextChars = Math.min(
+                    120000,
+                    Math.max(4000, Number(process.env.CHAT_RAG_MAX_CONTEXT_CHARS) || 32000)
+                );
+                const preferFullDocument =
+                    String(process.env.CHAT_RAG_FULL_DOCUMENT || "1").trim() !== "0";
+
                 const result = await retrieveTopChunks({
-                    s3Key,
+                    s3Key: docRef.s3Key,
+                    documentId: docRef.documentId,
                     query: question.trim(),
-                    topK: 5,
-                    maxContextChars: 6000,
+                    topK: maxChunks,
+                    maxContextChars,
+                    preferFullDocument,
                 });
                 context = result.context || "";
                 matchedChunks = result.chunks || [];
+                relevantToDocument = result.relevantToDocument !== false;
+
+                if (!context.trim()) {
+                    console.warn(
+                        `[chat/ask] No document context after index (docId=${docRef.documentId}, key=${docRef.s3Key}, chunks=${indexMeta.chunkCount})`
+                    );
+                }
             } catch (searchErr) {
-                console.warn("[chat/ask] Vector search failed:", searchErr.message);
+                console.warn("[chat/ask] RAG failed:", searchErr.message);
+                indexMeta = {
+                    ...indexMeta,
+                    ready: false,
+                    message: searchErr.message,
+                };
             }
         }
 
-        // 4. Call LLM with RAG context
+        // 4. Answer: document-open mode never uses general knowledge for off-topic / empty context
         let answer;
         const hasContext = context.trim().length > 0;
-        answer = await callLLM({
-            hasContext,
-            context,
-            question: question.trim(),
-        });
-        if (!answer || !answer.trim()) {
-            answer = hasContext
-                ? "I found document context but could not generate an answer at this time. Please try again."
-                : "I could not generate a response right now. Please try again.";
+
+        if (hasDocumentRef && hasContext && !relevantToDocument) {
+            answer = buildOffTopicDocumentAnswer(question.trim());
+            console.log(
+                `[chat/ask] Off-topic for open document (docId=${docRef.documentId}, key=${docRef.s3Key})`
+            );
+        } else if (hasDocumentRef && !hasContext) {
+            answer = buildNoDocumentContextAnswer(question.trim());
+        } else {
+            answer = await callLLM({
+                hasContext,
+                context,
+                question: question.trim(),
+                documentOnly: hasDocumentRef,
+            });
+            if (!answer || !answer.trim()) {
+                answer = hasContext
+                    ? "I found document context but could not generate an answer at this time. Please try again."
+                    : "I could not generate a response right now. Please try again.";
+            }
         }
 
         // 5. Save assistant message
@@ -343,23 +620,18 @@ const askQuestion = async (req, res) => {
             message_text: answer,
         });
 
-        // 6. Save citations
-        const citationRecords = [];
-        for (const chunk of matchedChunks) {
-            if (chunk.segment_id) {
-                const citation = await Citation.create({
-                    message_id: aiMessage.message_id,
-                    segment_id: chunk.segment_id,
-                    excerpt: (chunk.content || "").substring(0, 500),
-                });
-                citationRecords.push({
-                    citation_id: citation.citation_id,
-                    segment_id: chunk.segment_id,
-                    excerpt: citation.excerpt,
-                    similarity: chunk.similarity,
-                });
-            }
+        // 6. Save citations (matched chunks, or fallback to first segments if RAG had context)
+        let citationChunks = matchedChunks;
+        if (!citationChunks.length && context.trim()) {
+            citationChunks = (await listSegmentsForDocRef(docRef)).slice(0, 5);
         }
+        if (!citationChunks.length && (indexMeta.chunkCount ?? 0) > 0) {
+            citationChunks = (await listSegmentsForDocRef(docRef)).slice(0, 5);
+        }
+        const citationRecords = await saveCitationsForMessage(
+            aiMessage.message_id,
+            citationChunks
+        );
 
         return res.json({
             success: true,
@@ -369,12 +641,67 @@ const askQuestion = async (req, res) => {
                 messageId: aiMessage.message_id,
                 citations: citationRecords,
                 contextFound: context.trim().length > 0,
+                relevantToDocument: hasDocumentRef ? relevantToDocument : null,
+                documentId: docRef.documentId,
+                s3Key: docRef.s3Key,
+                indexedNow: !!indexMeta.indexedNow,
+                indexSkipped: !!indexMeta.skipped,
+                chunkCount: indexMeta.chunkCount ?? 0,
             },
         });
     } catch (err) {
         console.error("[chat/ask] Error:", err.message);
         const mapped = mapChatErrorToClient(err);
         return res.status(mapped.httpStatus).json({ success: false, message: mapped.message });
+    }
+};
+
+/**
+ * POST /api/chat/prepare
+ * Index/embed the open document before the user asks (faster first answer).
+ * Body: { s3Key?, documentId? }
+ */
+const prepareDocumentForChat = async (req, res) => {
+    try {
+        const userId = resolveChatUserId(req);
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Missing user identity. Provide token or userId.",
+            });
+        }
+
+        const docRef = await resolveChatDocumentRef({
+            s3Key: req.body?.s3Key,
+            documentId: req.body?.documentId,
+        });
+
+        if (!docRef.s3Key && !docRef.documentId) {
+            return res.status(400).json({
+                success: false,
+                message: "Missing documentId or s3Key.",
+            });
+        }
+
+        const result = await ensureDocumentReadyForChat(docRef);
+        return res.json({
+            success: true,
+            data: {
+                ready: result.ready,
+                indexedNow: result.indexedNow,
+                skipped: result.skipped,
+                chunkCount: result.chunkCount ?? 0,
+                documentId: result.documentId ?? docRef.documentId,
+                s3Key: result.s3Key ?? docRef.s3Key,
+                message: result.message || null,
+            },
+        });
+    } catch (err) {
+        console.error("[chat/prepare] Error:", err.message);
+        return res.status(500).json({
+            success: false,
+            message: err.message || "Could not prepare document for chat.",
+        });
     }
 };
 
@@ -434,4 +761,11 @@ const getSessionMessages = async (req, res) => {
     }
 };
 
-module.exports = { askQuestion, getSessions, getSessionMessages };
+module.exports = {
+    askQuestion,
+    prepareDocumentForChat,
+    getSessions,
+    getSessionMessages,
+    ensureDocumentReadyForChat,
+    resolveChatDocumentRef,
+};

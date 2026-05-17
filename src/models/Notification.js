@@ -23,6 +23,11 @@ const Notification = sequelize.define('Notification', {
         type: DataTypes.TEXT,
         allowNull: false
     },
+    /** JSON string, e.g. { kind, documentId, commentId, s3Key } for deep-link navigation */
+    action_payload: {
+        type: DataTypes.TEXT,
+        allowNull: true
+    },
     is_read: {
         type: DataTypes.BOOLEAN,
         defaultValue: false

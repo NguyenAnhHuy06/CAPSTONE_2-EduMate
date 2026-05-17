@@ -1589,13 +1589,37 @@ app.post("/api/documents/comments", async (req, res) => {
     if (!hasDocId && !s3Key) {
       return res.status(400).json({ success: false, message: "Missing documentId or s3Key." });
     }
-    await db.insertDocumentComment({
+    const commentId = await db.insertDocumentComment({
       documentId,
       s3Key,
       userId: uid,
       body: text,
     });
-    return res.status(201).json({ success: true, message: "Posted." });
+
+    let commenterName = "Someone";
+    try {
+      const commenter = await db.getUserById(uid);
+      commenterName =
+        String(commenter?.name || commenter?.display_name || commenter?.email || "").trim() ||
+        commenterName;
+    } catch (_) {
+      /* optional */
+    }
+    const { notifyDocumentOwnerOnNewComment } = require("./src/services/documentCommentNotify");
+    void notifyDocumentOwnerOnNewComment({
+      documentId,
+      s3Key,
+      commentId,
+      commenterUserId: uid,
+      commenterName,
+      commentPreview: text,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Posted.",
+      commentId: commentId != null ? commentId : undefined,
+    });
   } catch (err) {
     console.error("[api/documents/comments POST]", err);
     return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
@@ -1627,8 +1651,11 @@ app.get("/api/documents/download-url", async (req, res) => {
     if (s3Key.includes("..")) {
       return res.status(400).json({ success: false, message: "Invalid file reference." });
     }
-    const url = await s3.getPresignedDownloadUrl(s3Key, 300);
-    const fileName = path.basename(s3Key) || "document";
+    const s3Docs = require("./src/services/s3Upload");
+    const fileName = await s3Docs
+      .getObjectDownloadFilename(s3Key)
+      .catch(() => s3Docs.humanNameFromStorageKey(s3Key));
+    const url = await s3.getPresignedDownloadUrl(s3Key, 300, { downloadFileName: fileName });
     recordDocumentDownload(rawDocumentId, s3Key);
     activityLog.logActivity(getBearerUserId(req), "download_document", `Requested download for: ${fileName}`, req.ip);
 
@@ -1670,8 +1697,25 @@ async function streamDocumentFile(req, res, mode = "attachment", options = {}) {
     }
     const { buffer, contentType } = await s3.getObjectBuffer(s3Key);
     recordDocumentDownload(rawDocumentId, s3Key);
-    const baseName = path.basename(s3Key) || "document";
-    const safeBase = baseName.replace(/[\r\n"]/g, "_");
+
+    let downloadName = null;
+    if (rawDocumentId != null && String(rawDocumentId).trim() !== "" && db.isConfigured()) {
+      const doc = await db.getDocumentById(rawDocumentId);
+      const title = doc?.title != null ? String(doc.title).trim() : "";
+      if (title) {
+        const ext = path.extname(s3Key) || "";
+        downloadName = ext && !title.toLowerCase().endsWith(ext.toLowerCase())
+          ? `${title}${ext}`
+          : title;
+      }
+    }
+    if (!downloadName) {
+      const s3Docs = require("./src/services/s3Upload");
+      downloadName = await s3Docs
+        .getObjectDownloadFilename(s3Key)
+        .catch(() => s3Docs.humanNameFromStorageKey(s3Key));
+    }
+    const safeBase = String(downloadName || "document").replace(/[\r\n"]/g, "_");
     res.setHeader("Content-Type", contentType || "application/octet-stream");
     const forceInline =
       mode === "inline" ||
@@ -3714,7 +3758,9 @@ app.post(
       const up = await s3Docs.uploadDocumentBuffer({
         buffer: req.file.buffer,
         key,
-        contentType: detectedType.mime
+        contentType: detectedType.mime,
+        originalFileName: req.file.originalname,
+        documentTitle: String(title).trim(),
       });
 
       let resolvedCourseId = optionalBodyNumber(courseId);
@@ -3816,6 +3862,10 @@ app.post(
       };
 
       activityLog.logActivity(resolvedUploaderId, "upload_document", `Uploaded document: ${row.title} (${row.category})`, req.ip);
+
+      ensureIndexedForQuiz(key).catch((indexErr) => {
+        console.warn("[api/documents/upload] background index:", indexErr.message);
+      });
 
       return res.status(201).json({
         success: true,
@@ -3923,6 +3973,12 @@ async function start() {
       const { sequelize, ensureDatabase } = require("./src/config/db");
       await ensureDatabase();
       await sequelize.sync();
+      const {
+        ensureNotificationActionPayloadColumn,
+        ensureCitationsTable,
+      } = require("./src/services/notificationSchema");
+      await ensureNotificationActionPayloadColumn();
+      await ensureCitationsTable();
       console.log("Sequelize: tables synced (notifications, flashcards, chat, …).");
     } catch (seqErr) {
       console.warn("Sequelize sync skipped:", seqErr.message);
