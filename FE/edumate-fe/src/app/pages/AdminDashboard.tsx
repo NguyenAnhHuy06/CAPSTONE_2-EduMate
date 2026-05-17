@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { Profile } from './Profile';
-import api from '../../services/api';
+import api, { getApiErrorMessage } from '../../services/api';
 import { Heart } from 'lucide-react';
 
 type AdminTab = 'overview' | 'users' | 'moderation' | 'donations' | 'logs' | 'profile';
@@ -206,7 +206,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
       setArchiveMessage(res.message || 'Archiving complete.');
       fetchData(); // Refresh archives and logs
     } catch (err: any) {
-      setArchiveMessage(`Archiving failed: ${err.response?.data?.message || err.message}`);
+      setArchiveMessage(`Lưu trữ thất bại: ${getApiErrorMessage(err)}`);
     } finally {
       setArchiving(false);
     }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Bot, Loader2, Minus, X, MessageCircle } from 'lucide-react';
-import api from '../../services/api';
+import api, { getApiErrorMessage } from '../../services/api';
 
 interface Message {
   message_id: number;
@@ -137,15 +137,14 @@ export function AIChatPanel({
       } else {
         throw new Error(res.message || 'Failed to get answer');
       }
-    } catch (err: any) {
-      console.error(err);
+    } catch (err: unknown) {
+      console.error('[AIChatPanel] send failed:', err);
       setMessages((prev) => [
         ...prev,
         {
           message_id: Date.now() + 2,
           role: 'assistant',
-          message_text:
-            'Sorry, an error occurred while processing your question: ' + (err.message || 'Unknown error'),
+          message_text: `Xin lỗi, không thể xử lý câu hỏi. ${getApiErrorMessage(err)}`,
         },
       ]);
     } finally {

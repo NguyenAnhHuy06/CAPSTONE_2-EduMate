@@ -114,12 +114,8 @@ export default function DonatePage() {
       setQrVisible(!!nextData.qr_image_url);
       setDonateInfo(nextData);
       setSaveMessage('Donation information updated successfully.');
-    } catch (err: any) {
-      const apiMessage =
-        err?.response?.data?.message ||
-        err?.message ||
-        'Could not update donation information.';
-      setSaveError(apiMessage);
+    } catch (err: unknown) {
+      setSaveError(getApiErrorMessage(err, 'Không thể cập nhật thông tin quyên góp.'));
     } finally {
       setIsSaving(false);
     }

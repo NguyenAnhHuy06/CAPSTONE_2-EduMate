@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, User, GraduationCap } from 'lucide-react';
-import api from '../../services/api';
+import api, { getApiErrorMessage } from '../../services/api';
 
 interface RegisterProps {
   onRegister: (role: 'instructor' | 'student', userData: any) => void;
@@ -88,7 +88,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
       setErrors({});
       onBackToLogin();
       } catch (err: any) {
-        setErrors({ otpCode: String(err?.response?.data?.message || 'OTP verification failed.') });
+        setErrors({ otpCode: getApiErrorMessage(err, 'Xác minh OTP thất bại.') });
       } finally {
         setSubmitting(false);
       }
@@ -117,7 +117,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
       setMessage('OTP has been sent. Please check your email.');
       setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
     } catch (err: any) {
-      setErrors({ email: String(err?.response?.data?.message || 'Registration failed.') });
+      setErrors({ email: getApiErrorMessage(err, 'Đăng ký thất bại.') });
     } finally {
       setSubmitting(false);
     }
@@ -153,7 +153,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
     } catch (err: any) {
       setErrors((prev) => ({
         ...prev,
-        otpCode: String(err?.response?.data?.message || 'Failed to resend OTP.'),
+        otpCode: getApiErrorMessage(err, 'Không thể gửi lại OTP.'),
       }));
     } finally {
       setResendingOtp(false);

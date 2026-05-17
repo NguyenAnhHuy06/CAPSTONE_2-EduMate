@@ -8,6 +8,12 @@ const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const mysql = require("mysql2/promise");
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const {
+  DEFAULT_SAFE_MESSAGE,
+  logApiError,
+  sendErrorResponse,
+  globalApiErrorHandler,
+} = require("./api-errors");
 
 const app = express();
 const PORT = 3001;
@@ -733,7 +739,7 @@ app.post("/api/questions/media/upload-s3", uploadMedia.single("mediaFile"), asyn
     if (req.file?.path) deleteFileIfExists(req.file.path);
     return res.status(500).json({
       success: false,
-      message: "S3 is not configured. Set AWS_REGION, AWS_S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.",
+      message: "Dịch vụ lưu trữ media chưa sẵn sàng. Vui lòng thử lại sau.",
     });
   }
   if (!req.file) {
@@ -776,11 +782,13 @@ app.post("/api/questions/media/upload-s3", uploadMedia.single("mediaFile"), asyn
       },
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "S3 upload failed.",
-      error: err?.message || "Unknown S3 error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      "Không thể tải media lên. Vui lòng thử lại.",
+      err,
+      "POST /api/questions/media/upload-s3"
+    );
   } finally {
     if (req.file?.path) deleteFileIfExists(req.file.path);
   }
@@ -819,11 +827,13 @@ app.get("/api/questions/media/file", async (req, res) => {
     }
     body.pipe(res);
   } catch (err) {
-    return res.status(404).json({
-      success: false,
-      message: "Media file not found on S3.",
-      error: err?.message || "Unknown S3 error.",
-    });
+    return sendErrorResponse(
+      res,
+      404,
+      "Không tìm thấy file media.",
+      err,
+      "GET /api/questions/media/file"
+    );
   }
 });
 
@@ -1978,11 +1988,13 @@ app.get("/api/questions/bank", async (req, res) => {
       data,
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "GET /api/questions/bank"
+    );
   }
 });
 
@@ -2025,11 +2037,13 @@ app.post("/api/questions/bank", async (req, res) => {
       data: { id: Number(result.insertId) },
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "POST /api/questions/bank"
+    );
   }
 });
 
@@ -2076,11 +2090,13 @@ app.patch("/api/questions/bank/:id", async (req, res) => {
     }
     return res.status(200).json({ success: true, message: "Question updated successfully." });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "PATCH /api/questions/bank/:id"
+    );
   }
 });
 
@@ -2109,11 +2125,13 @@ app.delete("/api/questions/bank/:id", async (req, res) => {
     }
     return res.status(200).json({ success: true, message: "Question deleted successfully." });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "DELETE /api/questions/bank/:id"
+    );
   }
 });
 
@@ -2504,29 +2522,8 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  if (req.file && req.file.path) {
-    deleteFileIfExists(req.file.path);
-  }
-
-  if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "File exceeds 10MB. Please choose a file 10MB or smaller.",
-      });
-    }
-
-    return res.status(400).json({
-      success: false,
-      message: err.message || "File upload error.",
-    });
-  }
-
-  return res.status(400).json({
-    success: false,
-    message: err.message || "A server error occurred.",
-  });
+  if (req.file && req.file.path) deleteFileIfExists(req.file.path);
+  return globalApiErrorHandler(err, req, res, next);
 });
 
 app.listen(PORT, () => {

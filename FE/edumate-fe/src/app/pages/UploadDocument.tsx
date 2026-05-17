@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
 import { getApiBaseUrl } from '@/services/api';
+import { SAFE_ERROR, sanitizeApiUserMessage } from '@/utils/safeErrorMessage';
 
 interface UploadDocumentProps {
   userRole: 'instructor' | 'student';
@@ -90,7 +91,8 @@ const handleSubmit = async (e: React.FormEvent) => {
           body: form,
         });
     } catch (err) {
-      throw new Error("Could not connect to server (CORS / server down)");
+      console.error('[UploadDocument] network failed:', err);
+      throw new Error(SAFE_ERROR.network);
     }
 
     let data;
@@ -98,11 +100,13 @@ const handleSubmit = async (e: React.FormEvent) => {
     try {
       data = await res.json();
     } catch (err) {
-      throw new Error("Server did not return valid JSON");
+      console.error('[UploadDocument] invalid JSON:', err);
+      throw new Error(SAFE_ERROR.generic);
     }
 
     if (!res.ok) {
-      throw new Error(data.message || "Upload failed");
+      const msg = sanitizeApiUserMessage(String(data?.message || ''));
+      throw new Error(msg || SAFE_ERROR.upload);
     }
 
     setUploadSuccess(true);
@@ -129,8 +133,12 @@ const handleSubmit = async (e: React.FormEvent) => {
       onUploadComplete();
     }, 2000);
 
-  } catch (err: any) {
-    alert(err.message || "An error occurred during upload. Please try again.");
+  } catch (err: unknown) {
+    const msg =
+      err instanceof Error && sanitizeApiUserMessage(err.message)
+        ? err.message
+        : SAFE_ERROR.upload;
+    alert(msg);
   } finally {
     setUploading(false);
   }

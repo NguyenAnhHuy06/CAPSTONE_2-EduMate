@@ -15,7 +15,8 @@ import { QuizCreator } from '../pages/QuizCreator';
 import { FlashcardCreator, type FlashcardInitialEdit } from '../pages/FlashcardCreator';
 import { FlashcardViewer } from '../pages/student/FlashcardViewer';
 import { AIChatPanel, AIChatLauncher } from './AIChatPanel';
-import api, { getStoredAuthToken } from '@/services/api';
+import api, { getApiErrorMessage, getStoredAuthToken } from '@/services/api';
+import { SAFE_ERROR, sanitizeApiUserMessage } from '@/utils/safeErrorMessage';
 import { useNotification } from './NotificationContext';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -91,9 +92,11 @@ async function parseBlobError(blob: Blob): Promise<string> {
     const text = await blob.text();
     if (text.trim().startsWith('{')) {
       const j = JSON.parse(text) as { message?: string; error?: string };
-      return String(j?.message || j?.error || '').trim();
+      return (
+        sanitizeApiUserMessage(String(j?.message || j?.error || '').trim()) || ''
+      );
     }
-    return text.trim().slice(0, 160);
+    return sanitizeApiUserMessage(text.trim()) || '';
   } catch {
     return '';
   }
@@ -118,7 +121,7 @@ async function fetchDocumentBlobViaApi(ref: DocumentFileRef): Promise<Blob> {
   const type = (blob.type || '').toLowerCase();
   if (type.includes('json') || type.includes('html') || type.includes('text/plain')) {
     const serverMsg = await parseBlobError(blob);
-    throw new Error(serverMsg || 'Could not load file from server.');
+    throw new Error(serverMsg || SAFE_ERROR.generic);
   }
 
   return blob;
@@ -695,11 +698,9 @@ export function DocumentDetail ({
         applyWordPageVisibility(wordPreviewRef.current, 1, wordPagingRef.current);
       } catch (err) {
         if (!cancelled) {
-          const detail =
-            err instanceof Error && err.message.trim()
-              ? err.message.trim()
-              : 'Could not render this Word document in the browser.';
-          setWordRenderError(detail);
+          setWordRenderError(
+            getApiErrorMessage(err, 'Không thể hiển thị tài liệu Word. Vui lòng tải xuống để xem.')
+          );
           setWordTotalPages(0);
           wordPagingRef.current = { mode: 'sections', pageHeight: 0 };
         }
@@ -834,12 +835,11 @@ export function DocumentDetail ({
       });
       setNewComment('');
       await loadComments();
-    } catch (err: any) {
-      const msg = err?.response?.data?.message;
+    } catch (err: unknown) {
       showNotification({
         type: 'error',
         title: 'Could not post',
-        message: typeof msg === 'string' && msg.trim() ? msg : 'Please try again.',
+        message: getApiErrorMessage(err),
       });
     } finally {
       setCommentsPosting(false);
@@ -872,11 +872,11 @@ export function DocumentDetail ({
           message: String(res?.message || 'Could not verify.'),
         });
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotification({
         type: 'error',
         title: 'Verify',
-        message: String(e?.message || 'Could not verify.'),
+        message: getApiErrorMessage(e, 'Không thể xác minh tài liệu.'),
       });
     } finally {
       setIsVerifying(false);
@@ -905,11 +905,11 @@ export function DocumentDetail ({
           message: String(res?.message || 'Could not reject.'),
         });
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotification({
         type: 'error',
         title: 'Reject',
-        message: String(e?.message || 'Could not reject.'),
+        message: getApiErrorMessage(e, 'Không thể từ chối tài liệu.'),
       });
     } finally {
       setIsVerifying(false);
@@ -949,11 +949,11 @@ export function DocumentDetail ({
           message: res?.message || 'Could not submit report.',
         });
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       showNotification({
         type: 'error',
         title: 'Report Failed',
-        message: e?.response?.data?.message || 'An error occurred while reporting.',
+        message: getApiErrorMessage(e, 'Không thể gửi báo cáo.'),
       });
     } finally {
       setIsReporting(false);

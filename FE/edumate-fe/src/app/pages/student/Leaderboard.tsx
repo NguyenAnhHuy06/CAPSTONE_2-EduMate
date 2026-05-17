@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Award, TrendingUp, Medal, Crown, RefreshCw, Trophy, Users, Target } from 'lucide-react';
-import api from '../../../services/api';
+import api, { getApiErrorMessage } from '../../../services/api';
 
 interface LeaderboardEntry {
   rank: number;
@@ -231,9 +231,9 @@ export function Leaderboard({ user }: LeaderboardProps) {
       setData(marked);
       setMyRank(res?.myRank ?? null);
       setLastUpdated(new Date());
-    } catch (err: any) {
-      // Graceful fallback – hiển thị error nhưng không crash
-      setError(err?.response?.data?.message || err?.message || 'Failed to load leaderboard.');
+    } catch (err: unknown) {
+      console.error('[Leaderboard] load failed:', err);
+      setError(getApiErrorMessage(err, 'Không thể tải bảng xếp hạng.'));
       setData([]);
     } finally {
       setLoading(false);
