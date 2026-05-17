@@ -52,6 +52,33 @@ router.get("/recent", auth, getRecentDocuments);
 router.get("/for-quiz", auth, getDocumentsForQuiz);
 router.get("/s3-list", auth, getS3Documents);
 
+router.get("/course-suggestions", async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const Course = require("../models/Course");
+    const { Op } = require("sequelize");
+
+    const courses = await Course.findAll({
+      where: {
+        course_code: {
+          [Op.like]: `%${query}%`
+        }
+      },
+      limit: 10,
+      attributes: ['course_code', 'course_name']
+    });
+
+    return res.json({ success: true, data: courses });
+  } catch (err) {
+    console.error("[course-suggestions]", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Document verification — Lecturer/Admin only (Design: UC04)
 const verifyDocumentHandler = async (req, res) => {
   try {

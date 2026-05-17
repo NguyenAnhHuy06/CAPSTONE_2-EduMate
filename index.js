@@ -1377,6 +1377,34 @@ async function buildDocumentsForQuizList(options = {}) {
   return merged;
 }
 
+app.get("/api/documents/course-suggestions", async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const Course = require("./src/models/Course");
+    const { Op } = require("sequelize");
+
+    const courses = await Course.findAll({
+      where: {
+        [Op.or]: [
+          { course_code: { [Op.like]: `%${query}%` } },
+          { course_name: { [Op.like]: `%${query}%` } }
+        ]
+      },
+      limit: 10,
+      attributes: ['course_code', 'course_name']
+    });
+
+    return res.json({ success: true, data: courses });
+  } catch (err) {
+    console.error("[course-suggestions]", err.message);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.get("/api/documents/for-quiz", async (req, res) => {
   try {
     const docTypeFilter = parseDocTypeFilterQuery(req);
