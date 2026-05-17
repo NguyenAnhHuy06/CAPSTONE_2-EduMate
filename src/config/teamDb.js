@@ -76,7 +76,7 @@ async function ensureQuizLifecycleColumns() {
     catch (e) { if (e.code !== "ER_DUP_FIELDNAME") console.warn("ensureQuizLifecycleColumns:", e.message); }
   }
   try {
-    await p.execute("ALTER TABLE question_bank_items DROP CHECK chk_qbi_correct_answer");
+    await p.execute("ALTER TABLE question_bank_items DROP CONSTRAINT chk_qbi_correct_answer");
   } catch (e) {
     const msg = String(e?.message || "");
     if (
