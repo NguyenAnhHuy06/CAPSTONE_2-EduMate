@@ -137,7 +137,7 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
 
   const description =
     chunkCount > 0
-      ? `Indexed learning material with ${chunkCount} text segment${chunkCount === 1 ? '' : 's'}. Suitable for AI quizzes and study.`
+      ? ''
       : apiRow.inDatabase
         ? 'Registered in the system; indexing may still be running.'
         : 'File in cloud storage; connect and index this document to enable AI features.'
@@ -637,7 +637,7 @@ export function DocumentLibrary({
                     </>
                   ) : null}
                 </div>
-                <p className="text-gray-600 mb-3">{doc.description}</p>
+                {doc.description && <p className="text-gray-600 mb-3">{doc.description}</p>}
                 <div className="flex items-center gap-4 text-gray-500 flex-wrap">
                   <span>
                     By {doc.author} ({doc.authorRole})
