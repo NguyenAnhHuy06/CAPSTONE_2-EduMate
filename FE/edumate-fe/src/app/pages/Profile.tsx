@@ -101,7 +101,13 @@ export function Profile({ user, onUserUpdate }: ProfileProps) {
                     const history = Array.isArray(historyRes?.data) ? historyRes.data : [];
                     const analytics = analyticsRes?.data || analyticsRes || {};
                     const perf = Array.isArray(analytics?.performance) ? analytics.performance : [];
-                    const published = perf.filter((p: any) => p?.isPublished).length;
+                    const publishedFromHistory = history.filter(
+                        (h: any) => Boolean(h?.isPublished) || Boolean(h?.publishedAt)
+                    ).length;
+                    const published =
+                        publishedFromHistory > 0
+                            ? publishedFromHistory
+                            : perf.filter((p: any) => p?.isPublished).length;
                     const students = Number(analytics?.summary?.totalParticipants ?? 0);
                     if (!cancelled) {
                         setStats([

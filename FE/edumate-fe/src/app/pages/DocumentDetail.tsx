@@ -699,7 +699,7 @@ export function DocumentDetail ({
       } catch (err) {
         if (!cancelled) {
           setWordRenderError(
-            getApiErrorMessage(err, 'Không thể hiển thị tài liệu Word. Vui lòng tải xuống để xem.')
+            getApiErrorMessage(err, 'Could not display this Word file. Please download it to view.')
           );
           setWordTotalPages(0);
           wordPagingRef.current = { mode: 'sections', pageHeight: 0 };
@@ -876,7 +876,7 @@ export function DocumentDetail ({
       showNotification({
         type: 'error',
         title: 'Verify',
-        message: getApiErrorMessage(e, 'Không thể xác minh tài liệu.'),
+        message: getApiErrorMessage(e, 'Could not verify this document.'),
       });
     } finally {
       setIsVerifying(false);
@@ -909,7 +909,7 @@ export function DocumentDetail ({
       showNotification({
         type: 'error',
         title: 'Reject',
-        message: getApiErrorMessage(e, 'Không thể từ chối tài liệu.'),
+        message: getApiErrorMessage(e, 'Could not reject this document.'),
       });
     } finally {
       setIsVerifying(false);
@@ -953,7 +953,7 @@ export function DocumentDetail ({
       showNotification({
         type: 'error',
         title: 'Report Failed',
-        message: getApiErrorMessage(e, 'Không thể gửi báo cáo.'),
+        message: getApiErrorMessage(e, 'Could not submit report.'),
       });
     } finally {
       setIsReporting(false);
@@ -1303,7 +1303,7 @@ export function DocumentDetail ({
             ) : isLegacyWordDoc ? (
               <div className="h-full flex flex-col">
                 <div className="px-3 py-2 border-b border-amber-200 bg-amber-50 text-sm text-amber-900">
-                  File .doc — preview cuộn liên tục. Lưu sang .docx để xem phân trang trong app.
+                  .doc files scroll continuously. Save as .docx to use in-app page navigation.
                 </div>
                 <iframe
                   src={previewUrl || undefined}

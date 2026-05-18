@@ -115,7 +115,7 @@ export default function DonatePage() {
       setDonateInfo(nextData);
       setSaveMessage('Donation information updated successfully.');
     } catch (err: unknown) {
-      setSaveError(getApiErrorMessage(err, 'Không thể cập nhật thông tin quyên góp.'));
+      setSaveError(getApiErrorMessage(err, 'Could not update donation information.'));
     } finally {
       setIsSaving(false);
     }

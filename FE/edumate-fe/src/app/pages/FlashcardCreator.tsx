@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Sparkles,
@@ -72,6 +72,9 @@ export function FlashcardCreator({
   const [flippedCards, setFlippedCards] = useState<Set<string>>(new Set());
   const [saved, setSaved] = useState(false);
   const [authBlocked, setAuthBlocked] = useState(false);
+  const generateInFlightRef = useRef(false);
+  /** Set id already written to MySQL (generate or save) — reuse on next Save to avoid duplicate sets. */
+  const [persistedSetId, setPersistedSetId] = useState<string | null>(null);
 
   const resolvedGenLanguage = useMemo(
     () => inferFlashcardOutputLanguage(document, contentLanguageHint),
@@ -128,10 +131,22 @@ export function FlashcardCreator({
       }))
     );
     setFlashcardSetId(initialEdit.setId);
+    setPersistedSetId(initialEdit.setId);
     setSaved(false);
     setEditingId(null);
     setFlippedCards(new Set());
   }, [initialEdit]);
+
+  const resolveSaveSetId = () => {
+    const editingSetId =
+      initialEdit?.setId != null && String(initialEdit.setId).trim() !== ''
+        ? String(initialEdit.setId).trim()
+        : null;
+    if (editingSetId) return editingSetId;
+    const fromState = String(flashcardSetId || persistedSetId || '').trim();
+    if (fromState) return fromState;
+    return newFlashcardSaveSetId();
+  };
 
   const persistFlashcards = async (cards: Flashcard[], setId?: string | null) => {
     if (!documentId) {
@@ -157,7 +172,10 @@ export function FlashcardCreator({
   };
 
   const generateFlashcards = async () => {
-    const newJobId = `flashcard-gen-${Date.now()}`;
+    if (generateInFlightRef.current || generating) return;
+
+    const newJobId = `flashcard-gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const varietySeed = newJobId;
     const jobTitle = String(document?.title || 'AI Flashcards');
     const token = getStoredAuthToken();
     if (authBlocked && token) {
@@ -194,6 +212,7 @@ export function FlashcardCreator({
       return;
     }
 
+    generateInFlightRef.current = true;
     setGenerating(true);
     setFlashcardSetId(newJobId);
     setFlashcardGeneratingStatus('running', {
@@ -207,6 +226,9 @@ export function FlashcardCreator({
       const res: any = await api.post('/flashcards/generate', {
         s3Key,
         ...(documentId != null ? { documentId } : {}),
+        flashcardSetId: newJobId,
+        flashcard_set_id: newJobId,
+        varietySeed,
         ...flashcardGenerateLanguageFields(resolvedGenLanguage),
       });
 
@@ -235,51 +257,28 @@ export function FlashcardCreator({
 
       setFlashcards(mapped);
 
-      // Auto-save right after generation so cards appear in "Study My Flashcards".
-      setSaving(true);
-      const saveResult = await persistFlashcards(mapped, newJobId);
-      setSaving(false);
+      const savedSetId = String(
+        res?.flashcardSetId ?? res?.saved?.flashcardSetId ?? newJobId
+      ).trim();
 
-      if (saveResult.ok) {
-        setFlashcardGeneratingStatus('completed', {
-          jobId: newJobId,
-          title: jobTitle,
-        });
-        if (documentId != null) emitFlashcardsSaved(documentId);
-        if (documentId != null) {
-          const uid = getCurrentUserId(user) ?? 0;
-          upsertLocalFlashcardSet({
-            documentId,
-            userId: uid,
-            setId: newJobId,
-            savedAt: new Date().toISOString(),
-            cards: mapped.map((c) => ({ id: c.id, front: c.front, back: c.back })),
-          });
-        }
-        showNotification({
-          type: 'success',
-          title: 'Flashcards generated',
-          message: `Generated and saved ${mapped.length} flashcards to Study My Flashcards.`,
-          duration: 3000,
-        });
-      } else {
-        setFlashcardGeneratingStatus('failed', {
-          jobId: newJobId,
-          title: jobTitle,
-          error: saveResult.message || 'Generated flashcards but failed to save.',
-        });
-        showNotification({
-          type: 'warning',
-          title: 'Generated but not saved',
-          message: saveResult.message || 'Generated flashcards, but auto-save failed.',
-          duration: 4000,
-        });
-      }
+      setFlashcardSetId(savedSetId);
+      setPersistedSetId(savedSetId);
+      setFlashcardGeneratingStatus('completed', {
+        jobId: savedSetId,
+        title: jobTitle,
+      });
+      if (documentId != null) emitFlashcardsSaved(documentId);
+      showNotification({
+        type: 'success',
+        title: 'Flashcards generated',
+        message: `Saved ${mapped.length} cards to Study My Flashcards. Editing? Use "Update saved set" (same set, not a new one).`,
+        duration: 3000,
+      });
     } catch (err: any) {
       setFlashcardGeneratingStatus('failed', {
         jobId: newJobId,
         title: jobTitle,
-        error: getApiErrorMessage(err, 'Không thể tạo flashcard.'),
+        error: getApiErrorMessage(err, 'Could not generate flashcards.'),
       });
       if (err?.response?.status === 401) {
         setAuthBlocked(true);
@@ -287,10 +286,11 @@ export function FlashcardCreator({
       showNotification({
         type: 'error',
         title: 'Generation failed',
-        message: getApiErrorMessage(err, 'Không thể tạo flashcard.'),
+        message: getApiErrorMessage(err, 'Could not generate flashcards.'),
         duration: 4000,
       });
     } finally {
+      generateInFlightRef.current = false;
       setGenerating(false);
     }
   };
@@ -358,13 +358,9 @@ export function FlashcardCreator({
     setSaving(true);
 
     try {
-      const editingSetId =
-        initialEdit?.setId != null && String(initialEdit.setId).trim() !== ''
-          ? String(initialEdit.setId).trim()
-          : null;
-      // Edit existing set → same ID. Create / generate-then-save → new ID every Save (no overwrite).
-      const setId = editingSetId ?? newFlashcardSaveSetId();
+      const setId = resolveSaveSetId();
       setFlashcardSetId(setId);
+      setPersistedSetId(setId);
       const saveResult = await persistFlashcards(flashcards, setId);
       if (!saveResult.ok) {
         showNotification({
@@ -407,7 +403,7 @@ export function FlashcardCreator({
       showNotification({
         type: 'error',
         title: 'Save failed',
-        message: getApiErrorMessage(err, 'Không thể lưu flashcard.'),
+        message: getApiErrorMessage(err, 'Could not save flashcards.'),
         duration: 4000,
       });
     } finally {
@@ -477,10 +473,19 @@ export function FlashcardCreator({
             <button
               onClick={handleSave}
               disabled={saving || authBlocked}
+              title={
+                persistedSetId
+                  ? 'Update the flashcard set already saved on the server'
+                  : 'Save as a new flashcard set'
+              }
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
             >
               <Save size={18} />
-              {saving ? 'Saving...' : 'Save Flashcards'}
+              {saving
+                ? 'Saving...'
+                : persistedSetId
+                  ? 'Update saved set'
+                  : 'Save Flashcards'}
             </button>
           </div>
         )}

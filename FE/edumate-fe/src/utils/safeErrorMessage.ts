@@ -1,16 +1,15 @@
 /**
  * User-facing error copy only — never forward stack traces, SQL, paths, or raw axios text.
  */
-
 export const SAFE_ERROR = {
-  generic: 'Đã xảy ra lỗi. Vui lòng thử lại.',
-  network: 'Không thể kết nối máy chủ. Vui lòng kiểm tra mạng và thử lại.',
-  timeout: 'Yêu cầu quá lâu. Vui lòng thử lại sau.',
-  quizGenerate: 'Không thể tạo bài quiz. Vui lòng thử lại sau.',
-  quizStart: 'Không thể mở bài quiz. Vui lòng thử lại.',
-  attemptRecord: 'Không thể lưu kết quả làm bài. Vui lòng thử lại.',
-  upload: 'Tải tài liệu thất bại. Vui lòng thử lại.',
-  auth: 'Đăng nhập thất bại. Vui lòng kiểm tra thông tin và thử lại.',
+  generic: 'Something went wrong. Please try again.',
+  network: 'Could not reach the server. Check your connection and try again.',
+  timeout: 'The request took too long. Please try again in a moment.',
+  quizGenerate: 'The quiz could not be generated. Please try again later.',
+  quizStart: 'Could not open this quiz. Please try again.',
+  attemptRecord: 'Could not save your attempt. Please try again.',
+  upload: 'Upload failed. Please try again.',
+  auth: 'Sign-in failed. Check your details and try again.',
 } as const;
 
 const TECHNICAL_PATTERNS: RegExp[] = [

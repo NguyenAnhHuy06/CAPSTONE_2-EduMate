@@ -14,6 +14,7 @@ const {
   sendErrorResponse,
   globalApiErrorHandler,
 } = require("./api-errors");
+const { getCourseSuggestions } = require("./course-suggestions");
 
 const app = express();
 const PORT = 3001;
@@ -739,7 +740,7 @@ app.post("/api/questions/media/upload-s3", uploadMedia.single("mediaFile"), asyn
     if (req.file?.path) deleteFileIfExists(req.file.path);
     return res.status(500).json({
       success: false,
-      message: "Dịch vụ lưu trữ media chưa sẵn sàng. Vui lòng thử lại sau.",
+      message: "Media storage is not available. Please try again later.",
     });
   }
   if (!req.file) {
@@ -785,7 +786,7 @@ app.post("/api/questions/media/upload-s3", uploadMedia.single("mediaFile"), asyn
     return sendErrorResponse(
       res,
       500,
-      "Không thể tải media lên. Vui lòng thử lại.",
+      "Could not upload media. Please try again.",
       err,
       "POST /api/questions/media/upload-s3"
     );
@@ -830,7 +831,7 @@ app.get("/api/questions/media/file", async (req, res) => {
     return sendErrorResponse(
       res,
       404,
-      "Không tìm thấy file media.",
+      "Media file not found.",
       err,
       "GET /api/questions/media/file"
     );
@@ -865,6 +866,29 @@ function findRecentUploadByRef(documentIdRaw, s3KeyRaw) {
   }
   return null;
 }
+
+/**
+ * Autocomplete course code + name from DB `courses` / `course` column (and upload history).
+ * GET /api/documents/course-suggestions?query=cs&field=code|name|all
+ */
+app.get("/api/documents/course-suggestions", async (req, res) => {
+  const query = String(req.query.query ?? req.query.q ?? "").trim();
+  const field = String(req.query.field ?? "all").trim();
+  if (!query) {
+    return res.status(200).json({ success: true, data: [] });
+  }
+  try {
+    const data = await getCourseSuggestions(
+      { getMysqlPool, recentUploads, logApiError },
+      query,
+      field
+    );
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    logApiError(err, "GET /api/documents/course-suggestions");
+    return res.status(200).json({ success: true, data: [] });
+  }
+});
 
 /**
  * Preview metadata for FE. `url` is intended for inline rendering.
@@ -1372,6 +1396,88 @@ app.get("/api/quizzes/edited-by-lecturer", (req, res) => {
         lastAttemptAt: q.lastAttemptAt || null,
       };
     });
+  return res.status(200).json({
+    success: true,
+    total: rows.length,
+    data: rows,
+  });
+});
+
+/** Lecturer inbox: quizzes students shared for review (not scoped to lecturer userId). */
+app.get("/api/quizzes/shared-by-students", (req, res) => {
+  const limit = Math.min(500, Math.max(1, toNum(req.query?.limit, 200)));
+  const attemptsByQuiz = new Map();
+  for (const a of quizAttempts) {
+    if (String(a.status || "") !== "completed") continue;
+    const list = attemptsByQuiz.get(a.quizId) || [];
+    list.push(a);
+    attemptsByQuiz.set(a.quizId, list);
+  }
+
+  const rows = quizzes
+    .filter((q) => Boolean(q.sharedForReview))
+    .sort((a, b) => {
+      const ta = new Date(a.sharedAt || a.createdAt || 0).getTime();
+      const tb = new Date(b.sharedAt || b.createdAt || 0).getTime();
+      return tb - ta;
+    })
+    .slice(0, limit)
+    .map((q) => {
+      const allAttempts = attemptsByQuiz.get(q.id) || [];
+      const sharedByUserId = Number(q.sharedByUserId ?? 0) || null;
+      const sharedUser =
+        sharedByUserId != null
+          ? users.find((u) => Number(u?.user_id) === Number(sharedByUserId))
+          : null;
+      const rawSharedByName = String(q.sharedByName || "").trim();
+      const resolvedSharedName =
+        !isGenericDisplayName(rawSharedByName)
+          ? rawSharedByName
+          : resolveUserDisplayName(sharedUser, "Student");
+      const resolvedSharedCode =
+        String(q.sharedByUserCode || "").trim() ||
+        String(sharedUser?.user_code || "").trim() ||
+        null;
+      const studentAttempts = sharedByUserId
+        ? allAttempts.filter((a) => String(a.userId ?? "") === String(sharedByUserId))
+        : allAttempts;
+      const latest =
+        studentAttempts.sort((a, b) => {
+          const ta = new Date(a.completedAt || a.createdAt || 0).getTime();
+          const tb = new Date(b.completedAt || b.createdAt || 0).getTime();
+          return tb - ta;
+        })[0] || null;
+
+      return {
+        id: q.id,
+        quizId: q.id,
+        title: q.title,
+        courseCode: q.courseCode || "DOC",
+        documentCategory: q.documentCategory || q.category || null,
+        questionCount: Number(q.questionsCount || 0),
+        attemptsCount: studentAttempts.length || allAttempts.length,
+        scorePercent:
+          latest != null && latest.scorePercent != null
+            ? latest.scorePercent
+            : Number(q.scorePercent || 0),
+        createdAt: q.createdAt || null,
+        publishedAt: q.publishedAt || null,
+        isPublished: Boolean(q.isPublished),
+        sharedForReview: true,
+        sharedFromStudent: true,
+        sharedAt: q.sharedAt || null,
+        sharedByUserId,
+        sharedByName: resolvedSharedName,
+        sharedByUserCode: resolvedSharedCode,
+        sharedAttemptId: q.sharedAttemptId ?? latest?.id ?? null,
+        s3Key: q.sourceKey ?? q.s3Key ?? null,
+        sourceKey: q.sourceKey ?? q.s3Key ?? null,
+        documentId: q.documentId ?? null,
+        lastAttemptId: latest?.id ?? null,
+        lastAttemptAt: latest?.completedAt || latest?.createdAt || q.lastAttemptAt || null,
+      };
+    });
+
   return res.status(200).json({
     success: true,
     total: rows.length,

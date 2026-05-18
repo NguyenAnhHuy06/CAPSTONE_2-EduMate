@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
     FileText,
@@ -17,6 +17,10 @@ import {
     Save,
     ArrowLeft,
     Lightbulb,
+    ChevronLeft,
+    ChevronRight,
+    ChevronsLeft,
+    ChevronsRight,
 } from 'lucide-react';
 import api, { getApiBaseUrl, getApiErrorMessage, getStoredAuthToken } from '@/services/api';
 import {
@@ -27,6 +31,7 @@ import {
 import { useNotification } from '../NotificationContext';
 import { formatDateTimeWithSeconds } from '@/utils/formatDateTime';
 const LETTERS = ['A', 'B', 'C', 'D'];
+const QUIZ_LIST_PAGE_SIZE = 10;
 
 function questionKeyForAttemptRow(q: any, idx: number): string {
     return String(q?.id ?? q?.question_id ?? q?.questionId ?? `q-${idx + 1}`);
@@ -370,6 +375,12 @@ interface Quiz {
     /** Display name of the student who shared (from API / mock). */
     sharedByName?: string;
     creatorName?: string;
+    publishedByEmail?: string;
+    /** Owner lecturer user_id — used to gate delete/edit on published catalog rows. */
+    createdBy?: number;
+    /** True when this row belongs to the signed-in lecturer (draft history or createdBy match). */
+    isOwner?: boolean;
+    canDelete?: boolean;
     sharedByUserId?: number;
     sharedByUserCode?: string;
     sharedByEmail?: string;
@@ -749,6 +760,26 @@ export function QuizManagement({
         }
     };
 
+    const lecturerUserId = user?.user_id ?? user?.id ?? user?.userId;
+    const lecturerDisplayName = String(
+        user?.full_name ?? user?.fullName ?? user?.name ?? user?.email ?? user?.user_code ?? 'Lecturer'
+    ).trim();
+
+    const canCurrentLecturerManageQuiz = (
+        quiz: Pick<Quiz, 'id' | 'createdBy' | 'sharedForReview' | 'isOwner' | 'canDelete'>
+    ) => {
+        if (Boolean(quiz?.sharedForReview)) return false;
+        const uid = Number(lecturerUserId);
+        const owner = Number(quiz?.createdBy);
+        if (Number.isFinite(owner) && owner > 0) {
+            return Number.isFinite(uid) && uid > 0 && owner === uid;
+        }
+        if (quiz?.isOwner === true) return true;
+        if (quiz?.isOwner === false || quiz?.canDelete === false) return false;
+        if (quiz?.canDelete === true) return true;
+        return false;
+    };
+
     // Filtered data
     const filteredQuizzes = quizzes.filter((quiz) => {
         const matchesSearch =
@@ -759,8 +790,22 @@ export function QuizManagement({
         const matchesSubject = filterSubject === 'all' || quiz.subject === filterSubject;
         const matchesStatus = filterStatus === 'all' || quiz.status === filterStatus;
 
-        // Draft tab shows persisted drafts only (valid DB quiz id).
-        if (activeTab === 'draft') return quiz.status === 'draft' && quiz.id > 0 && matchesSearch && matchesSubject;
+        // Draft tab: only your own persisted drafts (not shared / student copies).
+        if (activeTab === 'draft') {
+            const uid = Number(lecturerUserId);
+            const owner = Number(quiz.createdBy);
+            const isMine =
+                quiz.isOwner === true ||
+                (Number.isFinite(uid) && uid > 0 && Number.isFinite(owner) && owner > 0 && owner === uid);
+            return (
+                quiz.status === 'draft' &&
+                quiz.id > 0 &&
+                !Boolean(quiz.sharedForReview) &&
+                isMine &&
+                matchesSearch &&
+                matchesSubject
+            );
+        }
         if (activeTab === 'published') {
             return (
                 quiz.status === 'published' &&
@@ -773,6 +818,123 @@ export function QuizManagement({
 
         return matchesSearch && matchesSubject && matchesStatus;
     });
+
+    const quizListTotalPages = Math.max(1, Math.ceil(filteredQuizzes.length / QUIZ_LIST_PAGE_SIZE));
+
+    const paginatedQuizzes = useMemo(() => {
+        const start = (page - 1) * QUIZ_LIST_PAGE_SIZE;
+        return filteredQuizzes.slice(start, start + QUIZ_LIST_PAGE_SIZE);
+    }, [filteredQuizzes, page]);
+
+    useEffect(() => {
+        setPage(1);
+    }, [activeTab, searchQuery, filterSubject, filterStatus]);
+
+    useEffect(() => {
+        if (page > quizListTotalPages) {
+            setPage(quizListTotalPages);
+        }
+    }, [page, quizListTotalPages]);
+
+    useEffect(() => {
+        if (!highlightedS3Key) return;
+        const idx = filteredQuizzes.findIndex(
+            (q) => String(q.s3Key || '').trim() === highlightedS3Key
+        );
+        if (idx >= 0) {
+            setPage(Math.floor(idx / QUIZ_LIST_PAGE_SIZE) + 1);
+        }
+    }, [highlightedS3Key, filteredQuizzes]);
+
+    const getQuizPageNumbers = (): (number | '...')[] => {
+        if (quizListTotalPages <= 7) {
+            return Array.from({ length: quizListTotalPages }, (_, i) => i + 1);
+        }
+        const pages: (number | '...')[] = [1];
+        if (page > 3) pages.push('...');
+        const start = Math.max(2, page - 1);
+        const end = Math.min(quizListTotalPages - 1, page + 1);
+        for (let i = start; i <= end; i++) pages.push(i);
+        if (page < quizListTotalPages - 2) pages.push('...');
+        pages.push(quizListTotalPages);
+        return pages;
+    };
+
+    const renderQuizListPagination = () => {
+        if (filteredQuizzes.length === 0) return null;
+        const from = (page - 1) * QUIZ_LIST_PAGE_SIZE + 1;
+        const to = Math.min(page * QUIZ_LIST_PAGE_SIZE, filteredQuizzes.length);
+        return (
+            <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-6 bg-white rounded-lg border border-gray-200 p-4">
+                <p className="text-sm text-gray-500">
+                    Showing{' '}
+                    <span className="font-semibold text-gray-700">{from}</span>–
+                    <span className="font-semibold text-gray-700">{to}</span> of{' '}
+                    <span className="font-semibold text-gray-700">{filteredQuizzes.length}</span> quizzes
+                </p>
+                {quizListTotalPages > 1 ? (
+                    <div className="flex items-center gap-1">
+                        <button
+                            type="button"
+                            onClick={() => setPage(1)}
+                            disabled={page === 1}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="First page"
+                        >
+                            <ChevronsLeft size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.max(1, p - 1))}
+                            disabled={page === 1}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="Previous page"
+                        >
+                            <ChevronLeft size={16} />
+                        </button>
+                        {getQuizPageNumbers().map((pageNum, idx) =>
+                            pageNum === '...' ? (
+                                <span key={`dots-${idx}`} className="px-2 text-gray-400 text-sm">
+                                    …
+                                </span>
+                            ) : (
+                                <button
+                                    key={pageNum}
+                                    type="button"
+                                    onClick={() => setPage(pageNum as number)}
+                                    className={`min-w-[36px] h-9 rounded-lg text-sm font-medium ${
+                                        page === pageNum
+                                            ? 'bg-blue-600 text-white'
+                                            : 'text-gray-600 hover:bg-gray-100'
+                                    }`}
+                                >
+                                    {pageNum}
+                                </button>
+                            )
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.min(quizListTotalPages, p + 1))}
+                            disabled={page === quizListTotalPages}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="Next page"
+                        >
+                            <ChevronRight size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setPage(quizListTotalPages)}
+                            disabled={page === quizListTotalPages}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="Last page"
+                        >
+                            <ChevronsRight size={16} />
+                        </button>
+                    </div>
+                ) : null}
+            </div>
+        );
+    };
 
     const persistedBankQuestions = questionBank.filter((q) => isPersistedQuestionBankId(q?.id));
     const filteredQuestions = persistedBankQuestions.filter((question) => {
@@ -797,11 +959,6 @@ export function QuizManagement({
         if (!anyMatch) setQbFilterCategory('all');
     }, [persistedBankQuestions, qbFilterCategory]);
 
-    const lecturerUserId = user?.user_id ?? user?.id ?? user?.userId;
-    const lecturerDisplayName = String(
-        user?.full_name ?? user?.fullName ?? user?.name ?? user?.email ?? user?.user_code ?? 'Lecturer'
-    ).trim();
-
     const preserveScrollForNextRender = () => {
         if (typeof window === 'undefined') return;
         restoreScrollYRef.current = window.scrollY;
@@ -822,11 +979,11 @@ export function QuizManagement({
                 api.get('/quizzes/history', {
                     params: { userId: historyUserParam, limit: 500, ownerOnly: true },
                 }),
-                api.get('/quizzes/history', {
-                    params: { limit: 500 },
+                api.get('/quizzes/shared-by-students', {
+                    params: { limit: 200 },
                 }),
                 api.get('/quizzes/published', {
-                    params: { userId: historyUserParam, ownerOnly: true },
+                    params: { limit: 100, userId: historyUserParam },
                 }),
                 api.get('/documents/for-quiz'),
                 api.get('/quizzes/analytics', {
@@ -836,16 +993,39 @@ export function QuizManagement({
             const pick = (i: number, fallback: any) =>
                 settled[i]?.status === 'fulfilled' ? (settled[i] as PromiseFulfilledResult<any>).value : fallback;
             const historyRes = pick(0, { data: [] });
-            const sharedHistoryRes = pick(1, { data: [] });
+            const sharedByStudentsRes = pick(1, { data: [] });
             const publishedRes = pick(2, { data: [] });
             const docsRes = pick(3, { data: [] });
             const analyticsRes = pick(4, {});
             const historyRowsRaw = Array.isArray(historyRes?.data) ? historyRes.data : [];
-            const sharedHistoryRowsRaw = Array.isArray(sharedHistoryRes?.data) ? sharedHistoryRes.data : [];
+            const sharedRowsRaw = Array.isArray(sharedByStudentsRes?.data)
+                ? sharedByStudentsRes.data
+                : Array.isArray(sharedByStudentsRes?.quizzes)
+                  ? sharedByStudentsRes.quizzes
+                  : [];
             const publishedRowsRaw = Array.isArray(publishedRes?.data) ? publishedRes.data : [];
-            // Draft/Shared source: history API (exclude published rows)
-            const rows = historyRowsRaw.filter((q: any) => !Boolean(q?.isPublished ?? q?.publishedAt));
-            const sharedRows = sharedHistoryRowsRaw.filter((q: any) => Boolean(q?.sharedForReview ?? q?.sharedFromStudent));
+            const lecturerUidForFilter = Number(lecturerUserId);
+            // Draft source: history API (exclude published, shared, and other users' rows)
+            const rows = historyRowsRaw.filter((q: any) => {
+                const createdBy = Number(q?.createdBy ?? q?.created_by ?? 0);
+                const ownedByLecturer =
+                    Number.isFinite(lecturerUidForFilter) &&
+                    lecturerUidForFilter > 0 &&
+                    Number.isFinite(createdBy) &&
+                    createdBy > 0 &&
+                    createdBy === lecturerUidForFilter;
+                return (
+                    ownedByLecturer &&
+                    !Boolean(q?.isPublished ?? q?.publishedAt ?? q?.is_published) &&
+                    !Boolean(
+                        q?.sharedForReview ??
+                            q?.sharedFromStudent ??
+                            q?.shared_for_review ??
+                            q?.shared_from_student
+                    )
+                );
+            });
+            const sharedRows = sharedRowsRaw;
             const docs = Array.isArray(docsRes?.data) ? docsRes.data : [];
             const analyticsPayload = analyticsRes?.data || analyticsRes || {};
             setAnalytics({
@@ -896,6 +1076,10 @@ export function QuizManagement({
                 documentId: Number(q?.documentId || 0) || undefined,
                 s3Key: resolveListRowS3Key(q),
                 status: q?.isPublished || q?.publishedAt ? 'published' : 'draft',
+                createdBy: Number(q?.createdBy ?? q?.created_by ?? 0) || undefined,
+                isOwner:
+                    Number(q?.createdBy ?? q?.created_by ?? 0) > 0 &&
+                    Number(q?.createdBy ?? q?.created_by) === Number(lecturerUserId),
                 questions: Array.from({ length: Number(q?.questionCount || 0) }),
                 duration: 10,
                 passPercentage: 70,
@@ -1031,9 +1215,34 @@ export function QuizManagement({
                                         : undefined,
             })).filter((q: any) => Number.isFinite(q.id) && q.id > 0);
 
+            const ownedQuizIdSet = new Set(
+                historyRowsRaw
+                    .map((h: any) => Number(h?.quizId || h?.id || 0))
+                    .filter((id: number) => Number.isFinite(id) && id > 0)
+            );
+            const lecturerUid = Number(lecturerUserId);
+
             // Published source: published API only
-            const mappedPublished: Quiz[] = publishedRowsRaw.map((q: any) => ({
-                id: Number(q?.quizId || q?.id || 0),
+            const mappedPublished: Quiz[] = publishedRowsRaw.map((q: any) => {
+                const id = Number(q?.quizId || q?.id || 0);
+                const createdBy = Number(q?.createdBy ?? q?.created_by);
+                const isOwner =
+                    q?.isOwner === true ||
+                    (Number.isFinite(lecturerUid) &&
+                        lecturerUid > 0 &&
+                        Number.isFinite(createdBy) &&
+                        createdBy > 0 &&
+                        createdBy === lecturerUid);
+                const canDelete = q?.canDelete === true || (q?.canDelete !== false && isOwner);
+                const rawCreator = String(q?.creatorName || '').trim();
+                const resolvedCreatorName =
+                    rawCreator && rawCreator.toLowerCase() !== 'lecturer'
+                        ? rawCreator
+                        : rawCreator
+                          ? 'Unknown lecturer'
+                          : '';
+                return {
+                id,
                 title: String(q?.title || 'Quiz'),
                 subject: String(q?.courseCode || 'DOC'),
                 documentTypeLabel: formatDocumentTypeLabel(q?.documentCategory),
@@ -1053,19 +1262,25 @@ export function QuizManagement({
                 createdDate: String(q?.createdAt || ''),
                 publishedDate: String(q?.publishedAt || q?.createdAt || ''),
                 creatorName:
-                    q?.creatorName != null && String(q.creatorName).trim() !== ''
-                        ? (String(q.creatorName).trim().toLowerCase() === 'lecturer'
-                            ? lecturerDisplayName
-                            : String(q.creatorName).trim())
-                        : q?.publishedByName != null && String(q.publishedByName).trim() !== ''
-                            ? String(q.publishedByName).trim()
-                            : q?.createdByName != null && String(q.createdByName).trim() !== ''
-                                ? String(q.createdByName).trim()
-                                : q?.publishedByUserCode != null && String(q.publishedByUserCode).trim() !== ''
-                                    ? String(q.publishedByUserCode).trim()
-                                    : lecturerDisplayName,
+                    resolvedCreatorName ||
+                    (q?.publishedByName != null && String(q.publishedByName).trim() !== ''
+                        ? String(q.publishedByName).trim()
+                        : q?.createdByName != null && String(q.createdByName).trim() !== ''
+                            ? String(q.createdByName).trim()
+                            : q?.publishedByUserCode != null && String(q.publishedByUserCode).trim() !== ''
+                                ? String(q.publishedByUserCode).trim()
+                                : 'Unknown lecturer'),
+                createdBy:
+                    Number.isFinite(createdBy) && createdBy > 0 ? createdBy : undefined,
+                publishedByEmail:
+                    q?.publishedByEmail != null && String(q.publishedByEmail).trim() !== ''
+                        ? String(q.publishedByEmail).trim()
+                        : undefined,
+                isOwner,
+                canDelete,
                 sharedForReview: false,
-            })).filter((q: any) => Number.isFinite(q.id) && q.id > 0);
+            };
+            }).filter((q: any) => Number.isFinite(q.id) && q.id > 0);
 
             const existingTitles = new Set(
                 mappedHistory.map((q) => String(q.title || '').trim().toLowerCase()).filter(Boolean)
@@ -1100,10 +1315,19 @@ export function QuizManagement({
                     };
                 });
 
-            const merged = [...mappedHistory, ...mappedPublished, ...mappedShared, ...mappedFromDocs];
+            const merged = [...mappedHistory, ...mappedPublished, ...mappedFromDocs, ...mappedShared];
             const byId = new Map<number, Quiz>();
             merged.forEach((q) => {
-                if (q && Number.isFinite(Number(q.id))) byId.set(Number(q.id), q);
+                const id = Number(q?.id);
+                if (!Number.isFinite(id)) return;
+                const prev = byId.get(id);
+                const preferCurrent =
+                    !prev ||
+                    Boolean(q.sharedForReview) ||
+                    (prev.status === 'draft' && q.status === 'published');
+                if (preferCurrent) {
+                    byId.set(id, q);
+                }
             });
             setQuizzes(Array.from(byId.values()));
         } catch {
@@ -1544,6 +1768,14 @@ export function QuizManagement({
         return `${yyyy}-${p(mm)}-${p(dd)}T${p(hh)}:${p(mi)}`;
     };
 
+    const scheduleIsoFromApiValue = (v: unknown): string => {
+        if (v == null || String(v).trim() === '') return '';
+        const d = new Date(v as string);
+        if (!Number.isFinite(d.getTime())) return '';
+        const p = (n: number) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+    };
+
     const formatScheduleInput = (raw: string): string => {
         const t = String(raw || '');
         if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(t.trim())) return t.trim().slice(0, 16);
@@ -1561,7 +1793,7 @@ export function QuizManagement({
         return out;
     };
 
-    const validateQuizFormMeta = (): string | null => {
+    const validateQuizFormMeta = (opts?: { forPublish?: boolean }): string | null => {
         if (!quizForm.title?.trim()) {
             return 'Quiz title is required.';
         }
@@ -1581,6 +1813,7 @@ export function QuizManagement({
         if (!Number.isFinite(attemptsNum) || attemptsNum < 1 || attemptsNum > 999) {
             return 'Attempts allowed must be a number from 1 to 999.';
         }
+        if (!opts?.forPublish) return null;
         const nowMs = Date.now();
         const skewMs = 60_000;
         if (quizForm.startDate?.trim()) {
@@ -1650,12 +1883,11 @@ export function QuizManagement({
 
     // Quiz CRUD Operations
     const handleCreateQuiz = async (status: 'draft' | 'published') => {
-        const metaErr = validateQuizFormMeta();
+        const metaErr = validateQuizFormMeta({ forPublish: status === 'published' });
         if (metaErr) {
             showNotification({ type: 'warning', title: 'Quiz form', message: metaErr });
             return;
         }
-        setSavingQuizAction(status);
         const payloadQuestions = buildBackendQuestionsFromSelection();
         if (!payloadQuestions.length) {
             showNotification({
@@ -1665,6 +1897,7 @@ export function QuizManagement({
             });
             return;
         }
+        setSavingQuizAction(status);
         try {
             setSavingQuiz(true);
             preserveScrollForNextRender();
@@ -1674,12 +1907,15 @@ export function QuizManagement({
                 courseCode: quizForm.subject?.trim() || undefined,
                 questions: payloadQuestions,
                 status,
+                startDate: quizForm.startDate?.trim() || undefined,
+                endDate: quizForm.endDate?.trim() || undefined,
             });
             const newQuizId = Number(
                 createdRes?.id ??
                     createdRes?.quizId ??
                     createdRes?.data?.id ??
                     createdRes?.data?.quizId ??
+                    createdRes?.data?.quiz_id ??
                     0
             );
             await loadLecturerQuizzes();
@@ -1798,12 +2034,11 @@ export function QuizManagement({
             });
             return;
         }
-        const metaErr = validateQuizFormMeta();
+        const metaErr = validateQuizFormMeta({ forPublish: status === 'published' });
         if (metaErr) {
             showNotification({ type: 'warning', title: 'Quiz form', message: metaErr });
             return;
         }
-        setSavingQuizAction(status);
 
         const payloadQuestions = buildBackendQuestionsFromSelection();
         if (!payloadQuestions.length) {
@@ -1816,6 +2051,7 @@ export function QuizManagement({
         }
 
         const quizIdJustSaved = editingQuizId;
+        setSavingQuizAction(status);
         try {
             setSavingQuiz(true);
             preserveScrollForNextRender();
@@ -1824,9 +2060,16 @@ export function QuizManagement({
                 title: quizForm.title,
                 courseCode: quizForm.subject?.trim() || undefined,
                 questions: payloadQuestions,
+                status: status === 'draft' ? 'draft' : undefined,
+                startDate: quizForm.startDate?.trim() || undefined,
+                endDate: quizForm.endDate?.trim() || undefined,
             });
             if (status === 'published') {
-                await api.post(`/quizzes/${editingQuizId}/publish`, { userId: lecturerUserId });
+                await api.post(`/quizzes/${editingQuizId}/publish`, {
+                    userId: lecturerUserId,
+                    startDate: quizForm.startDate?.trim() || undefined,
+                    endDate: quizForm.endDate?.trim() || undefined,
+                });
             }
             await loadLecturerQuizzes();
             await loadQuestionBankFromApi({ merge: true });
@@ -1882,20 +2125,36 @@ export function QuizManagement({
             });
             return;
         }
+        const sourceQuiz = quizzes.find((q) => Number(q.id) === Number(quizId));
+        if (sourceQuiz && Number(sourceQuiz.questions?.length || 0) < 1) {
+            showNotification({
+                type: 'warning',
+                title: 'Publish quiz',
+                message: 'Add at least one question (Generate & Edit with AI) before publishing.',
+            });
+            return;
+        }
         try {
             preserveScrollForNextRender();
-            await api.post(`/quizzes/${quizId}/publish`, { userId: lecturerUserId });
-            await loadLecturerQuizzes();
-            showNotification({
-                type: 'success',
-                title: 'Publish quiz',
-                message: 'Quiz published successfully!',
+            const pubRes: any = await api.post(`/quizzes/${quizId}/publish`, {
+                userId: lecturerUserId,
+                startDate: sourceQuiz?.startDate?.trim() || undefined,
+                endDate: sourceQuiz?.endDate?.trim() || undefined,
             });
-        } catch {
+            await loadLecturerQuizzes();
+            setActiveTab('published');
+            setSelectedId(quizId);
+            const warning = String(pubRes?.warning || pubRes?.data?.warning || '').trim();
+            showNotification({
+                type: warning ? 'info' : 'success',
+                title: 'Publish quiz',
+                message: warning || 'Quiz published successfully!',
+            });
+        } catch (err: unknown) {
             showNotification({
                 type: 'error',
                 title: 'Publish quiz',
-                message: 'Unable to publish quiz.',
+                message: getApiErrorMessage(err) || 'Unable to publish quiz.',
             });
         }
     };
@@ -1910,6 +2169,16 @@ export function QuizManagement({
             });
             return;
         }
+        if (!canCurrentLecturerManageQuiz(selectedItem as Quiz)) {
+            showNotification({
+                type: 'warning',
+                title: 'Delete quiz',
+                message:
+                    'You can only delete quizzes you created. This quiz belongs to another account.',
+            });
+            setModalType(null);
+            return;
+        }
         setDeletingQuiz(true);
         try {
             preserveScrollForNextRender();
@@ -1922,11 +2191,14 @@ export function QuizManagement({
                 title: 'Delete quiz',
                 message: 'Quiz deleted successfully!',
             });
-        } catch {
+        } catch (err: unknown) {
             showNotification({
                 type: 'error',
                 title: 'Delete quiz',
-                message: 'Unable to delete quiz.',
+                message: getApiErrorMessage(
+                    err,
+                    'You do not have permission to delete this quiz.'
+                ),
             });
         } finally {
             setDeletingQuiz(false);
@@ -2024,8 +2296,14 @@ export function QuizManagement({
                 duration: quiz.duration.toString(),
                 passPercentage: quiz.passPercentage.toString(),
                 attemptsAllowed: quiz.attemptsAllowed === 'unlimited' ? '999' : quiz.attemptsAllowed,
-                startDate: quiz.startDate || '',
-                endDate: quiz.endDate || '',
+                startDate:
+                    scheduleIsoFromApiValue(row?.schedule_start_at ?? row?.scheduleStartAt) ||
+                    quiz.startDate ||
+                    '',
+                endDate:
+                    scheduleIsoFromApiValue(row?.schedule_end_at ?? row?.scheduleEndAt) ||
+                    quiz.endDate ||
+                    '',
                 selectedQuestions: selectedIds.length ? selectedIds : fallbackSelectedIds,
             });
             setActiveTab('edit');
@@ -2327,6 +2605,7 @@ export function QuizManagement({
                     title: quiz.title || 'AI Quiz',
                     quizId: quiz.id,
                 });
+                const varietySeed = `quiz-gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                 const res: any = await api.post(
                     '/quiz/generate',
                     {
@@ -2338,6 +2617,8 @@ export function QuizManagement({
                         numQuestions: numQuestionsForGenerate(quiz),
                         language: 'English',
                         createdBy,
+                        varietySeed,
+                        forceNew: true,
                     },
                     { timeout: 180000 }
                 );
@@ -3046,6 +3327,27 @@ export function QuizManagement({
                 title: 'Schedule format',
                 message: 'Please use date format dd/mm/yyyy HH:mm (for example: 01/05/2026 14:30).',
             });
+            return;
+        }
+        if (typeof parsed === 'string') {
+            const t = new Date(parsed).getTime();
+            const nowMs = Date.now();
+            const skewMs = 60_000;
+            if (field === 'endDate' && Number.isFinite(t) && t < nowMs - skewMs) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Schedule',
+                    message: 'End date & time cannot be in the past.',
+                });
+                return;
+            }
+            if (field === 'startDate' && Number.isFinite(t) && t < nowMs - skewMs) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Schedule',
+                    message: 'Start date & time cannot be in the past.',
+                });
+            }
         }
     };
 
@@ -4125,7 +4427,7 @@ export function QuizManagement({
                         {loadingCloudData ? ' ' : 'No quizzes available right now.'}
                     </div>
                 ) : (
-                    filteredQuizzes.map((quiz) => (
+                    paginatedQuizzes.map((quiz) => (
                         <div
                             key={quiz.id}
                             ref={(el) => {
@@ -4197,6 +4499,7 @@ export function QuizManagement({
                     ))
                 )}
             </div>
+            {renderQuizListPagination()}
         </div>
     );
 
@@ -4220,7 +4523,7 @@ export function QuizManagement({
                         {loadingCloudData ? ' ' : 'No draft quizzes available right now.'}
                     </div>
                 ) : (
-                    filteredQuizzes.map((quiz) => (
+                    paginatedQuizzes.map((quiz) => (
                         <div key={quiz.id} className="bg-white rounded-lg border border-gray-200 p-6">
                             <div className="flex items-start justify-between mb-4">
                                 <div>
@@ -4274,6 +4577,7 @@ export function QuizManagement({
                     ))
                 )}
             </div>
+            {renderQuizListPagination()}
         </div>
     );
 
@@ -4300,7 +4604,7 @@ export function QuizManagement({
                         {loadingCloudData ? ' ' : 'No published quizzes available right now.'}
                     </div>
                 ) : (
-                    filteredQuizzes.map((quiz) => (
+                    paginatedQuizzes.map((quiz) => (
                         <div key={quiz.id} className="bg-white rounded-lg border border-gray-200 p-6">
                             <div className="flex items-start justify-between mb-4">
                                 <div>
@@ -4318,7 +4622,22 @@ export function QuizManagement({
                                     <p className="text-gray-500 text-sm mt-1">Published: {formatDateTimeWithSeconds(quiz.publishedDate)}</p>
                                     <p className="text-gray-500 text-sm">
                                         Published by: {quiz.creatorName || 'Lecturer'}
+                                        {quiz.publishedByEmail ? ` (${quiz.publishedByEmail})` : ''}
                                     </p>
+                                    {quiz.isOwner ? (
+                                        <p className="text-emerald-700 text-xs mt-1 font-medium">
+                                            Your quiz — you can delete it here.
+                                        </p>
+                                    ) : quiz.canDelete ? (
+                                        <p className="text-amber-700 text-xs mt-1">
+                                            Legacy published quiz (no owner on file) — delete only if you
+                                            published it.
+                                        </p>
+                                    ) : (
+                                        <p className="text-amber-700 text-xs mt-1">
+                                            Another lecturer&apos;s quiz — view only.
+                                        </p>
+                                    )}
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <button
@@ -4327,16 +4646,18 @@ export function QuizManagement({
                                     >
                                         View Details
                                     </button>
-                                    <button
-                                        aria-label="Delete Published Quiz"
-                                        onClick={() => {
-                                            setSelectedItem(quiz);
-                                            setModalType('delete-quiz');
-                                        }}
-                                        className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                    >
-                                        <Trash2 size={20} />
-                                    </button>
+                                    {canCurrentLecturerManageQuiz(quiz) ? (
+                                        <button
+                                            aria-label="Delete Published Quiz"
+                                            onClick={() => {
+                                                setSelectedItem(quiz);
+                                                setModalType('delete-quiz');
+                                            }}
+                                            className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                        >
+                                            <Trash2 size={20} />
+                                        </button>
+                                    ) : null}
                                 </div>
                             </div>
 
@@ -4362,6 +4683,7 @@ export function QuizManagement({
                     ))
                 )}
             </div>
+            {renderQuizListPagination()}
         </div>
     );
 
@@ -4375,7 +4697,7 @@ export function QuizManagement({
                         {loadingCloudData ? ' ' : 'No student-shared quizzes available right now.'}
                     </div>
                 ) : (
-                    filteredQuizzes.map((quiz) => (
+                    paginatedQuizzes.map((quiz) => (
                         <div key={quiz.id} className="bg-white rounded-lg border border-gray-200 p-6">
                             <div className="flex items-start justify-between mb-4">
                                 <div>
@@ -4435,6 +4757,7 @@ export function QuizManagement({
                     ))
                 )}
             </div>
+            {renderQuizListPagination()}
         </div>
     );
 
@@ -5194,6 +5517,9 @@ export function QuizManagement({
                                         onBlur={() => validateScheduleFieldOnBlur('endDate')}
                                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
                                     />
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        Cannot be in the past. The published quiz is removed automatically after this time.
+                                    </p>
                                 </div>
                             </div>
                         </div>}

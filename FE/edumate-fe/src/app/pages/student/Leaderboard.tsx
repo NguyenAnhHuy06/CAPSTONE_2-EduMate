@@ -233,7 +233,7 @@ export function Leaderboard({ user }: LeaderboardProps) {
       setLastUpdated(new Date());
     } catch (err: unknown) {
       console.error('[Leaderboard] load failed:', err);
-      setError(getApiErrorMessage(err, 'Không thể tải bảng xếp hạng.'));
+      setError(getApiErrorMessage(err, 'Could not load leaderboard.'));
       setData([]);
     } finally {
       setLoading(false);

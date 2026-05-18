@@ -144,7 +144,7 @@ export function AIChatPanel({
         {
           message_id: Date.now() + 2,
           role: 'assistant',
-          message_text: `Xin lỗi, không thể xử lý câu hỏi. ${getApiErrorMessage(err)}`,
+          message_text: `Sorry, I could not process your question. ${getApiErrorMessage(err)}`,
         },
       ]);
     } finally {

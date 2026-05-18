@@ -130,6 +130,7 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
   const chunkCount = Number(apiRow.chunkCount || 0)
   const attemptsCount = Number(apiRow.attemptsCount || 0)
   const downloadCount = Number(apiRow.downloadCount ?? 0)
+  const viewCount = Number(apiRow.viewCount ?? apiRow.view_count ?? 0)
   const uploaderName = String(apiRow.uploaderName || '').trim()
   const author = uploaderName || 'Unknown uploader'
   const authorRole = mapUploaderRole(apiRow.uploaderRole)
@@ -180,7 +181,7 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
     uploadDate: formatYmd(lastMod),
     downloads: downloadCount,
     comments: Number(apiRow.commentsCount ?? 0),
-    views: chunkCount,
+    views: viewCount,
     description,
     uploadDescription: uploadDescription || undefined,
     s3Key: apiRow.s3Key,
@@ -222,6 +223,40 @@ export function DocumentLibrary({
   const [itemsPerPage, setItemsPerPage] = useState(10)
 
   const [selectedDocument, setSelectedDocument] = useState<CourseMaterialDoc | null>(null)
+
+  const bumpDocViews = (doc: CourseMaterialDoc, viewCount?: number) => {
+    const key = buildDocFocusKey(doc)
+    const nextViews = viewCount != null ? viewCount : Number(doc.views || 0) + 1
+    setDocuments((prev) =>
+      prev.map((d) => (buildDocFocusKey(d) === key ? { ...d, views: nextViews } : d))
+    )
+    setSelectedDocument((prev) =>
+      prev && buildDocFocusKey(prev) === key ? { ...prev, views: nextViews } : prev
+    )
+  }
+
+  const openDocument = (doc: CourseMaterialDoc) => {
+    setSelectedDocument(doc)
+    const payload: Record<string, unknown> = {}
+    if (doc.documentId != null && Number.isFinite(Number(doc.documentId))) {
+      payload.documentId = Number(doc.documentId)
+    }
+    const sk = String(doc.s3Key || '').trim()
+    if (sk) payload.s3Key = sk
+    if (!payload.documentId && !payload.s3Key) return
+
+    void api
+      .post('/documents/record-view', payload)
+      .then((res: any) => {
+        const n = res?.data?.viewCount
+        if (res?.success && n != null && Number.isFinite(Number(n))) {
+          bumpDocViews(doc, Number(n))
+        } else {
+          bumpDocViews(doc)
+        }
+      })
+      .catch(() => bumpDocViews(doc))
+  }
   const [documents, setDocuments] = useState<CourseMaterialDoc[]>([])
   const [loading, setLoading] = useState(true)
   const [loadMessage, setLoadMessage] = useState<string | null>(null)
@@ -393,7 +428,7 @@ export function DocumentLibrary({
     const docKey = buildDocFocusKey(found)
     setAutoOpenFlashcardDocKey(docKey)
     setAutoOpenFlashcardMode(targetMode)
-    setSelectedDocument(found)
+    openDocument(found)
     setPendingFlashcardTarget(null)
     localStorage.removeItem(STUDENT_FLASHCARD_NAVIGATE_KEY)
   }, [pendingFlashcardTarget, loading, documents])
@@ -436,7 +471,7 @@ export function DocumentLibrary({
       return false
     })
     if (!found) return
-    setSelectedDocument(found)
+    openDocument(found)
     if (Number.isFinite(targetCommentId) && targetCommentId > 0) {
       setHighlightCommentId(targetCommentId)
     }
@@ -652,7 +687,7 @@ export function DocumentLibrary({
                 ? 'border-blue-500 ring-2 ring-blue-200 shadow-sm'
                 : 'border-gray-200'
             }`}
-            onClick={() => setSelectedDocument(doc)}
+            onClick={() => openDocument(doc)}
           >
             <div className="flex items-start justify-between mb-3">
               <div className="flex-1">
@@ -709,10 +744,10 @@ export function DocumentLibrary({
             </div>
 
             <div className="flex items-center gap-6 pt-3 border-t border-gray-100 flex-wrap text-sm">
-              <div className="flex items-center gap-2 text-gray-600" title="Indexed text segments">
+              <div className="flex items-center gap-2 text-gray-600" title="Times this file was opened">
                 <Eye size={16} />
                 <span>
-                  {doc.views} segment{doc.views === 1 ? '' : 's'}
+                  {doc.views} view{doc.views === 1 ? '' : 's'}
                 </span>
               </div>
               <div className="flex items-center gap-2 text-gray-600" title="File downloads">

@@ -13,6 +13,10 @@ import {
     Share2,
     RefreshCw,
     MessageSquare,
+    ChevronLeft,
+    ChevronRight,
+    ChevronsLeft,
+    ChevronsRight,
 } from 'lucide-react';
 import { useNotification } from '../NotificationContext';
 import api, { getApiBaseUrl, getApiErrorMessage, getStoredAuthToken } from '@/services/api';
@@ -37,6 +41,7 @@ interface QuizAnswer {
 }
 
 const LETTERS = ['A', 'B', 'C', 'D'];
+const QUIZ_LIST_PAGE_SIZE = 10;
 const STUDENT_QUIZ_GENERATING_KEY = 'edumate_student_quiz_generating';
 const STUDENT_QUIZ_AUTOSTART_KEY = 'edumate_student_quiz_autostart';
 const STUDENT_QUIZ_AUTOSTART_EVENT = 'edumate:student-quiz-autostart';
@@ -1221,6 +1226,7 @@ export function StudentQuizSection({
     const [activeTab, setActiveTab] = useState<QuizTab>('available');
     const [searchQuery, setSearchQuery] = useState('');
     const [filterSubject, setFilterSubject] = useState('all');
+    const [quizListPage, setQuizListPage] = useState(1);
     const [selectedQuiz, setSelectedQuiz] = useState<any>(null);
     const [showQuizTaking, setShowQuizTaking] = useState(false);
     const [showResults, setShowResults] = useState(false);
@@ -1341,15 +1347,7 @@ export function StudentQuizSection({
         if (!opts?.quiet) setLoading(true);
         try {
             const uid = user?.user_id ?? user?.id ?? user?.userId;
-            if (viewerIdStr) {
-                try {
-                    localStorage.removeItem(STUDENT_QUIZ_RESULT_CACHE_KEY);
-                    localStorage.removeItem(STUDENT_SHARED_QUIZ_IDS_KEY);
-                } catch {
-                    /* ignore */
-                }
-            }
-            const [docsRes, historyRes, publishedRes] = await Promise.allSettled([
+            const [docsRes, historyRes, publishedRes, completedRes] = await Promise.allSettled([
                 // Ask backend to include moderation-verified materials (some APIs omit them by default).
                 api.get('/documents/for-quiz', {
                     params: { audience: 'student', includeVerified: true },
@@ -1361,10 +1359,17 @@ export function StudentQuizSection({
                     },
                 }),
                 api.get('/quizzes/published'),
+                api.get('/quiz/completed', {
+                    params: {
+                        limit: 200,
+                        ...(uid != null && uid !== '' ? { userId: uid } : {}),
+                    },
+                }),
             ]);
             const docsData: any = docsRes.status === 'fulfilled' ? docsRes.value : null;
             const historyData: any = historyRes.status === 'fulfilled' ? historyRes.value : null;
             const publishedData: any = publishedRes.status === 'fulfilled' ? publishedRes.value : null;
+            const completedData: any = completedRes.status === 'fulfilled' ? completedRes.value : null;
 
             const rowsRaw = Array.isArray(historyData?.data) ? historyData.data : [];
             const historyScoped = Boolean(historyData?.scopedToAttemptUser);
@@ -1424,58 +1429,169 @@ export function StudentQuizSection({
             });
             setAvailableQuizzes(mappedAvailable);
 
-            const mappedCompleted = rows.map((h: any) => {
-                const hidAttempt = h?.attemptId ?? h?.lastAttemptId ?? null;
-                const hidQuiz = h?.quizId || h?.quiz_id || h?.id;
-                const cacheMatch =
-                    findQuizResultCacheEntry({ attemptId: hidAttempt, quizId: hidQuiz }, viewerIdStr) ??
-                    (hidAttempt != null && hidAttempt !== ''
-                        ? cacheRows.find((c) => Number(c.attemptId) === Number(hidAttempt))
-                        : null);
-
-                const answersSnapshot = Array.isArray(cacheMatch?.answersSnapshot) ? cacheMatch.answersSnapshot : [];
-                const questionsSnapshot = Array.isArray(cacheMatch?.questionsSnapshot) ? cacheMatch.questionsSnapshot : [];
-                const cacheTime = Number(cacheMatch?.timeTakenSeconds || 0);
-
-                return {
-                    id: hidQuiz,
-                    quizId: hidQuiz,
-                    resultId: `${hidQuiz}-${hidAttempt ?? 'latest'}`,
-                    title: h?.title || 'Quiz',
-                    subject: h?.courseCode || h?.subjectCode || 'DOC',
-                    instructor: h?.creatorName || 'AI Generated',
-                    questions: Array.from({ length: Number(h?.questionCount || h?.total_questions || 5) }).map((_, i) => ({
-                        id: `h-q-${i}`,
-                        question: '',
-                        options: [],
-                        correctAnswer: 0,
-                    })),
-                    duration: 10,
-                    durationSeconds: Math.max(0, Number(h?.timeTakenSeconds || h?.time_taken_seconds || 0)),
-                    myScore: Number(h?.scorePercent ?? h?.score ?? 0),
-                    attempts: Number(h?.attemptsCount || 1),
-                    completedDate: h?.lastAttemptAt || h?.createdAt || h?.created_at || '',
-                    status: 'completed',
-                    isPublished: Boolean(h?.isPublished),
-                    sharedForReview: Boolean(h?.sharedForReview ?? h?.sharedFromStudent),
-                    sharedAt: h?.sharedAt || h?.shared_at || null,
-                    lecturerEdited: Boolean(h?.lecturerEdited),
-                    lecturerEditedAt: h?.lecturerEditedAt || null,
-                    attemptId: hidAttempt,
-                    answersSnapshot,
-                    questionsSnapshot,
-                    s3Key: cacheMatch?.s3Key || h?.s3Key || h?.sourceKey || '',
-                    passPercentage: Number(cacheMatch?.passPercentage ?? h?.passPercentage ?? 70),
-                    duration: Number(cacheMatch?.duration ?? 10),
-                    timeTakenSeconds: Number(cacheTime || h?.timeTakenSeconds || h?.time_taken_seconds || 0),
-                    userAnswers:
-                        answersSnapshot.length > 0
-                            ? answersSnapshot
-                                  .map((a: any) => a?.selectedAnswer)
-                                  .filter((x: any) => Number.isFinite(Number(x)))
-                            : [],
-                };
+            const historyByQuizId = new Map<number, any>();
+            rows.forEach((h: any) => {
+                const qid = Number(h?.quizId ?? h?.quiz_id ?? h?.id);
+                if (Number.isFinite(qid) && qid > 0) historyByQuizId.set(qid, h);
             });
+
+            const attemptRowsRaw = Array.isArray(completedData?.data) ? completedData.data : [];
+            const mappedCompletedFromAttempts = attemptRowsRaw
+                .map((a: any) => {
+                    const hidQuiz = Number(a?.quiz_id ?? a?.quizId ?? a?.id);
+                    const hidAttempt = Number(a?.id ?? a?.attempt_id ?? a?.attemptId);
+                    if (!Number.isFinite(hidQuiz) || hidQuiz <= 0) return null;
+                    if (!Number.isFinite(hidAttempt) || hidAttempt <= 0) return null;
+
+                    const hist = historyByQuizId.get(hidQuiz);
+                    const cacheMatch =
+                        findQuizResultCacheEntry({ attemptId: hidAttempt, quizId: hidQuiz }, viewerIdStr) ??
+                        cacheRows.find((c) => Number(c.attemptId) === hidAttempt);
+
+                    const answersSnapshot = Array.isArray(cacheMatch?.answersSnapshot)
+                        ? cacheMatch.answersSnapshot
+                        : [];
+                    const questionsSnapshot = Array.isArray(cacheMatch?.questionsSnapshot)
+                        ? cacheMatch.questionsSnapshot
+                        : [];
+                    const cacheTime = Number(cacheMatch?.timeTakenSeconds || 0);
+
+                    return {
+                        id: hidQuiz,
+                        quizId: hidQuiz,
+                        resultId: `${hidQuiz}-${hidAttempt}`,
+                        title: a?.title || hist?.title || 'Quiz',
+                        subject: hist?.courseCode || hist?.subjectCode || 'DOC',
+                        instructor: hist?.creatorName || 'AI Generated',
+                        questions:
+                            questionsSnapshot.length > 0
+                                ? normalizeStoredQuestions(questionsSnapshot)
+                                : Array.from({
+                                      length: Number(
+                                          a?.total_questions ??
+                                              hist?.questionCount ??
+                                              hist?.total_questions ??
+                                              5
+                                      ),
+                                  }).map((_, i) => ({
+                                      id: `h-q-${i}`,
+                                      question: '',
+                                      options: [],
+                                      correctAnswer: 0,
+                                  })),
+                        duration: Number(cacheMatch?.duration ?? hist?.duration ?? 10),
+                        durationSeconds: Math.max(
+                            0,
+                            Number(
+                                a?.time_taken_seconds ??
+                                    cacheTime ??
+                                    hist?.timeTakenSeconds ??
+                                    hist?.time_taken_seconds ??
+                                    0
+                            )
+                        ),
+                        myScore: Number(a?.score ?? hist?.scorePercent ?? hist?.score ?? 0),
+                        attempts: Number(hist?.attemptsCount || 1),
+                        completedDate:
+                            a?.created_at ||
+                            a?.completed_at ||
+                            hist?.lastAttemptAt ||
+                            hist?.createdAt ||
+                            '',
+                        status: 'completed',
+                        isPublished: Boolean(hist?.isPublished),
+                        sharedForReview: Boolean(hist?.sharedForReview ?? hist?.sharedFromStudent),
+                        sharedAt: hist?.sharedAt || hist?.shared_at || null,
+                        lecturerEdited: Boolean(hist?.lecturerEdited),
+                        lecturerEditedAt: hist?.lecturerEditedAt || null,
+                        attemptId: hidAttempt,
+                        answersSnapshot,
+                        questionsSnapshot,
+                        s3Key: cacheMatch?.s3Key || hist?.s3Key || hist?.sourceKey || '',
+                        passPercentage: Number(cacheMatch?.passPercentage ?? hist?.passPercentage ?? 70),
+                        timeTakenSeconds: Number(
+                            a?.time_taken_seconds ??
+                                cacheTime ??
+                                hist?.timeTakenSeconds ??
+                                hist?.time_taken_seconds ??
+                                0
+                        ),
+                        userAnswers:
+                            answersSnapshot.length > 0
+                                ? answersSnapshot
+                                      .map((ans: any) => ans?.selectedAnswer)
+                                      .filter((x: any) => Number.isFinite(Number(x)))
+                                : [],
+                    };
+                })
+                .filter(Boolean) as any[];
+
+            const mappedCompleted =
+                mappedCompletedFromAttempts.length > 0
+                    ? mappedCompletedFromAttempts
+                    : rows.map((h: any) => {
+                          const hidAttempt = h?.attemptId ?? h?.lastAttemptId ?? null;
+                          const hidQuiz = h?.quizId || h?.quiz_id || h?.id;
+                          const cacheMatch =
+                              findQuizResultCacheEntry({ attemptId: hidAttempt, quizId: hidQuiz }, viewerIdStr) ??
+                              (hidAttempt != null && hidAttempt !== ''
+                                  ? cacheRows.find((c) => Number(c.attemptId) === Number(hidAttempt))
+                                  : null);
+
+                          const answersSnapshot = Array.isArray(cacheMatch?.answersSnapshot)
+                              ? cacheMatch.answersSnapshot
+                              : [];
+                          const questionsSnapshot = Array.isArray(cacheMatch?.questionsSnapshot)
+                              ? cacheMatch.questionsSnapshot
+                              : [];
+                          const cacheTime = Number(cacheMatch?.timeTakenSeconds || 0);
+
+                          return {
+                              id: hidQuiz,
+                              quizId: hidQuiz,
+                              resultId: `${hidQuiz}-${hidAttempt ?? 'latest'}`,
+                              title: h?.title || 'Quiz',
+                              subject: h?.courseCode || h?.subjectCode || 'DOC',
+                              instructor: h?.creatorName || 'AI Generated',
+                              questions: Array.from({
+                                  length: Number(h?.questionCount || h?.total_questions || 5),
+                              }).map((_, i) => ({
+                                  id: `h-q-${i}`,
+                                  question: '',
+                                  options: [],
+                                  correctAnswer: 0,
+                              })),
+                              duration: 10,
+                              durationSeconds: Math.max(
+                                  0,
+                                  Number(h?.timeTakenSeconds || h?.time_taken_seconds || 0)
+                              ),
+                              myScore: Number(h?.scorePercent ?? h?.score ?? 0),
+                              attempts: Number(h?.attemptsCount || 1),
+                              completedDate: h?.lastAttemptAt || h?.createdAt || h?.created_at || '',
+                              status: 'completed',
+                              isPublished: Boolean(h?.isPublished),
+                              sharedForReview: Boolean(h?.sharedForReview ?? h?.sharedFromStudent),
+                              sharedAt: h?.sharedAt || h?.shared_at || null,
+                              lecturerEdited: Boolean(h?.lecturerEdited),
+                              lecturerEditedAt: h?.lecturerEditedAt || null,
+                              attemptId: hidAttempt,
+                              answersSnapshot,
+                              questionsSnapshot,
+                              s3Key: cacheMatch?.s3Key || h?.s3Key || h?.sourceKey || '',
+                              passPercentage: Number(cacheMatch?.passPercentage ?? h?.passPercentage ?? 70),
+                              duration: Number(cacheMatch?.duration ?? 10),
+                              timeTakenSeconds: Number(
+                                  cacheTime || h?.timeTakenSeconds || h?.time_taken_seconds || 0
+                              ),
+                              userAnswers:
+                                  answersSnapshot.length > 0
+                                      ? answersSnapshot
+                                            .map((ans: any) => ans?.selectedAnswer)
+                                            .filter((x: any) => Number.isFinite(Number(x)))
+                                      : [],
+                          };
+                      });
             setCompletedQuizzes(applySharedFlagsToQuizRows(mergeCompletedWithCache(mappedCompleted, cacheRows), viewerIdStr));
             const editedRows = rows.filter(
                 (h: any) =>
@@ -1587,12 +1703,16 @@ export function StudentQuizSection({
                         10
                     ),
                     passPercentage: finitePassPercent(payload?.passPercentage ?? 70, 70),
-                    isPublished: false,
+                    isPublished: Boolean(payload?.isPublished ?? detail?.is_published),
+                    status: payload?.isPublished || detail?.is_published ? 'published' : undefined,
                 };
-                void recordAttemptStart(generatedQuiz.id);
+                const autostartAttemptId = await recordAttemptStart(generatedQuiz.id);
                 if (cancelled) return;
                 localStorage.removeItem(STUDENT_QUIZ_AUTOSTART_KEY);
-                setSelectedQuiz(generatedQuiz);
+                setSelectedQuiz({
+                    ...generatedQuiz,
+                    ...(autostartAttemptId != null ? { attemptId: autostartAttemptId } : {}),
+                });
                 setCurrentQuestionIndex(0);
                 setAnswers([]);
                 setTimeRemaining((generatedQuiz.duration || 10) * 60);
@@ -1649,13 +1769,120 @@ export function StudentQuizSection({
         }
     }, [filterSubject, subjectOptions]);
 
-    const filteredQuizzes = () => {
+    const filteredQuizzesList = useMemo(() => {
         return currentTabQuizzes.filter((quiz) => {
             const matchesSearch = quizMatchesSearchQuery(quiz as Record<string, unknown>, searchQuery);
             const subj = String(quiz?.subject ?? '');
             const matchesSubject = filterSubject === 'all' || subj === filterSubject;
             return matchesSearch && matchesSubject;
         });
+    }, [currentTabQuizzes, searchQuery, filterSubject]);
+
+    const quizListTotalPages = Math.max(1, Math.ceil(filteredQuizzesList.length / QUIZ_LIST_PAGE_SIZE));
+
+    const paginatedQuizzes = useMemo(() => {
+        const start = (quizListPage - 1) * QUIZ_LIST_PAGE_SIZE;
+        return filteredQuizzesList.slice(start, start + QUIZ_LIST_PAGE_SIZE);
+    }, [filteredQuizzesList, quizListPage]);
+
+    useEffect(() => {
+        setQuizListPage(1);
+    }, [activeTab, searchQuery, filterSubject]);
+
+    useEffect(() => {
+        if (quizListPage > quizListTotalPages) {
+            setQuizListPage(quizListTotalPages);
+        }
+    }, [quizListPage, quizListTotalPages]);
+
+    const getQuizPageNumbers = (): (number | '...')[] => {
+        if (quizListTotalPages <= 7) {
+            return Array.from({ length: quizListTotalPages }, (_, i) => i + 1);
+        }
+        const pages: (number | '...')[] = [1];
+        if (quizListPage > 3) pages.push('...');
+        const start = Math.max(2, quizListPage - 1);
+        const end = Math.min(quizListTotalPages - 1, quizListPage + 1);
+        for (let i = start; i <= end; i++) pages.push(i);
+        if (quizListPage < quizListTotalPages - 2) pages.push('...');
+        pages.push(quizListTotalPages);
+        return pages;
+    };
+
+    const renderQuizListPagination = () => {
+        if (filteredQuizzesList.length === 0) return null;
+        const from = (quizListPage - 1) * QUIZ_LIST_PAGE_SIZE + 1;
+        const to = Math.min(quizListPage * QUIZ_LIST_PAGE_SIZE, filteredQuizzesList.length);
+        return (
+            <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mt-6 bg-white rounded-lg border border-gray-200 p-4">
+                <p className="text-sm text-gray-500">
+                    Showing{' '}
+                    <span className="font-semibold text-gray-700">{from}</span>–
+                    <span className="font-semibold text-gray-700">{to}</span> of{' '}
+                    <span className="font-semibold text-gray-700">{filteredQuizzesList.length}</span> quizzes
+                </p>
+                {quizListTotalPages > 1 ? (
+                    <div className="flex items-center gap-1">
+                        <button
+                            type="button"
+                            onClick={() => setQuizListPage(1)}
+                            disabled={quizListPage === 1}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="First page"
+                        >
+                            <ChevronsLeft size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setQuizListPage((p) => Math.max(1, p - 1))}
+                            disabled={quizListPage === 1}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="Previous page"
+                        >
+                            <ChevronLeft size={16} />
+                        </button>
+                        {getQuizPageNumbers().map((page, idx) =>
+                            page === '...' ? (
+                                <span key={`dots-${idx}`} className="px-2 text-gray-400 text-sm">
+                                    …
+                                </span>
+                            ) : (
+                                <button
+                                    key={page}
+                                    type="button"
+                                    onClick={() => setQuizListPage(page as number)}
+                                    className={`min-w-[36px] h-9 rounded-lg text-sm font-medium ${
+                                        quizListPage === page
+                                            ? 'bg-blue-600 text-white'
+                                            : 'text-gray-600 hover:bg-gray-100'
+                                    }`}
+                                >
+                                    {page}
+                                </button>
+                            )
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => setQuizListPage((p) => Math.min(quizListTotalPages, p + 1))}
+                            disabled={quizListPage === quizListTotalPages}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="Next page"
+                        >
+                            <ChevronRight size={16} />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setQuizListPage(quizListTotalPages)}
+                            disabled={quizListPage === quizListTotalPages}
+                            className="p-2 rounded-lg hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label="Last page"
+                        >
+                            <ChevronsRight size={16} />
+                        </button>
+                    </div>
+                ) : null}
+            </div>
+        );
     };
 
     const hasActiveFilters = Boolean(searchQuery.trim()) || filterSubject !== 'all';
@@ -1713,6 +1940,8 @@ export function StudentQuizSection({
                 numQuestions: opts.numQuestions ?? 5,
                 language: 'English',
                 createdBy,
+                varietySeed: `quiz-gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                forceNew: true,
             }),
         });
         let res: any = null;
@@ -1795,12 +2024,12 @@ export function StudentQuizSection({
     const isPublishedLecturerQuiz = (quizRow?: any) => {
         const row = quizRow || selectedQuiz;
         if (!row) return false;
-        if (String((row as any)?.s3Key || '').trim()) return false;
         if (Boolean((row as any)?.isPublished)) return true;
+        if (String((row as any)?.status || '').toLowerCase() === 'published') return true;
+        // Student-generated quizzes from their documents carry s3Key; published pool rows do not.
+        if (String((row as any)?.s3Key || '').trim()) return false;
         const res = quizResult;
-        if (res && (res as any).isPractice === false && !String((row as any)?.s3Key || '').trim()) {
-            return true;
-        }
+        if (res && (res as any).isPractice === false) return true;
         return false;
     };
 
@@ -2067,8 +2296,11 @@ export function StudentQuizSection({
                 isRetake: true,
             };
 
-            void recordAttemptStart(quizToTake.id);
-            openQuizTakingSession(quizToTake);
+            const startedAttemptId = await recordAttemptStart(quizToTake.id);
+            openQuizTakingSession({
+                ...quizToTake,
+                ...(startedAttemptId != null ? { attemptId: startedAttemptId } : {}),
+            });
         } catch (err: unknown) {
             console.error('[retakeQuiz] failed:', err);
             showNotification({
@@ -2079,28 +2311,30 @@ export function StudentQuizSection({
         }
     };
 
-    const recordAttemptStart = async (quizId: string | number | undefined) => {
+    const recordAttemptStart = async (
+        quizId: string | number | undefined
+    ): Promise<number | null> => {
         const id = coercePositiveQuizId(quizId);
-        if (id == null) return;
+        if (id == null) return null;
 
         try {
-            console.log('[recordAttemptStart] payload =', {
-                quizId: id,
-                userId: user?.user_id ?? user?.id ?? user?.userId,
-                phase: 'start',
-            });
-
-            await api.post('/quiz/attempts', {
+            const attemptRes: any = await api.post('/quiz/attempts', {
                 quizId: id,
                 quiz_id: id,
                 userId: user?.user_id ?? user?.id ?? user?.userId,
                 user_id: user?.user_id ?? user?.id ?? user?.userId,
                 phase: 'start',
             });
-            // Refresh list in background; do not block opening the quiz modal.
-            void loadConnectedData({ quiet: true });
+            const payload = attemptRes?.data ?? attemptRes;
+            const responseData =
+                payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+            const createdAttemptId =
+                responseData?.attemptId ?? payload?.attemptId ?? attemptRes?.attemptId ?? null;
+            const n = Number(createdAttemptId);
+            return Number.isFinite(n) && n > 0 ? n : null;
         } catch (err: unknown) {
             console.warn('[recordAttemptStart] failed (quiz can still open):', err, getApiErrorMessage(err));
+            return null;
         }
     };
 
@@ -2146,8 +2380,11 @@ export function StudentQuizSection({
                         10
                     ),
                 };
-                void recordAttemptStart(generatedQuiz.id);
-                openQuizTakingSession(generatedQuiz);
+                const startedAttemptId = await recordAttemptStart(generatedQuiz.id);
+                openQuizTakingSession({
+                    ...generatedQuiz,
+                    ...(startedAttemptId != null ? { attemptId: startedAttemptId } : {}),
+                });
                 return;
             }
 
@@ -2180,6 +2417,12 @@ export function StudentQuizSection({
                 });
                 return;
             }
+            const uid = Number(user?.user_id ?? user?.id ?? user?.userId);
+            const ownerId = Number(
+                quiz?.createdBy ?? quiz?.created_by ?? quiz?.ownerId ?? quiz?.user_id ?? 0
+            );
+            const ownsQuiz =
+                Number.isFinite(uid) && uid > 0 && Number.isFinite(ownerId) && ownerId > 0 && ownerId === uid;
             const payload = {
                 s3Key: quiz?.s3Key,
                 persist: true,
@@ -2187,6 +2430,11 @@ export function StudentQuizSection({
                 numQuestions: numQuestionsForGenerate(quiz),
                 language: 'English',
                 createdBy,
+                varietySeed: `quiz-gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                forceNew: true,
+                ...(ownsQuiz && (quiz?.quizId || quiz?.id)
+                    ? { quizId: Number(quiz.quizId ?? quiz.id) }
+                    : {}),
             };
             const token = getStoredAuthToken();
             const base = getApiBaseUrl().replace(/\/$/, '');
@@ -2278,8 +2526,11 @@ export function StudentQuizSection({
                 passPercentage: Number(quiz.passPercentage ?? 70),
             };
 
-            void recordAttemptStart(generatedQuiz.id);
-            setSelectedQuiz(generatedQuiz);
+            const startedAttemptId = await recordAttemptStart(generatedQuiz.id);
+            setSelectedQuiz({
+                ...generatedQuiz,
+                ...(startedAttemptId != null ? { attemptId: startedAttemptId } : {}),
+            });
             setCurrentQuestionIndex(0);
             setAnswers([]);
             setTimeRemaining((generatedQuiz.duration || 10) * 60);
@@ -2433,7 +2684,10 @@ export function StudentQuizSection({
         const elapsedByClock = quizStartedAtMs ? Math.max(0, Math.floor((Date.now() - quizStartedAtMs) / 1000)) : 0;
         const resolvedTimeTaken = elapsedByClock > 0 ? elapsedByClock : elapsedByTimer;
 
-        const resultId = `${selectedQuiz.id}-${Date.now()}`;
+        const openAttemptId = Number((selectedQuiz as any)?.attemptId);
+        const resultId = Number.isFinite(openAttemptId) && openAttemptId > 0
+            ? `${selectedQuiz.id}-${openAttemptId}`
+            : `${selectedQuiz.id}-${Date.now()}`;
         const result = {
             quizId: selectedQuiz.id,
             resultId,
@@ -2449,7 +2703,8 @@ export function StudentQuizSection({
         };
         appendQuizResultCache(
             {
-            attemptId: null,
+            attemptId:
+                Number.isFinite(openAttemptId) && openAttemptId > 0 ? openAttemptId : null,
             quizId: Number(selectedQuiz.id),
             resultId,
             answersSnapshot: answers,
@@ -2480,9 +2735,11 @@ export function StudentQuizSection({
 
         const completedRow = {
             ...selectedQuiz,
-            isPublished: false,
+            isPublished: Boolean(selectedQuiz?.isPublished),
+            status: selectedQuiz?.isPublished ? 'published' : selectedQuiz?.status,
             isRetake: undefined,
-            attemptId: null,
+            attemptId:
+                Number.isFinite(openAttemptId) && openAttemptId > 0 ? openAttemptId : null,
             myScore: score,
             attempts: Number((selectedQuiz as any)?.attempts ?? selectedQuiz.myAttempts ?? 0) + 1,
             completedDate: result.completedDate,
@@ -2653,8 +2910,9 @@ export function StudentQuizSection({
     };
 
     const renderAvailableQuizzes = () => (
+        <>
         <div className="space-y-4">
-            {filteredQuizzes().map((quiz) => {
+            {paginatedQuizzes.map((quiz) => {
                 const sk = String(quiz?.s3Key || '').trim();
                 const isHl = Boolean(sk && highlightedS3Key && sk === highlightedS3Key);
                 const showVerified =
@@ -2717,11 +2975,14 @@ export function StudentQuizSection({
             );
             })}
         </div>
+        {renderQuizListPagination()}
+        </>
     );
 
     const renderCompletedQuizzes = () => (
+        <>
         <div className="space-y-4">
-            {filteredQuizzes().map((quiz) => (
+            {paginatedQuizzes.map((quiz) => (
                 <div key={String((quiz as any)?.resultId || quiz.id)} className="bg-white rounded-lg border border-gray-200 p-6">
                     <div className="flex items-start justify-between mb-4">
                         <div className="flex-1">
@@ -3237,6 +3498,8 @@ export function StudentQuizSection({
                 </div>
             ))}
         </div>
+        {renderQuizListPagination()}
+        </>
     );
 
     const renderPracticeQuizzes = () => (
@@ -3247,7 +3510,7 @@ export function StudentQuizSection({
                 </p>
             </div>
             <div className="space-y-4">
-                {filteredQuizzes().map((quiz) => (
+                {paginatedQuizzes.map((quiz) => (
                     <div key={quiz.id} className="bg-white rounded-lg border border-gray-200 p-6">
                         <div className="flex items-start justify-between mb-4">
                             <div className="flex-1">
@@ -3293,6 +3556,7 @@ export function StudentQuizSection({
                     </div>
                 ))}
             </div>
+            {renderQuizListPagination()}
         </div>
     );
 
@@ -3826,7 +4090,7 @@ export function StudentQuizSection({
             )}
             {!loading &&
                 currentTabQuizzes.length > 0 &&
-                filteredQuizzes().length === 0 && (
+                filteredQuizzesList.length === 0 && (
                     <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6 text-amber-900 flex flex-wrap items-center justify-between gap-3">
                         <span>No quizzes match your search or subject filter.</span>
                         <button

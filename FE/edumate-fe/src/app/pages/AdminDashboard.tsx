@@ -206,7 +206,7 @@ export function AdminDashboard({ user, onLogout, onOpenDonate }: AdminDashboardP
       setArchiveMessage(res.message || 'Archiving complete.');
       fetchData(); // Refresh archives and logs
     } catch (err: any) {
-      setArchiveMessage(`Lưu trữ thất bại: ${getApiErrorMessage(err)}`);
+      setArchiveMessage(`Archiving failed: ${getApiErrorMessage(err)}`);
     } finally {
       setArchiving(false);
     }

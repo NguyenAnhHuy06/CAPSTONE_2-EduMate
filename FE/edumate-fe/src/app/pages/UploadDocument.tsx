@@ -1,12 +1,29 @@
 // File: src/app/pages/UploadDocument.tsx
 
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
 
-import { getApiBaseUrl } from '@/services/api';
+import api, { getApiBaseUrl } from '@/services/api';
 import { SAFE_ERROR, sanitizeApiUserMessage } from '@/utils/safeErrorMessage';
 
+type CourseSuggestion = {
+  course_code: string;
+  course_name: string;
+};
 
+function normalizeCourseSuggestion(row: Record<string, unknown>): CourseSuggestion | null {
+  const course_code = String(
+    row.course_code ?? row.courseCode ?? row.subject_code ?? row.subjectCode ?? ''
+  ).trim();
+  const course_name = String(
+    row.course_name ?? row.courseName ?? row.subject_name ?? row.subjectName ?? ''
+  ).trim();
+  if (!course_code && !course_name) return null;
+  return {
+    course_code: course_code || course_name,
+    course_name: course_name || course_code,
+  };
+}
 
 interface UploadDocumentProps {
   userRole: 'instructor' | 'student';
@@ -29,9 +46,12 @@ export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocum
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
-  const [courseSuggestions, setCourseSuggestions] = useState<{course_code: string; course_name: string}[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [courseSuggestions, setCourseSuggestions] = useState<CourseSuggestion[]>([]);
+  const [showCodeSuggestions, setShowCodeSuggestions] = useState(false);
   const [showNameSuggestions, setShowNameSuggestions] = useState(false);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const suggestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suggestRequestIdRef = useRef(0);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     setFormData({
@@ -46,124 +66,182 @@ export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocum
     }
   };
 
-  const fetchCourseSuggestions = async (query: string) => {
-    if (!query.trim()) {
+  const fetchCourseSuggestions = useCallback(async (query: string, field: 'code' | 'name') => {
+    const q = query.trim();
+    if (!q) {
       setCourseSuggestions([]);
+      setSuggestionsLoading(false);
       return;
     }
+
+    const requestId = ++suggestRequestIdRef.current;
+    setSuggestionsLoading(true);
     try {
-      const res: any = await api.get(`/documents/course-suggestions?query=${encodeURIComponent(query)}`);
-      if (res.success) {
-        setCourseSuggestions(res.data);
-      }
+      const res = (await api.get('/documents/course-suggestions', {
+        params: { query: q, field },
+      })) as { success?: boolean; data?: unknown[] };
+      if (requestId !== suggestRequestIdRef.current) return;
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      const mapped = rows
+        .map((row) => normalizeCourseSuggestion(row as Record<string, unknown>))
+        .filter((x): x is CourseSuggestion => x != null);
+      setCourseSuggestions(mapped);
     } catch (err) {
-      console.error("Error fetching course suggestions:", err);
+      if (requestId !== suggestRequestIdRef.current) return;
+      console.error('[UploadDocument] course suggestions:', err);
+      setCourseSuggestions([]);
+    } finally {
+      if (requestId === suggestRequestIdRef.current) setSuggestionsLoading(false);
     }
+  }, []);
+
+  const scheduleCourseSuggestions = (query: string, field: 'code' | 'name') => {
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current);
+    suggestTimerRef.current = setTimeout(() => {
+      void fetchCourseSuggestions(query, field);
+    }, 280);
   };
 
-const handleSubmit = async (e: React.FormEvent) => {
-  e.preventDefault();
+  const applySuggestion = (suggestion: CourseSuggestion) => {
+    setFormData((prev) => ({
+      ...prev,
+      courseCode: suggestion.course_code,
+      courseName: suggestion.course_name || prev.courseName,
+    }));
+    setCourseSuggestions([]);
+    setShowCodeSuggestions(false);
+    setShowNameSuggestions(false);
+  };
 
-  if (!file) {
-    alert("Please select a file");
-    return;
-  }
+  const renderSuggestionList = (visible: boolean) => {
+    if (!visible) return null;
+    if (suggestionsLoading && courseSuggestions.length === 0) {
+      return (
+        <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg mt-1 shadow-lg">
+          <li className="px-4 py-2 text-sm text-gray-500">Searching courses…</li>
+        </ul>
+      );
+    }
+    if (!courseSuggestions.length) return null;
+    return (
+      <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg mt-1 max-h-48 overflow-y-auto shadow-lg">
+        {courseSuggestions.map((suggestion) => (
+          <li
+            key={`${suggestion.course_code}-${suggestion.course_name}`}
+            className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => applySuggestion(suggestion)}
+          >
+            <span className="font-semibold text-gray-900">{suggestion.course_code}</span>
+            {suggestion.course_name ? (
+              <span className="text-gray-600"> — {suggestion.course_name}</span>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    );
+  };
 
-  if (file.size > 10 * 1024 * 1024) {
-    alert("File must not exceed 10MB");
-    return;
-  }
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
 
-  setUploading(true);
-
-  try {
-    const form = new FormData();
-
-    // Field name must match the backend
-    form.append("documentFile", file);
-
-    form.append("title", formData.topicTitle);
-    form.append("category", formData.type);
-    form.append("year", formData.year);
-    form.append("semester", formData.semester);
-    form.append("subjectCode", formData.courseCode);
-    form.append("subjectName", formData.courseName);
-    form.append("tags", formData.courseCode);
-    form.append("description", formData.description || "");
-
-    const uploaderId = user?.user_id ?? user?.id ?? user?.userId;
-    if (uploaderId != null && String(uploaderId).trim() !== '') {
-      form.append('uploaderId', String(uploaderId));
+    if (!file) {
+      alert('Please select a file');
+      return;
     }
 
-    const base = getApiBaseUrl();
-    const uploadUrl = `${base.replace(/\/$/, '')}/documents/upload`;
+    if (file.size > 10 * 1024 * 1024) {
+      alert('File must not exceed 10MB');
+      return;
+    }
 
-    let res;
+    setUploading(true);
 
     try {
-      const token = typeof window !== 'undefined' ? localStorage.getItem('edumate_token') : null;
-      const headers: HeadersInit = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
+      const form = new FormData();
 
-      res = await fetch(uploadUrl, {
-          method: "POST",
+      form.append('documentFile', file);
+      form.append('title', formData.topicTitle);
+      form.append('category', formData.type);
+      form.append('year', formData.year);
+      form.append('semester', formData.semester);
+      form.append('subjectCode', formData.courseCode);
+      form.append('subjectName', formData.courseName);
+      form.append('tags', formData.courseCode);
+      form.append('description', formData.description || '');
+
+      const uploaderId = user?.user_id ?? user?.id ?? user?.userId;
+      if (uploaderId != null && String(uploaderId).trim() !== '') {
+        form.append('uploaderId', String(uploaderId));
+      }
+
+      const base = getApiBaseUrl();
+      const uploadUrl = `${base.replace(/\/$/, '')}/documents/upload`;
+
+      let res;
+
+      try {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('edumate_token') : null;
+        const headers: HeadersInit = {};
+        if (token) headers.Authorization = `Bearer ${token}`;
+
+        res = await fetch(uploadUrl, {
+          method: 'POST',
           headers,
           body: form,
         });
-    } catch (err) {
-      console.error('[UploadDocument] network failed:', err);
-      throw new Error(SAFE_ERROR.network);
-    }
-
-    let data;
-
-    try {
-      data = await res.json();
-    } catch (err) {
-      console.error('[UploadDocument] invalid JSON:', err);
-      throw new Error(SAFE_ERROR.generic);
-    }
-
-    if (!res.ok) {
-      const msg = sanitizeApiUserMessage(String(data?.message || ''));
-      throw new Error(msg || SAFE_ERROR.upload);
-    }
-
-    setUploadSuccess(true);
-
-    setTimeout(() => {
-      setUploadSuccess(false);
-      setFormData({
-        type: 'general',
-        year: '',
-        semester: '',
-        courseCode: '',
-        courseName: '',
-        topicTitle: '',
-        description: '',
-      });
-
-      setFile(null);
-      const fileInput = document.getElementById("file-upload") as HTMLInputElement;
-
-      if (fileInput) {
-        fileInput.value = "";
+      } catch (err) {
+        console.error('[UploadDocument] network failed:', err);
+        throw new Error(SAFE_ERROR.network);
       }
 
-      onUploadComplete();
-    }, 2000);
+      let data;
 
-  } catch (err: unknown) {
-    const msg =
-      err instanceof Error && sanitizeApiUserMessage(err.message)
-        ? err.message
-        : SAFE_ERROR.upload;
-    alert(msg);
-  } finally {
-    setUploading(false);
-  }
-};
+      try {
+        data = await res.json();
+      } catch (err) {
+        console.error('[UploadDocument] invalid JSON:', err);
+        throw new Error(SAFE_ERROR.generic);
+      }
+
+      if (!res.ok) {
+        const msg = sanitizeApiUserMessage(String(data?.message || ''));
+        throw new Error(msg || SAFE_ERROR.upload);
+      }
+
+      setUploadSuccess(true);
+
+      setTimeout(() => {
+        setUploadSuccess(false);
+        setFormData({
+          type: 'general',
+          year: '',
+          semester: '',
+          courseCode: '',
+          courseName: '',
+          topicTitle: '',
+          description: '',
+        });
+
+        setFile(null);
+        const fileInput = document.getElementById('file-upload') as HTMLInputElement;
+
+        if (fileInput) {
+          fileInput.value = '';
+        }
+
+        onUploadComplete();
+      }, 2000);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error && sanitizeApiUserMessage(err.message)
+          ? err.message
+          : SAFE_ERROR.upload;
+      alert(msg);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   if (uploadSuccess) {
     return (
@@ -186,9 +264,7 @@ const handleSubmit = async (e: React.FormEvent) => {
       <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6">
         {/* File Upload */}
         <div className="mb-6">
-          <label className="block text-gray-700 text-lg mb-2">
-            Document File *
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Document File *</label>
           <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-600 transition-colors">
             <input
               type="file"
@@ -217,9 +293,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Type */}
         <div className="mb-4">
-          <label className="block text-gray-700 text-lg mb-2">
-            Document Type
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Document Type</label>
           <select
             name="type"
             aria-label="Select Document Type"
@@ -236,9 +310,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Year */}
         <div className="mb-4">
-          <label className="block text-gray-700 text-lg mb-2">
-            Year *
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Year *</label>
           <select
             name="year"
             aria-label="Select academic year"
@@ -247,19 +319,17 @@ const handleSubmit = async (e: React.FormEvent) => {
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
           >
-          <option value="">Select year</option>
-          <option value="YEAR 1">Year 1</option>
-          <option value="YEAR 2">Year 2</option>
-          <option value="YEAR 3">Year 3</option>
-          <option value="YEAR 4">Year 4</option>
+            <option value="">Select year</option>
+            <option value="YEAR 1">Year 1</option>
+            <option value="YEAR 2">Year 2</option>
+            <option value="YEAR 3">Year 3</option>
+            <option value="YEAR 4">Year 4</option>
           </select>
         </div>
 
         {/* Semester */}
         <div className="mb-4">
-          <label className="block text-gray-700 text-lg mb-2">
-            Semester *
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Semester *</label>
           <select
             name="semester"
             aria-label="Select semester"
@@ -276,95 +346,59 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Course Code */}
         <div className="mb-4 relative">
-          <label className="block text-gray-700 text-lg mb-2">
-            Course Code *
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Course Code *</label>
           <input
             type="text"
             name="courseCode"
             value={formData.courseCode}
             onChange={(e) => {
               handleInputChange(e);
-              fetchCourseSuggestions(e.target.value);
+              scheduleCourseSuggestions(e.target.value, 'code');
             }}
-            onFocus={() => setShowSuggestions(true)}
-            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+            onFocus={() => {
+              setShowCodeSuggestions(true);
+              if (formData.courseCode.trim()) {
+                void fetchCourseSuggestions(formData.courseCode, 'code');
+              }
+            }}
+            onBlur={() => setTimeout(() => setShowCodeSuggestions(false), 200)}
             placeholder="e.g., CS101, MATH201"
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
+            autoComplete="off"
           />
-          {showSuggestions && courseSuggestions.length > 0 && (
-            <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg mt-1 max-h-40 overflow-y-auto shadow-lg">
-              {courseSuggestions.map((suggestion, index) => (
-                <li
-                  key={index}
-                  className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
-                  onClick={() => {
-                    setFormData({
-                      ...formData,
-                      courseCode: suggestion.course_code,
-                      courseName: suggestion.course_name || formData.courseName
-                    });
-                    setCourseSuggestions([]);
-                    setShowSuggestions(false);
-                  }}
-                >
-                  <span className="font-semibold">{suggestion.course_code}</span>
-                  {suggestion.course_name && ` - ${suggestion.course_name}`}
-                </li>
-              ))}
-            </ul>
-          )}
+          {renderSuggestionList(showCodeSuggestions)}
         </div>
 
         {/* Course Name */}
         <div className="mb-4 relative">
-          <label className="block text-gray-700 text-lg mb-2">
-            Course Name *
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Course Name *</label>
           <input
             type="text"
             name="courseName"
             value={formData.courseName}
             onChange={(e) => {
               handleInputChange(e);
-              fetchCourseSuggestions(e.target.value);
+              scheduleCourseSuggestions(e.target.value, 'name');
             }}
-            onFocus={() => setShowNameSuggestions(true)}
+            onFocus={() => {
+              setShowNameSuggestions(true);
+              if (formData.courseName.trim()) {
+                void fetchCourseSuggestions(formData.courseName, 'name');
+              }
+            }}
             onBlur={() => setTimeout(() => setShowNameSuggestions(false), 200)}
             placeholder="e.g., Introduction to Computer Science"
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
+            autoComplete="off"
           />
-          {showNameSuggestions && courseSuggestions.length > 0 && (
-            <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg mt-1 max-h-40 overflow-y-auto shadow-lg">
-              {courseSuggestions.map((suggestion, index) => (
-                <li
-                  key={index}
-                  className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
-                  onClick={() => {
-                    setFormData({
-                      ...formData,
-                      courseCode: suggestion.course_code,
-                      courseName: suggestion.course_name || formData.courseName
-                    });
-                    setCourseSuggestions([]);
-                    setShowNameSuggestions(false);
-                  }}
-                >
-                  <span className="font-semibold">{suggestion.course_code}</span>
-                  {suggestion.course_name && ` - ${suggestion.course_name}`}
-                </li>
-              ))}
-            </ul>
-          )}
+          {renderSuggestionList(showNameSuggestions)}
         </div>
 
         {/* Topic Title */}
         <div className="mb-4">
-          <label className="block text-gray-700 text-lg mb-2">
-            Topic Title *
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Topic Title *</label>
           <input
             type="text"
             name="topicTitle"
@@ -378,9 +412,7 @@ const handleSubmit = async (e: React.FormEvent) => {
 
         {/* Description */}
         <div className="mb-6">
-          <label className="block text-gray-700 text-lg mb-2">
-            Description 
-          </label>
+          <label className="block text-gray-700 text-lg mb-2">Description</label>
           <textarea
             name="description"
             value={formData.description}

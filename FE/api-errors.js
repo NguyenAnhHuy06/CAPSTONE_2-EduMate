@@ -3,7 +3,7 @@
  * Logs full errors for developers; never exposes stack/SQL/paths to clients.
  */
 
-const DEFAULT_SAFE_MESSAGE = "Đã xảy ra lỗi. Vui lòng thử lại.";
+const DEFAULT_SAFE_MESSAGE = "Something went wrong. Please try again.";
 
 const TECHNICAL_PATTERNS = [
   /at\s+[\w.$/<>]+\s*\(/i,

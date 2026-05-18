@@ -102,7 +102,10 @@ export function FlashcardViewer({ document, user, onBack, onEditSet }: Flashcard
         })).filter((c) => c.id);
 
         const locals = readLocalFlashcardSets(Number(documentId), userId);
-        const merged = mergeApiWithLocalFlashcards(mapped, locals);
+        const merged =
+          mapped.length > 0
+            ? mapped
+            : mergeApiWithLocalFlashcards(mapped, locals);
 
         setError('');
         setFlashcards(merged);
@@ -118,7 +121,7 @@ export function FlashcardViewer({ document, user, onBack, onEditSet }: Flashcard
           setActiveSetId(null);
         }
       } catch (err: any) {
-        setError(getApiErrorMessage(err, 'Không thể tải flashcard.'));
+        setError(getApiErrorMessage(err, 'Could not load flashcards.'));
       } finally {
         if (!silent) setLoading(false);
       }

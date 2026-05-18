@@ -123,9 +123,13 @@ function showCustomModal(message: string, callback?: () => void) {
 api.interceptors.response.use(
   (res) => res.data,
   (err) => {
-    if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+    if (shouldForceLogoutOnApiError(err)) {
+      const authMsg = extractRawApiMessage(
+        (err as { response?: { data?: unknown } })?.response?.data
+      )
       showCustomModal(
-        'Phiên đăng nhập đã hết hạn hoặc tài khoản bị vô hiệu hóa. Đang chuyển về trang đăng nhập.',
+        authMsg ||
+          'Your session has expired or your account was deactivated. Redirecting to sign in.',
         () => {
           const candidates = ['edumate_token', 'accessToken', 'token']
           candidates.forEach((key) => localStorage.removeItem(key))
@@ -161,6 +165,28 @@ function extractRawApiMessage(data: unknown): string {
   return ''
 }
 
+/** True only for auth/session failures — not generic "permission denied" 403s. */
+export function shouldForceLogoutOnApiError(err: unknown): boolean {
+  const e = err as { response?: { status?: number; data?: unknown } }
+  const status = e?.response?.status
+  if (status === 401) return true
+  if (status !== 403) return false
+
+  const msg = extractRawApiMessage(e?.response?.data).toLowerCase()
+  if (!msg) return false
+
+  return (
+    msg.includes('deactivated') ||
+    msg.includes('not verified') ||
+    msg.includes('email not verified') ||
+    msg.includes('authentication required') ||
+    msg.includes('invalid token') ||
+    msg.includes('user no longer exists') ||
+    msg.includes('please login') ||
+    msg.includes('sign in')
+  )
+}
+
 /**
  * Safe message for toast/modal — never returns stack traces, SQL, paths, or axios internals.
  */
@@ -176,9 +202,9 @@ export function getApiErrorMessage(
   if (isNetworkError(err)) return SAFE_ERROR.network
 
   const status = e?.response?.status
-  if (status === 401) return 'Phiên đăng nhập không hợp lệ. Vui lòng đăng nhập lại.'
-  if (status === 403) return 'Bạn không có quyền thực hiện thao tác này.'
-  if (status === 404) return 'Không tìm thấy dữ liệu yêu cầu.'
+  if (status === 401) return 'Your session is invalid. Please sign in again.'
+  if (status === 403) return 'You do not have permission to perform this action.'
+  if (status === 404) return 'The requested data was not found.'
   if (status != null && status >= 500) return SAFE_ERROR.generic
 
   return fallback

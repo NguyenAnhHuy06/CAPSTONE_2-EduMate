@@ -45,6 +45,13 @@ export function Register({ onBackToLogin }: RegisterProps) {
       newErrors.email = 'Email is required';
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
       newErrors.email = 'Please enter a valid email address';
+    } else {
+      const emailLower = formData.email.trim().toLowerCase();
+      if (role === 'instructor' && !emailLower.endsWith('@duytan.edu.vn')) {
+        newErrors.email = 'Lecturer email must end with @duytan.edu.vn';
+      } else if (role === 'student' && !emailLower.endsWith('@dtu.edu.vn')) {
+        newErrors.email = 'Student email must end with @dtu.edu.vn';
+      }
     }
 
     if (!formData.id.trim()) {
@@ -88,7 +95,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
       setErrors({});
       onBackToLogin();
       } catch (err: any) {
-        setErrors({ otpCode: getApiErrorMessage(err, 'Xác minh OTP thất bại.') });
+        setErrors({ otpCode: getApiErrorMessage(err, 'OTP verification failed.') });
       } finally {
         setSubmitting(false);
       }
@@ -117,7 +124,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
       setMessage('OTP has been sent. Please check your email.');
       setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
     } catch (err: any) {
-      setErrors({ email: getApiErrorMessage(err, 'Đăng ký thất bại.') });
+      setErrors({ email: getApiErrorMessage(err, 'Registration failed.') });
     } finally {
       setSubmitting(false);
     }
@@ -153,7 +160,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
     } catch (err: any) {
       setErrors((prev) => ({
         ...prev,
-        otpCode: getApiErrorMessage(err, 'Không thể gửi lại OTP.'),
+        otpCode: getApiErrorMessage(err, 'Could not resend OTP.'),
       }));
     } finally {
       setResendingOtp(false);
@@ -245,10 +252,21 @@ export function Register({ onBackToLogin }: RegisterProps) {
                 className={`w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600 ${
                   errors.email ? 'border-red-500' : 'border-gray-300'
                 }`}
-                placeholder="Enter your email"
+                placeholder={
+                  role === 'instructor'
+                    ? 'name@duytan.edu.vn'
+                    : 'name@dtu.edu.vn'
+                }
               />
               {errors.email && (
                 <p className="text-red-500 text-sm mt-1">{errors.email}</p>
+              )}
+              {!errors.email && (
+                <p className="text-gray-500 text-xs mt-1">
+                  {role === 'instructor'
+                    ? 'Use your Duy Tan email (@duytan.edu.vn).'
+                    : 'Use your DTU email (@dtu.edu.vn).'}
+                </p>
               )}
             </div>
 

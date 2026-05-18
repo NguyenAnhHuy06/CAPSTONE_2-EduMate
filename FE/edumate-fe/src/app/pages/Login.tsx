@@ -50,16 +50,16 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
       const msg = getApiErrorMessage(err, '');
 
       if (status === 403) {
-        setError(msg || 'Vui lòng xác minh email trước khi đăng nhập.');
+        setError(msg || 'Please verify your email before signing in.');
       } else if (status === 401) {
         if (msg) {
           setError(msg);
         } else if (code === 'WRONG_PASSWORD') {
-          setError('Mật khẩu không đúng.');
+          setError('Incorrect password.');
         } else if (code === 'UNKNOWN_EMAIL') {
-          setError('Không tìm thấy tài khoản với email này.');
+          setError('No account found for this email.');
         } else {
-          setError('Email hoặc mật khẩu không đúng.');
+          setError('Incorrect email or password.');
         }
       } else {
         setError(msg || getApiErrorMessage(err));
