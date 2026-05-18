@@ -1,0 +1,60 @@
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
+
+const Document = sequelize.define('Document', {
+    document_id: {
+        type: DataTypes.INTEGER,
+        autoIncrement: true,
+        primaryKey: true
+    },
+    title: {
+        type: DataTypes.STRING(255),
+        allowNull: false
+    },
+    file_url: {
+        type: DataTypes.STRING(512),
+        allowNull: true
+    },
+    course_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
+    },
+    uploader_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true
+    },
+    version: {
+        type: DataTypes.INTEGER,
+        defaultValue: 1
+    },
+    status: {
+        type: DataTypes.ENUM('pending', 'verified', 'rejected'),
+        defaultValue: 'pending'
+    },
+    category: {
+        type: DataTypes.STRING(128),
+        allowNull: true
+    },
+    year: {
+        type: DataTypes.STRING(50),
+        allowNull: true
+    },
+    description: {
+        type: DataTypes.TEXT,
+        allowNull: true
+    },
+    download_count: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0
+    },
+    created_at: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: DataTypes.NOW
+    }
+}, {
+    tableName: 'documents',
+    timestamps: false
+});
+
+module.exports = Document;
