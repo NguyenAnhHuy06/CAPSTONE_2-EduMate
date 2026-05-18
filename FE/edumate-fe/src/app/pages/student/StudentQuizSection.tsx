@@ -10,9 +10,12 @@ import {
     Award,
     X,
     Lightbulb,
+    Share2,
+    RefreshCw,
+    MessageSquare,
 } from 'lucide-react';
 import { useNotification } from '../NotificationContext';
-import api, { getApiBaseUrl, getStoredAuthToken } from '@/services/api';
+import api, { getApiBaseUrl, getApiErrorMessage, getStoredAuthToken } from '@/services/api';
 import { safeNotificationMessage } from '@/utils/safeErrorMessage';
 import { formatDateTimeWithSeconds } from '@/utils/formatDateTime';
 
@@ -36,17 +39,26 @@ interface QuizAnswer {
 const LETTERS = ['A', 'B', 'C', 'D'];
 const STUDENT_QUIZ_GENERATING_KEY = 'edumate_student_quiz_generating';
 const STUDENT_QUIZ_AUTOSTART_KEY = 'edumate_student_quiz_autostart';
+const STUDENT_QUIZ_AUTOSTART_EVENT = 'edumate:student-quiz-autostart';
 const STUDENT_QUIZ_RESULT_CACHE_KEY = 'edumate_student_quiz_result_cache';
+/** quizId → ISO sharedAt — one share per quiz (survives retakes / new attempts). */
+const STUDENT_SHARED_QUIZ_IDS_KEY = 'edumate_student_shared_quiz_ids';
 const STUDENT_QUIZ_TAKING_EVENT = 'edumate:student-quiz-taking';
 type StudentQuizJobStatus = 'idle' | 'running' | 'completed' | 'failed';
 
 type QuizResultCacheItem = {
     attemptId?: number | null;
     quizId: number;
+    resultId?: string;
     answersSnapshot: QuizAnswer[];
     questionsSnapshot: any[];
     timeTakenSeconds: number;
     savedAt: number;
+    s3Key?: string;
+    title?: string;
+    passPercentage?: number;
+    duration?: number;
+    myScore?: number;
 };
 
 function formatHourMinute(raw: unknown): string {
@@ -55,6 +67,26 @@ function formatHourMinute(raw: unknown): string {
     const d = new Date(t);
     if (Number.isNaN(d.getTime())) return t;
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function mapQuizCommentRows(raw: unknown): { id: string; author: string; createdAt: string; text: string }[] {
+    const rows = Array.isArray(raw)
+        ? raw
+        : Array.isArray((raw as any)?.data)
+          ? (raw as any).data
+          : Array.isArray((raw as any)?.data?.items)
+            ? (raw as any).data.items
+            : Array.isArray((raw as any)?.items)
+              ? (raw as any).items
+              : [];
+    return rows.map((c: any, idx: number) => ({
+        id: String(c?.commentId ?? c?.id ?? `comment-${idx}`),
+        author: String(
+            c?.authorLabel ?? c?.author ?? c?.createdByName ?? c?.userName ?? 'User'
+        ).trim(),
+        createdAt: String(c?.createdAt ?? c?.created_at ?? c?.time ?? '').trim(),
+        text: String(c?.text ?? c?.content ?? c?.comment ?? c?.body ?? '').trim(),
+    }));
 }
 
 function formatDateTimeWithSeconds(raw: unknown): string {
@@ -72,9 +104,18 @@ function formatDateTimeWithSeconds(raw: unknown): string {
     return `${date} ${time}`;
 }
 
-function readQuizResultCache(): QuizResultCacheItem[] {
+function cacheKeyForUser(baseKey: string, viewerUserId: string | null): string | null {
+    if (viewerUserId == null) return null;
+    const s = String(viewerUserId).trim();
+    if (!s) return null;
+    return `${baseKey}:u:${s}`;
+}
+
+function readQuizResultCache(viewerUserId: string | null): QuizResultCacheItem[] {
+    const key = cacheKeyForUser(STUDENT_QUIZ_RESULT_CACHE_KEY, viewerUserId);
+    if (!key) return [];
     try {
-        const raw = localStorage.getItem(STUDENT_QUIZ_RESULT_CACHE_KEY);
+        const raw = localStorage.getItem(key);
         const parsed = raw ? JSON.parse(raw) : [];
         return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -82,23 +123,217 @@ function readQuizResultCache(): QuizResultCacheItem[] {
     }
 }
 
-function writeQuizResultCache(items: QuizResultCacheItem[]) {
+function writeQuizResultCache(items: QuizResultCacheItem[], viewerUserId: string | null) {
+    const key = cacheKeyForUser(STUDENT_QUIZ_RESULT_CACHE_KEY, viewerUserId);
+    if (!key) return;
     try {
-        localStorage.setItem(STUDENT_QUIZ_RESULT_CACHE_KEY, JSON.stringify(items.slice(0, 100)));
+        localStorage.setItem(key, JSON.stringify(items.slice(0, 100)));
     } catch {
         // ignore storage failures
     }
 }
 
-function upsertQuizResultCache(entry: QuizResultCacheItem) {
-    const prev = readQuizResultCache();
-    const hasAttemptId = Number.isFinite(Number(entry.attemptId));
+function resolveStudentQuizId(row?: { quizId?: unknown; id?: unknown } | null): number | null {
+    const n = Number((row as any)?.quizId ?? row?.id);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function rowHasSharedFlags(row?: Record<string, unknown> | null): boolean {
+    return Boolean(row?.sharedForReview || row?.sharedFromStudent);
+}
+
+function readSharedQuizIdMap(viewerUserId: string | null): Map<number, string> {
+    const out = new Map<number, string>();
+    const key = cacheKeyForUser(STUDENT_SHARED_QUIZ_IDS_KEY, viewerUserId);
+    if (!key) return out;
+    try {
+        const raw = localStorage.getItem(key);
+        const parsed = raw ? JSON.parse(raw) : {};
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            for (const [k, v] of Object.entries(parsed as Record<string, string>)) {
+                const qid = Number(k);
+                if (Number.isFinite(qid) && qid > 0 && String(v || '').trim()) {
+                    out.set(qid, String(v).trim());
+                }
+            }
+        }
+    } catch {
+        // ignore
+    }
+    return out;
+}
+
+function markQuizSharedInStorage(quizId: number, sharedAt: string | undefined, viewerUserId: string | null) {
+    const qid = Number(quizId);
+    if (!Number.isFinite(qid) || qid <= 0) return;
+    const storageKey = cacheKeyForUser(STUDENT_SHARED_QUIZ_IDS_KEY, viewerUserId);
+    if (!storageKey) return;
+    const at = String(sharedAt || '').trim() || new Date().toISOString();
+    try {
+        const prev = Object.fromEntries(readSharedQuizIdMap(viewerUserId));
+        prev[String(qid)] = at;
+        localStorage.setItem(storageKey, JSON.stringify(prev));
+    } catch {
+        // ignore
+    }
+}
+
+/** Propagate shared flags to every completed row for the same quizId. */
+function applySharedFlagsToQuizRows(rows: any[], viewerUserId: string | null): any[] {
+    const stored = readSharedQuizIdMap(viewerUserId);
+    const sharedByQuiz = new Map<number, string>(stored);
+
+    for (const r of rows) {
+        const qid = resolveStudentQuizId(r);
+        if (!qid || !rowHasSharedFlags(r)) continue;
+        const at = String((r as any)?.sharedAt || '').trim() || sharedByQuiz.get(qid) || new Date().toISOString();
+        sharedByQuiz.set(qid, at);
+        markQuizSharedInStorage(qid, at, viewerUserId);
+    }
+
+    return rows.map((r) => {
+        const qid = resolveStudentQuizId(r);
+        if (!qid || !sharedByQuiz.has(qid)) return r;
+        const sharedAt = sharedByQuiz.get(qid)!;
+        return {
+            ...r,
+            sharedForReview: true,
+            sharedFromStudent: true,
+            sharedAt: String((r as any)?.sharedAt || '').trim() || sharedAt,
+        };
+    });
+}
+
+function upsertQuizResultCache(entry: QuizResultCacheItem, viewerUserId: string | null) {
+    appendQuizResultCache(entry, viewerUserId);
+}
+
+/** Keep prior attempts; replace only the same resultId or attemptId. */
+function appendQuizResultCache(entry: QuizResultCacheItem, viewerUserId: string | null) {
+    const prev = readQuizResultCache(viewerUserId);
+    const resultKey = String(entry.resultId || '').trim();
+    const aid = Number(entry.attemptId);
     const next = prev.filter((x) => {
-        if (hasAttemptId) return Number(x.attemptId) !== Number(entry.attemptId);
-        return Number(x.quizId) !== Number(entry.quizId);
+        if (resultKey && String(x.resultId || '').trim() === resultKey) return false;
+        if (Number.isFinite(aid) && aid > 0 && Number(x.attemptId) === aid) return false;
+        return true;
     });
     next.unshift(entry);
-    writeQuizResultCache(next);
+    writeQuizResultCache(next, viewerUserId);
+}
+
+function stripCompletedAttemptFields(row: Record<string, unknown> | null | undefined) {
+    const source = row && typeof row === 'object' ? row : {};
+    const {
+        attemptId: _attemptId,
+        resultId: _resultId,
+        answersSnapshot: _answersSnapshot,
+        questionsSnapshot: _questionsSnapshot,
+        userAnswers: _userAnswers,
+        myScore: _myScore,
+        completedDate: _completedDate,
+        durationSeconds: _durationSeconds,
+        timeTakenSeconds: _timeTakenSeconds,
+        resultUrl: _resultUrl,
+        isRetake: _isRetake,
+        ...rest
+    } = source as Record<string, unknown>;
+    return rest;
+}
+
+function mergeCompletedWithCache(apiRows: any[], cacheRows: QuizResultCacheItem[]): any[] {
+    const merged = [...apiRows];
+    const resultKeys = new Set(merged.map((r) => String((r as any)?.resultId || '').trim()).filter(Boolean));
+    const attemptKeys = new Set(
+        merged
+            .map((r) => Number((r as any)?.attemptId))
+            .filter((n) => Number.isFinite(n) && n > 0)
+            .map((n) => String(n))
+    );
+
+    for (const c of cacheRows) {
+        if (!Array.isArray(c.questionsSnapshot) || c.questionsSnapshot.length === 0) continue;
+        const resultId =
+            String(c.resultId || '').trim() ||
+            (c.attemptId != null && c.attemptId !== ''
+                ? `${c.quizId}-${c.attemptId}`
+                : `${c.quizId}-local-${c.savedAt}`);
+        if (resultKeys.has(resultId)) continue;
+        if (c.attemptId != null && attemptKeys.has(String(c.attemptId))) continue;
+
+        const template = apiRows.find((r) => Number((r as any)?.quizId ?? r?.id) === Number(c.quizId));
+        const qs = normalizeStoredQuestions(c.questionsSnapshot);
+        merged.push({
+            ...(template || {}),
+            id: c.quizId,
+            quizId: c.quizId,
+            resultId,
+            title: c.title || template?.title || 'Quiz',
+            subject: template?.subject || 'DOC',
+            instructor: template?.instructor || 'Unknown uploader',
+            questions:
+                qs.length > 0
+                    ? qs
+                    : Array.from({ length: c.questionsSnapshot.length }).map((_, i) => ({
+                          id: `cache-q-${i + 1}`,
+                          question: '',
+                          options: [],
+                          correctAnswer: 0,
+                      })),
+            duration: Number(c.duration ?? template?.duration ?? 10),
+            durationSeconds: Number(c.timeTakenSeconds || 0),
+            myScore: Number.isFinite(Number(c.myScore))
+                ? Number(c.myScore)
+                : Number(template?.myScore || 0),
+            attempts: Number(template?.attempts || 1),
+            completedDate: new Date(c.savedAt).toISOString(),
+            status: 'completed',
+            isPublished: Boolean(template?.isPublished),
+            sharedForReview: Boolean(template?.sharedForReview),
+            sharedAt: template?.sharedAt || null,
+            lecturerEdited: Boolean(template?.lecturerEdited),
+            lecturerEditedAt: template?.lecturerEditedAt || null,
+            attemptId: c.attemptId ?? null,
+            answersSnapshot: Array.isArray(c.answersSnapshot) ? c.answersSnapshot : [],
+            questionsSnapshot: c.questionsSnapshot,
+            s3Key: c.s3Key || template?.s3Key || '',
+            passPercentage: Number(c.passPercentage ?? template?.passPercentage ?? 70),
+            timeTakenSeconds: Number(c.timeTakenSeconds || 0),
+            userAnswers: Array.isArray(c.answersSnapshot)
+                ? c.answersSnapshot
+                      .map((a: any) => a?.selectedAnswer)
+                      .filter((x: any) => Number.isFinite(Number(x)))
+                : [],
+        });
+        resultKeys.add(resultId);
+        if (c.attemptId != null) attemptKeys.add(String(c.attemptId));
+    }
+
+    return merged.sort((a, b) => {
+        const ta = new Date(String((a as any)?.completedDate || 0)).getTime();
+        const tb = new Date(String((b as any)?.completedDate || 0)).getTime();
+        return tb - ta;
+    });
+}
+
+function findQuizResultCacheEntry(
+    opts: {
+        attemptId?: unknown;
+        quizId?: unknown;
+    },
+    viewerUserId: string | null
+): QuizResultCacheItem | null {
+    const rows = readQuizResultCache(viewerUserId);
+    const aid = Number(opts.attemptId);
+    if (Number.isFinite(aid) && aid > 0) {
+        const byAttempt = rows.find((x) => Number(x.attemptId) === aid);
+        if (byAttempt) return byAttempt;
+    }
+    const qid = Number(opts.quizId);
+    if (Number.isFinite(qid) && qid > 0) {
+        return rows.find((x) => Number(x.quizId) === qid) ?? null;
+    }
+    return null;
 }
 
 /** Search string (title, course code, instructor, file, date, …). */
@@ -526,6 +761,16 @@ function QuizQuestionMediaImg({ src }: { src: string }) {
     );
 }
 
+/** Positive integer quiz id for POST /quiz/attempts (reject document placeholders like "doc-1"). */
+function coercePositiveQuizId(raw: unknown): number | null {
+    if (raw == null || raw === '') return null;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.trunc(raw);
+    const s = String(raw).trim();
+    if (!/^\d+$/.test(s)) return null;
+    const n = Number(s);
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
+
 /** Unwrap GET /quizzes/:id — backends nest payload differently. */
 function unwrapQuizDetailPayload(res: any): {
     quiz_id?: number;
@@ -578,7 +823,9 @@ function unwrapQuizDetailPayload(res: any): {
     const passRaw = payload?.pass_percentage ?? payload?.passPercentage ?? nestedQuiz?.pass_percentage;
     const passN = Number(passRaw);
     return {
-        quiz_id: Number(payload?.quiz_id ?? payload?.quizId ?? payload?.id ?? nestedQuiz?.id) || undefined,
+        quiz_id:
+            coercePositiveQuizId(payload?.quiz_id ?? payload?.quizId ?? payload?.id ?? nestedQuiz?.id) ??
+            undefined,
         title: String(payload?.title ?? nestedQuiz?.title ?? payload?.quiz_title ?? '').trim() || undefined,
         questions,
         duration_minutes: Number.isFinite(durationN) && durationN > 0 ? durationN : undefined,
@@ -991,8 +1238,41 @@ export function StudentQuizSection({
     const [practiceQuizzes, setPracticeQuizzes] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [resultComments, setResultComments] = useState<any[]>([]);
+    const [resultCommentsLoading, setResultCommentsLoading] = useState(false);
+    const [sharingQuiz, setSharingQuiz] = useState(false);
     const [highlightedS3Key, setHighlightedS3Key] = useState('');
     const availableCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+    const viewerIdStr = useMemo((): string | null => {
+        const v = user?.user_id ?? user?.id ?? user?.userId;
+        if (v == null || v === '') return null;
+        const s = String(v).trim();
+        return s || null;
+    }, [user]);
+
+    const loadResultComments = async (quizRow?: any) => {
+        const qid = coercePositiveQuizId(
+            (quizRow as any)?.quizId ?? quizRow?.id ?? selectedQuiz?.quizId ?? selectedQuiz?.id
+        );
+        if (qid == null) {
+            setResultComments([]);
+            return;
+        }
+        setResultCommentsLoading(true);
+        try {
+            const commentsRes: any = await api.get(`/quizzes/${qid}/comments`);
+            setResultComments(mapQuizCommentRows(commentsRes));
+        } catch {
+            setResultComments([]);
+        } finally {
+            setResultCommentsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!showResults || !selectedQuiz) return;
+        void loadResultComments(selectedQuiz);
+    }, [showResults, selectedQuiz?.id, (selectedQuiz as any)?.quizId]);
 
     useEffect(() => {
         const raw = fileHighlightRequest?.s3Key?.trim();
@@ -1027,7 +1307,7 @@ export function StudentQuizSection({
 
     const setQuizGeneratingStatus = (
         status: StudentQuizJobStatus,
-        extra?: { jobId?: string; title?: string; error?: string }
+        extra?: { jobId?: string; title?: string; error?: string; quizId?: number | null }
     ) => {
         setIsGeneratingQuiz(status === 'running');
         const prevRaw = localStorage.getItem(STUDENT_QUIZ_GENERATING_KEY);
@@ -1061,6 +1341,14 @@ export function StudentQuizSection({
         if (!opts?.quiet) setLoading(true);
         try {
             const uid = user?.user_id ?? user?.id ?? user?.userId;
+            if (viewerIdStr) {
+                try {
+                    localStorage.removeItem(STUDENT_QUIZ_RESULT_CACHE_KEY);
+                    localStorage.removeItem(STUDENT_SHARED_QUIZ_IDS_KEY);
+                } catch {
+                    /* ignore */
+                }
+            }
             const [docsRes, historyRes, publishedRes] = await Promise.allSettled([
                 // Ask backend to include moderation-verified materials (some APIs omit them by default).
                 api.get('/documents/for-quiz', {
@@ -1079,13 +1367,19 @@ export function StudentQuizSection({
             const publishedData: any = publishedRes.status === 'fulfilled' ? publishedRes.value : null;
 
             const rowsRaw = Array.isArray(historyData?.data) ? historyData.data : [];
-            const cacheRows = readQuizResultCache();
+            const historyScoped = Boolean(historyData?.scopedToAttemptUser);
+            const cacheRows = readQuizResultCache(viewerIdStr);
             const uidStr = uid != null ? String(uid) : '';
             const rows = rowsRaw.filter((h: any) => {
                 if (isQuizMarkedDeleted(h)) return false;
                 if (!uidStr) return true;
-                const owner = h?.userId ?? h?.user_id ?? h?.ownerId ?? h?.studentId ?? h?.createdBy;
-                if (owner == null || owner === '') return true; // keep legacy rows with no owner info
+                if (historyScoped) {
+                    const ao = h?.attemptUserId ?? h?.attempt_user_id;
+                    if (ao == null || ao === '') return false;
+                    return String(ao) === uidStr;
+                }
+                const owner = h?.userId ?? h?.user_id ?? h?.ownerId ?? h?.studentId;
+                if (owner == null || owner === '') return true;
                 return String(owner) === uidStr;
             });
             const attemptsByTitle = new Map<string, number>();
@@ -1111,7 +1405,9 @@ export function StudentQuizSection({
                 title: d?.title || d?.fileName || `Document ${idx + 1}`,
                 subject: d?.courseCode || d?.subjectCode || 'DOC',
                 s3Key: d?.s3Key || '',
-                instructor: 'AI Generated',
+                instructor:
+                    String(d?.uploaderName || d?.uploader_name || d?.uploadedByName || '').trim() ||
+                    'Unknown uploader',
                 questions: [],
                 chunkCount: Number(d?.chunkCount || 0),
                 estimatedQuestions: Number(d?.estimatedQuestions || 0) || 5,
@@ -1121,7 +1417,6 @@ export function StudentQuizSection({
                         attemptsByTitle.get(String(d?.title || d?.fileName || '').trim().toLowerCase()) ??
                         0
                 ),
-                dueDate: 'No due date',
                 status: 'available',
                 documentVerificationStatus: modStatus,
                 highCredibility: highCred,
@@ -1133,9 +1428,10 @@ export function StudentQuizSection({
                 const hidAttempt = h?.attemptId ?? h?.lastAttemptId ?? null;
                 const hidQuiz = h?.quizId || h?.quiz_id || h?.id;
                 const cacheMatch =
-                    hidAttempt != null && hidAttempt !== ''
+                    findQuizResultCacheEntry({ attemptId: hidAttempt, quizId: hidQuiz }, viewerIdStr) ??
+                    (hidAttempt != null && hidAttempt !== ''
                         ? cacheRows.find((c) => Number(c.attemptId) === Number(hidAttempt))
-                        : null;
+                        : null);
 
                 const answersSnapshot = Array.isArray(cacheMatch?.answersSnapshot) ? cacheMatch.answersSnapshot : [];
                 const questionsSnapshot = Array.isArray(cacheMatch?.questionsSnapshot) ? cacheMatch.questionsSnapshot : [];
@@ -1168,6 +1464,9 @@ export function StudentQuizSection({
                     attemptId: hidAttempt,
                     answersSnapshot,
                     questionsSnapshot,
+                    s3Key: cacheMatch?.s3Key || h?.s3Key || h?.sourceKey || '',
+                    passPercentage: Number(cacheMatch?.passPercentage ?? h?.passPercentage ?? 70),
+                    duration: Number(cacheMatch?.duration ?? 10),
                     timeTakenSeconds: Number(cacheTime || h?.timeTakenSeconds || h?.time_taken_seconds || 0),
                     userAnswers:
                         answersSnapshot.length > 0
@@ -1177,7 +1476,7 @@ export function StudentQuizSection({
                             : [],
                 };
             });
-            setCompletedQuizzes(mappedCompleted);
+            setCompletedQuizzes(applySharedFlagsToQuizRows(mergeCompletedWithCache(mappedCompleted, cacheRows), viewerIdStr));
             const editedRows = rows.filter(
                 (h: any) =>
                     Boolean(h?.sharedForReview) ||
@@ -1268,9 +1567,6 @@ export function StudentQuizSection({
             try {
                 const raw = localStorage.getItem(STUDENT_QUIZ_AUTOSTART_KEY);
                 if (!raw) return;
-                // Disable silent auto-open on page load; only start quiz when user clicks Take Quiz.
-                localStorage.removeItem(STUDENT_QUIZ_AUTOSTART_KEY);
-                return;
                 const payload = JSON.parse(raw);
                 const quizId = Number(payload?.quizId);
                 if (!Number.isFinite(quizId) || quizId <= 0) {
@@ -1322,8 +1618,11 @@ export function StudentQuizSection({
             }
         };
         void runAutoStart();
+        const onAutostart = () => void runAutoStart();
+        window.addEventListener(STUDENT_QUIZ_AUTOSTART_EVENT, onAutostart);
         return () => {
             cancelled = true;
+            window.removeEventListener(STUDENT_QUIZ_AUTOSTART_EVENT, onAutostart);
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -1370,7 +1669,10 @@ export function StudentQuizSection({
             setTimerId(null);
         }
         setShowResults(false);
-        setSelectedQuiz(quiz);
+        const resolvedId = coercePositiveQuizId(quiz?.quizId ?? quiz?.id);
+        const normalizedQuiz =
+            resolvedId != null ? { ...quiz, id: resolvedId, quizId: resolvedId } : quiz;
+        setSelectedQuiz(normalizedQuiz);
         setCurrentQuestionIndex(0);
         setAnswers([]);
         setTimeRemaining((finiteQuizMinutes(quiz?.duration, 10) || 10) * 60);
@@ -1389,35 +1691,335 @@ export function StudentQuizSection({
         setTimerId(timer);
     };
 
-    const retakeQuiz = async (quizRow: any) => {
-        if (isGeneratingQuiz) return;
-        const quizId = Number(quizRow?.quizId ?? quizRow?.id ?? (selectedQuiz as any)?.quizId ?? (selectedQuiz as any)?.id);
-        if (!Number.isFinite(quizId) || quizId <= 0) {
+    const regenerateQuizQuestions = async (opts: {
+        s3Key: string;
+        title?: string;
+        numQuestions?: number;
+    }): Promise<{ quizId: number; questions: any[] } | null> => {
+        const createdBy = Number(user?.user_id ?? user?.id ?? user?.userId);
+        if (!Number.isFinite(createdBy) || createdBy <= 0) return null;
+        const token = getStoredAuthToken();
+        const base = getApiBaseUrl().replace(/\/$/, '');
+        const resp = await fetch(`${base}/quiz/generate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+                s3Key: opts.s3Key,
+                persist: true,
+                quizTitle: opts.title,
+                numQuestions: opts.numQuestions ?? 5,
+                language: 'English',
+                createdBy,
+            }),
+        });
+        let res: any = null;
+        try {
+            res = await resp.json();
+        } catch {
+            res = null;
+        }
+        if (!resp.ok || (res && res.success === false)) return null;
+        const quizData = res?.data || res || {};
+        const questions = normalizeQuestions(quizData?.quiz || res?.quiz || []);
+        const quizId = Number(quizData?.quizId ?? res?.quizId);
+        if (!questions.length || !Number.isFinite(quizId) || quizId <= 0) return null;
+        return { quizId, questions };
+    };
+
+    const resolveQuestionsForQuizRow = async (quizRow: any): Promise<{
+        questions: any[];
+        detail: ReturnType<typeof unwrapQuizDetailPayload> | null;
+        cache: QuizResultCacheItem | null;
+        regeneratedQuizId?: number;
+    }> => {
+        const quizId = Number(quizRow?.quizId ?? quizRow?.id);
+        const cache = findQuizResultCacheEntry(
+            {
+                attemptId: (quizRow as any)?.attemptId,
+                quizId: Number.isFinite(quizId) ? quizId : undefined,
+            },
+            viewerIdStr
+        );
+        const snapshotRaw =
+            (Array.isArray((quizRow as any)?.questionsSnapshot) && (quizRow as any).questionsSnapshot.length
+                ? (quizRow as any).questionsSnapshot
+                : null) ??
+            (Array.isArray(cache?.questionsSnapshot) && cache.questionsSnapshot.length
+                ? cache.questionsSnapshot
+                : null);
+        if (snapshotRaw) {
+            const fromSnap = normalizeStoredQuestions(snapshotRaw);
+            if (fromSnap.length) return { questions: fromSnap, detail: null, cache };
+        }
+
+        let detail: ReturnType<typeof unwrapQuizDetailPayload> | null = null;
+        if (Number.isFinite(quizId) && quizId > 0) {
+            try {
+                const detailRes = await api.get(`/quizzes/${quizId}`);
+                detail = unwrapQuizDetailPayload(detailRes);
+                const fromApi = normalizeStoredQuestions(detail.questions || []);
+                if (fromApi.length) return { questions: fromApi, detail, cache };
+            } catch {
+                detail = null;
+            }
+        }
+
+        const placeholderQs = normalizeStoredQuestions(
+            (Array.isArray(quizRow?.questions) ? quizRow.questions : []) as any[]
+        ).filter((q) => String(q?.question || '').trim().length > 0);
+        if (placeholderQs.length) return { questions: placeholderQs, detail, cache };
+
+        const s3Key = String(quizRow?.s3Key || cache?.s3Key || '').trim();
+        if (s3Key) {
+            const regen = await regenerateQuizQuestions({
+                s3Key,
+                title: String(quizRow?.title || cache?.title || 'Quiz'),
+                numQuestions: numQuestionsForGenerate(quizRow),
+            });
+            if (regen) {
+                return {
+                    questions: regen.questions,
+                    detail: null,
+                    cache,
+                    regeneratedQuizId: regen.quizId,
+                };
+            }
+        }
+
+        return { questions: [], detail, cache };
+    };
+
+    const isPublishedLecturerQuiz = (quizRow?: any) => {
+        const row = quizRow || selectedQuiz;
+        if (!row) return false;
+        if (String((row as any)?.s3Key || '').trim()) return false;
+        if (Boolean((row as any)?.isPublished)) return true;
+        const res = quizResult;
+        if (res && (res as any).isPractice === false && !String((row as any)?.s3Key || '').trim()) {
+            return true;
+        }
+        return false;
+    };
+
+    const isQuizAlreadyShared = (quizRow?: any) => {
+        const qid = resolveStudentQuizId(quizRow || selectedQuiz);
+        if (!qid) return rowHasSharedFlags(quizRow) || rowHasSharedFlags(selectedQuiz);
+        if (readSharedQuizIdMap(viewerIdStr).has(qid)) return true;
+        if (rowHasSharedFlags(quizRow)) return true;
+        return completedQuizzes.some(
+            (q) => resolveStudentQuizId(q) === qid && rowHasSharedFlags(q)
+        );
+    };
+
+    const markQuizSharedForStudent = (quizId: number, sharedAt: string) => {
+        const qid = Number(quizId);
+        if (!Number.isFinite(qid) || qid <= 0) return;
+        const at = String(sharedAt || '').trim() || new Date().toISOString();
+        markQuizSharedInStorage(qid, at, viewerIdStr);
+        const withFlags = (row: any) => ({
+            ...row,
+            sharedForReview: true,
+            sharedFromStudent: true,
+            sharedAt: String(row?.sharedAt || '').trim() || at,
+        });
+        setCompletedQuizzes((prev) =>
+            prev.map((q) => (resolveStudentQuizId(q) === qid ? withFlags(q) : q))
+        );
+        setSelectedQuiz((prev) =>
+            prev && resolveStudentQuizId(prev) === qid ? withFlags(prev) : prev
+        );
+    };
+
+    const canShareQuizWithLecturer = (quizRow?: any) => {
+        const row = quizRow || selectedQuiz;
+        if (!row) return false;
+        if (isQuizAlreadyShared(row)) return false;
+        if (isPublishedLecturerQuiz(row)) return false;
+        return true;
+    };
+
+    const syncAttemptBeforeShare = async (quizRow: any): Promise<number | null> => {
+        const existing = Number((quizRow as any)?.attemptId);
+        if (Number.isFinite(existing) && existing > 0) return existing;
+
+        const quizId = coercePositiveQuizId((quizRow as any)?.quizId ?? quizRow?.id);
+        if (quizId == null) return null;
+
+        const answersSource: QuizAnswer[] = Array.isArray(quizResult?.answers)
+            ? quizResult.answers
+            : Array.isArray((quizRow as any)?.answersSnapshot)
+              ? normalizeReviewAnswers((quizRow as any).answersSnapshot)
+              : [];
+        if (!answersSource.length) return null;
+
+        const textTrim = (s: string) => String(s || '').trim();
+        const answersForSubmit = answersSource.map((a) => ({
+            questionId: a.questionId,
+            ...(Number.isFinite(Number(a.selectedAnswer)) && Number(a.selectedAnswer) >= 0
+                ? { selectedAnswer: a.selectedAnswer }
+                : {}),
+            ...(textTrim(a.selectedText || '')
+                ? {
+                      userAnswer: textTrim(a.selectedText || ''),
+                      shortAnswer: textTrim(a.selectedText || ''),
+                      user_answer: textTrim(a.selectedText || ''),
+                  }
+                : {}),
+        }));
+
+        try {
+            const attemptRes: any = await api.post('/quiz/attempts', {
+                quizId,
+                quiz_id: quizId,
+                userId: user?.user_id ?? user?.id ?? user?.userId,
+                user_id: user?.user_id ?? user?.id ?? user?.userId,
+                score: (() => {
+                    const s = Number(quizResult?.score ?? (quizRow as any)?.myScore ?? 0);
+                    return Number.isFinite(s) && s >= 0 ? s : 0;
+                })(),
+                answers: answersForSubmit,
+                timeTaken: Number(
+                    quizResult?.timeTaken ??
+                        (quizRow as any)?.timeTakenSeconds ??
+                        (quizRow as any)?.durationSeconds ??
+                        0
+                ),
+                phase: 'complete',
+            });
+            const payload = attemptRes?.data ?? attemptRes;
+            const responseData =
+                payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+            const createdAttemptId =
+                responseData?.attemptId ?? payload?.attemptId ?? attemptRes?.attemptId ?? null;
+            const n = Number(createdAttemptId);
+            return Number.isFinite(n) && n > 0 ? n : null;
+        } catch (err) {
+            console.warn('[syncAttemptBeforeShare] failed:', err);
+            return null;
+        }
+    };
+
+    const shareQuizWithLecturer = async (quizRow?: any) => {
+        const row = quizRow || selectedQuiz;
+        const quizId = coercePositiveQuizId((row as any)?.quizId ?? row?.id);
+        const resultKey = String((row as any)?.resultId || '').trim();
+
+        if (isQuizAlreadyShared(row)) {
+            showNotification({
+                type: 'info',
+                title: 'Share Quiz',
+                message: 'This quiz was already shared with your lecturer.',
+            });
+            return;
+        }
+        if (isPublishedLecturerQuiz(row)) {
+            showNotification({
+                type: 'info',
+                title: 'Share Quiz',
+                message:
+                    'Published lecturer quizzes cannot be shared. Complete a quiz from your own document (Available tab) to share with your lecturer.',
+            });
+            return;
+        }
+
+        if (quizId == null) {
             showNotification({
                 type: 'warning',
-                title: 'Retake Quiz',
+                title: 'Share Quiz',
                 message: 'Quiz identifier is missing.',
             });
             return;
         }
 
+        const confirmed = await showConfirm({
+            title: 'Share with lecturer',
+            message:
+                'Send this quiz attempt to your lecturer for review? They can view your answers and leave comments.',
+            confirmText: 'Share',
+            cancelText: 'Cancel',
+            type: 'info',
+        });
+        if (!confirmed) return;
+
+        setSharingQuiz(true);
         try {
-            let detail: any = null;
-            try {
-                const detailRes = await api.get(`/quizzes/${quizId}`);
-                detail = unwrapQuizDetailPayload(detailRes);
-            } catch {
-                detail = null;
+            const syncedAttemptId = await syncAttemptBeforeShare(row);
+            if (syncedAttemptId != null) {
+                setSelectedQuiz((prev) =>
+                    prev ? { ...prev, attemptId: syncedAttemptId } : prev
+                );
+                setCompletedQuizzes((prev) =>
+                    prev.map((q) => {
+                        const sameResult =
+                            resultKey && String((q as any)?.resultId || '').trim() === resultKey;
+                        const sameQuizNoResult =
+                            !resultKey && Number((q as any)?.quizId ?? q?.id) === quizId;
+                        if (!sameResult && !sameQuizNoResult) return q;
+                        return { ...q, attemptId: syncedAttemptId };
+                    })
+                );
             }
 
-            const fallbackQuestionsRaw =
-                (quizRow as any)?.questionsSnapshot ??
-                (selectedQuiz as any)?.questionsSnapshot ??
-                quizRow?.questions ??
-                (selectedQuiz as any)?.questions ??
-                [];
-            const questions = normalizeStoredQuestions((detail?.questions || fallbackQuestionsRaw) as any[]);
+            const res: any = await api.post(`/quizzes/${quizId}/share`, {});
+            if (res?.success === false) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Share Quiz',
+                    message: String(res?.message || 'Could not share quiz.'),
+                });
+                return;
+            }
 
+            const sharedAt = new Date().toISOString();
+            showNotification({
+                type: 'success',
+                title: 'Quiz shared',
+                message: String(res?.message || 'Your quiz was shared with your lecturer successfully.'),
+            });
+            markQuizSharedForStudent(quizId, sharedAt);
+            void loadResultComments(row);
+            void loadConnectedData({ quiet: true });
+        } catch (err: unknown) {
+            const status = Number((err as any)?.response?.status || 0);
+            const apiMsg = getApiErrorMessage(err);
+            if (status === 409) {
+                showNotification({
+                    type: 'info',
+                    title: 'Already shared',
+                    message: apiMsg || 'This quiz was already shared with your lecturer.',
+                });
+                markQuizSharedForStudent(quizId, new Date().toISOString());
+                void loadResultComments(row);
+            } else if (status === 403) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Share not allowed',
+                    message:
+                        apiMsg ||
+                        'Access denied. Sign in as a student with a verified account, or complete the quiz before sharing.',
+                });
+            } else {
+                showNotification({
+                    type: 'warning',
+                    title: 'Share failed',
+                    message:
+                        apiMsg ||
+                        'Could not share quiz. Finish the quiz first so your attempt is saved, then try again.',
+                });
+            }
+        } finally {
+            setSharingQuiz(false);
+        }
+    };
+
+    const retakeQuiz = async (quizRow: any) => {
+        if (isGeneratingQuiz) return;
+
+        try {
+            const { questions, detail, cache, regeneratedQuizId } = await resolveQuestionsForQuizRow(quizRow);
             if (!questions.length) {
                 showNotification({
                     type: 'warning',
@@ -1427,15 +2029,30 @@ export function StudentQuizSection({
                 return;
             }
 
-            const quizToTake = {
-                ...(quizRow || {}),
-                id: detail?.quiz_id || quizId,
-                title: detail?.title || quizRow?.title || selectedQuiz?.title || 'Quiz',
+        const quizId = coercePositiveQuizId(
+            regeneratedQuizId ?? detail?.quiz_id ?? quizRow?.quizId ?? quizRow?.id ?? cache?.quizId
+        );
+        if (quizId == null) {
+            showNotification({
+                type: 'warning',
+                title: 'Retake Quiz',
+                message: 'Could not resolve a valid quiz id for this quiz.',
+            });
+            return;
+        }
+
+        const quizToTake = {
+                ...stripCompletedAttemptFields(quizRow),
+                id: quizId,
+                quizId,
+                title: detail?.title || quizRow?.title || cache?.title || selectedQuiz?.title || 'Quiz',
                 questions,
+                s3Key: String(quizRow?.s3Key || cache?.s3Key || '').trim() || undefined,
                 passPercentage: finitePassPercent(
                     detail?.pass_percentage ??
                         (detail as any)?.passPercentage ??
                         (quizRow as any)?.passPercentage ??
+                        cache?.passPercentage ??
                         70,
                     70
                 ),
@@ -1443,9 +2060,11 @@ export function StudentQuizSection({
                     detail?.duration_minutes ??
                         (detail as any)?.duration ??
                         (quizRow as any)?.duration ??
+                        cache?.duration ??
                         10,
                     10
                 ),
+                isRetake: true,
             };
 
             void recordAttemptStart(quizToTake.id);
@@ -1461,9 +2080,9 @@ export function StudentQuizSection({
     };
 
     const recordAttemptStart = async (quizId: string | number | undefined) => {
-        const id = Number(quizId);
-        if (!Number.isFinite(id) || id <= 0) return;
-        
+        const id = coercePositiveQuizId(quizId);
+        if (id == null) return;
+
         try {
             console.log('[recordAttemptStart] payload =', {
                 quizId: id,
@@ -1473,18 +2092,15 @@ export function StudentQuizSection({
 
             await api.post('/quiz/attempts', {
                 quizId: id,
+                quiz_id: id,
                 userId: user?.user_id ?? user?.id ?? user?.userId,
+                user_id: user?.user_id ?? user?.id ?? user?.userId,
                 phase: 'start',
             });
             // Refresh list in background; do not block opening the quiz modal.
             void loadConnectedData({ quiet: true });
         } catch (err: unknown) {
-        console.error('[recordAttemptStart] failed:', err);
-        showNotification({
-            type: 'warning',
-            title: 'Could not record attempt',
-            message: safeNotificationMessage(err, 'attemptRecord'),
-        });
+            console.warn('[recordAttemptStart] failed (quiz can still open):', err, getApiErrorMessage(err));
         }
     };
 
@@ -1503,9 +2119,19 @@ export function StudentQuizSection({
                     });
                     return;
                 }
+                const resolvedId = coercePositiveQuizId(detail.quiz_id ?? quiz.id);
+                if (resolvedId == null) {
+                    showNotification({
+                        type: 'warning',
+                        title: 'Take Quiz',
+                        message: 'Could not resolve a valid quiz id for this quiz.',
+                    });
+                    return;
+                }
                 const generatedQuiz = {
                     ...quiz,
-                    id: detail.quiz_id || quiz.id,
+                    id: resolvedId,
+                    quizId: resolvedId,
                     title: detail.title || quiz.title,
                     questions,
                     passPercentage: finitePassPercent(
@@ -1627,11 +2253,27 @@ export function StudentQuizSection({
                 return;
             }
 
+            const resolvedPersistId = coercePositiveQuizId(persistedQuizId);
+            if (resolvedPersistId == null) {
+                showNotification({
+                    type: 'warning',
+                    title: 'Generate Quiz',
+                    message: 'Backend returned an invalid quiz id after generation.',
+                });
+                setQuizGeneratingStatus('failed', {
+                    jobId: newJobId,
+                    title: String(quiz?.title || 'AI Quiz'),
+                    error: 'Invalid quiz id from server.',
+                });
+                return;
+            }
+
             const finalQuestions = questions;
 
             const generatedQuiz = {
                 ...quiz,
-                id: persistedQuizId,
+                id: resolvedPersistId,
+                quizId: resolvedPersistId,
                 questions: finalQuestions,
                 passPercentage: Number(quiz.passPercentage ?? 70),
             };
@@ -1646,7 +2288,23 @@ export function StudentQuizSection({
             setQuizGeneratingStatus('completed', {
                 jobId: newJobId,
                 title: String(quiz?.title || 'AI Quiz'),
+                quizId: resolvedPersistId,
             });
+            try {
+                localStorage.setItem(
+                    STUDENT_QUIZ_AUTOSTART_KEY,
+                    JSON.stringify({
+                        quizId: resolvedPersistId,
+                        title: String(quiz?.title || 'AI Quiz'),
+                        passPercentage: Number(quiz.passPercentage ?? 70),
+                        duration: Number(generatedQuiz.duration || 10),
+                        updatedAt: Date.now(),
+                    })
+                );
+                window.dispatchEvent(new Event(STUDENT_QUIZ_AUTOSTART_EVENT));
+            } catch {
+                // ignore storage failures
+            }
 
             const timer = setInterval(() => {
                 setTimeRemaining((prev) => {
@@ -1775,48 +2433,77 @@ export function StudentQuizSection({
         const elapsedByClock = quizStartedAtMs ? Math.max(0, Math.floor((Date.now() - quizStartedAtMs) / 1000)) : 0;
         const resolvedTimeTaken = elapsedByClock > 0 ? elapsedByClock : elapsedByTimer;
 
+        const resultId = `${selectedQuiz.id}-${Date.now()}`;
         const result = {
             quizId: selectedQuiz.id,
-            resultId: `${selectedQuiz.id}-${Date.now()}`,
+            resultId,
             score,
             correctAnswers: correctCount,
             totalQuestions: questions.length,
             timeTaken: resolvedTimeTaken,
             answers: answers,
-            completedDate: new Date().toISOString().split('T')[0],
+            completedDate: new Date().toISOString(),
             isPractice,
             passThreshold,
             passed,
         };
-        upsertQuizResultCache({
+        appendQuizResultCache(
+            {
             attemptId: null,
             quizId: Number(selectedQuiz.id),
+            resultId,
             answersSnapshot: answers,
             questionsSnapshot: safeQuizQuestions,
             timeTakenSeconds: Number(result.timeTaken || 0),
             savedAt: Date.now(),
-        });
+            s3Key: String(selectedQuiz?.s3Key || '').trim() || undefined,
+            title: String(selectedQuiz?.title || '').trim() || undefined,
+            passPercentage: Number(selectedQuiz?.passPercentage ?? 70),
+            duration: Number(selectedQuiz?.duration ?? 10),
+            myScore: score,
+            },
+            viewerIdStr
+        );
 
         setQuizResult(result);
         setShowQuizTaking(false);
 
-        if (activeTab === 'available') {
-            setCompletedQuizzes((prev) => [
-                ...prev,
-                {
-                    ...selectedQuiz,
-                    myScore: score,
-                    attempts: Number(selectedQuiz.myAttempts ?? 0),
-                    completedDate: result.completedDate,
-                    status: 'completed',
-                    resultId: result.resultId,
-                    durationSeconds: Number(result.timeTaken || 0),
-                    timeTakenSeconds: Number(result.timeTaken || 0),
-                    userAnswers: answers.map((a) => a.selectedAnswer),
-                    answersSnapshot: answers,
-                    questionsSnapshot: safeQuizQuestions,
-                },
-            ]);
+        const submitQuizId = resolveStudentQuizId(selectedQuiz);
+        const priorSharedAt =
+            submitQuizId != null ? readSharedQuizIdMap(viewerIdStr).get(submitQuizId) : undefined;
+        const alreadySharedQuiz =
+            Boolean(priorSharedAt) ||
+            (submitQuizId != null &&
+                completedQuizzes.some(
+                    (q) => resolveStudentQuizId(q) === submitQuizId && rowHasSharedFlags(q)
+                ));
+
+        const completedRow = {
+            ...selectedQuiz,
+            isPublished: false,
+            isRetake: undefined,
+            attemptId: null,
+            myScore: score,
+            attempts: Number((selectedQuiz as any)?.attempts ?? selectedQuiz.myAttempts ?? 0) + 1,
+            completedDate: result.completedDate,
+            status: 'completed',
+            resultId: result.resultId,
+            durationSeconds: Number(result.timeTaken || 0),
+            timeTakenSeconds: Number(result.timeTaken || 0),
+            userAnswers: answers.map((a) => a.selectedAnswer),
+            answersSnapshot: answers,
+            questionsSnapshot: safeQuizQuestions,
+            ...(alreadySharedQuiz
+                ? {
+                      sharedForReview: true,
+                      sharedFromStudent: true,
+                      sharedAt: priorSharedAt || new Date().toISOString(),
+                  }
+                : {}),
+        };
+
+        if (activeTab === 'available' || activeTab === 'completed' || Boolean((selectedQuiz as any)?.isRetake)) {
+            setCompletedQuizzes((prev) => [completedRow, ...prev]);
         } else if (activeTab === 'my-practice') {
             setPracticeQuizzes((prev) =>
                 prev.map((q) =>
@@ -1853,10 +2540,27 @@ export function StudentQuizSection({
                       }
                     : {}),
             }));
+            const scorePayload = Number(scorePercent);
+            const safeScore = Number.isFinite(scorePayload) && scorePayload >= 0 ? scorePayload : 0;
+            const quizIdNum = coercePositiveQuizId((selectedQuiz as any)?.quizId ?? selectedQuiz?.id);
+            if (quizIdNum == null) {
+                console.warn('[handleSubmitQuiz] skip attempt save: invalid quiz id', selectedQuiz?.id);
+                showNotification({
+                    type: 'warning',
+                    title: 'Quiz result not saved',
+                    message:
+                        'Could not save your attempt because the quiz id is invalid. Try starting the quiz again from Available quizzes.',
+                });
+                await loadConnectedData({ quiet: true });
+                return;
+            }
+            const uidForAttempt = user?.user_id ?? user?.id ?? user?.userId;
             const attemptRes: any = await api.post('/quiz/attempts', {
-                quizId: selectedQuiz.id,
-                userId: user?.user_id ?? user?.id ?? user?.userId,
-                score: scorePercent,
+                quizId: quizIdNum,
+                quiz_id: quizIdNum,
+                userId: uidForAttempt,
+                user_id: uidForAttempt,
+                score: safeScore,
                 answers: answersForSubmit,
                 timeTaken: result.timeTaken,
                 phase: 'complete',
@@ -1899,39 +2603,47 @@ export function StudentQuizSection({
                 attemptRes?.attemptId ??
                 null;
             if (createdAttemptId != null) {
-                upsertQuizResultCache({
+                const serverResultId = `${quizIdNum}-${createdAttemptId}`;
+                appendQuizResultCache(
+                    {
                     attemptId: Number(createdAttemptId),
-                    quizId: Number(selectedQuiz.id),
+                    quizId: quizIdNum,
+                    resultId: serverResultId,
                     answersSnapshot: answers,
                     questionsSnapshot: safeQuizQuestions,
                     timeTakenSeconds: Number(result.timeTaken || 0),
                     savedAt: Date.now(),
-                });
-                setCompletedQuizzes((prev) => {
-                    let updated = false;
-                    const nowIso = new Date().toISOString();
-                    const scorePct = Number((quizResult as any)?.score ?? result.score);
-                    return prev.map((q) => {
-                        if (updated) return q;
-                        if (
-                            String((q as any)?.quizId ?? q?.id) === String(selectedQuiz.id)
-                        ) {
-                            updated = true;
-                            return {
-                                ...q,
-                                attemptId: createdAttemptId,
-                                resultId: `${selectedQuiz.id}-${createdAttemptId}`,
-                                ...(Number.isFinite(scorePct) ? { myScore: Math.round(scorePct) } : {}),
-                                completedDate: (q as any)?.completedDate ?? nowIso,
-                            };
-                        }
-                        return q;
-                    });
-                });
+                    s3Key: String(selectedQuiz?.s3Key || '').trim() || undefined,
+                    title: String(selectedQuiz?.title || '').trim() || undefined,
+                    passPercentage: Number(selectedQuiz?.passPercentage ?? 70),
+                    duration: Number(selectedQuiz?.duration ?? 10),
+                    myScore: Number((quizResult as any)?.score ?? result.score),
+                    },
+                    viewerIdStr
+                );
+                const nowIso = new Date().toISOString();
+                const scorePct = Number((quizResult as any)?.score ?? result.score);
+                setCompletedQuizzes((prev) =>
+                    prev.map((q) => {
+                        if (String((q as any)?.resultId || '') !== String(result.resultId)) return q;
+                        return {
+                            ...q,
+                            attemptId: createdAttemptId,
+                            resultId: serverResultId,
+                            ...(Number.isFinite(scorePct) ? { myScore: Math.round(scorePct) } : {}),
+                            completedDate: (q as any)?.completedDate ?? nowIso,
+                            answersSnapshot: answers,
+                            questionsSnapshot: safeQuizQuestions,
+                        };
+                    })
+                );
+                setQuizResult((prev) =>
+                    prev ? { ...prev, resultId: serverResultId } : prev
+                );
             }
-            await loadConnectedData();
+            await loadConnectedData({ quiet: true });
         } catch (err) {
-        console.error('[handleSubmitQuiz] save attempt failed:', err);
+            console.error('[handleSubmitQuiz] save attempt failed:', err, getApiErrorMessage(err));
         showNotification({
             type: 'warning',
             title: 'Quiz result not saved',
@@ -1987,7 +2699,7 @@ export function StudentQuizSection({
                             Take Quiz
                         </button>
                     </div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-4 border-t border-gray-200 text-sm">
+                    <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-200 text-sm">
                         <div>
                             <p className="text-gray-500 mb-1">Questions</p>
                             <p className="text-gray-900">
@@ -1997,20 +2709,8 @@ export function StudentQuizSection({
                             </p>
                         </div>
                         <div>
-                            <p className="text-gray-500 mb-1">Time Taken</p>
-                            <p className="text-gray-900">{formatTimeTakenLabel(Number((quiz as any)?.durationSeconds || 0))}</p>
-                        </div>
-                        <div>
                             <p className="text-gray-500 mb-1">Attempts</p>
                             <p className="text-gray-900">{Number(quiz.myAttempts || 0)}</p>
-                        </div>
-                        <div>
-                            <p className="text-gray-500 mb-1">Due Date</p>
-                            {'dueDate' in quiz ? (
-                                <p className="text-gray-900">{quiz.dueDate}</p>
-                            ) : (
-                                <p className="text-gray-900">N/A</p>
-                            )}
                         </div>
                     </div>
                 </div>
@@ -2084,9 +2784,24 @@ export function StudentQuizSection({
                                 let reviewPayload: any = null;
                                 let reviewData: any = null;
                                 let hasReviewQuestions = false;
-                                const snapshotQuestions = Array.isArray((quiz as any)?.questionsSnapshot)
+                                const rowCache = findQuizResultCacheEntry(
+                                    {
+                                        attemptId,
+                                        quizId,
+                                    },
+                                    viewerIdStr
+                                );
+                                const snapshotQuestionsRaw = Array.isArray((quiz as any)?.questionsSnapshot)
                                     ? (quiz as any).questionsSnapshot
-                                    : [];
+                                    : Array.isArray(rowCache?.questionsSnapshot)
+                                      ? rowCache.questionsSnapshot
+                                      : [];
+                                const snapshotQuestions = normalizeStoredQuestions(snapshotQuestionsRaw);
+                                const snapshotAnswersRaw = Array.isArray((quiz as any)?.answersSnapshot)
+                                    ? (quiz as any).answersSnapshot
+                                    : Array.isArray(rowCache?.answersSnapshot)
+                                      ? rowCache.answersSnapshot
+                                      : [];
                                 if (snapshotQuestions.length) {
                                     fullQuiz = {
                                         ...quiz,
@@ -2095,6 +2810,83 @@ export function StudentQuizSection({
                                         questions: snapshotQuestions,
                                     };
                                     hasReviewQuestions = true;
+                                }
+
+                                const openResultsFromSnapshots = () => {
+                                    const normalizedAnswersResolved = normalizeReviewAnswers(snapshotAnswersRaw);
+                                    const fallbackUserAnswers = Array.isArray((quiz as any)?.userAnswers)
+                                        ? (quiz as any).userAnswers
+                                        : [];
+                                    const answersForUi =
+                                        normalizedAnswersResolved.length > 0
+                                            ? normalizedAnswersResolved
+                                            : fallbackUserAnswers
+                                                  .map((sel: any, i: number) => ({
+                                                      questionId: String(
+                                                          snapshotQuestions[i]?.id ?? `q-${i + 1}`
+                                                      ),
+                                                      selectedAnswer: Number.isFinite(Number(sel))
+                                                          ? Number(sel)
+                                                          : -1,
+                                                      selectedText:
+                                                          typeof sel === 'string' ? String(sel) : '',
+                                                  }))
+                                                  .filter(
+                                                      (a: any) =>
+                                                          a.selectedAnswer >= 0 ||
+                                                          String(a.selectedText || '').trim().length > 0
+                                                  );
+                                    const quizQuestionsLen = snapshotQuestions.length;
+                                    const fallbackTimeTaken = Number(
+                                        (quiz as any)?.timeTakenSeconds ??
+                                            (quiz as any)?.durationSeconds ??
+                                            rowCache?.timeTakenSeconds ??
+                                            0
+                                    );
+                                    setSelectedQuiz(fullQuiz);
+                                    setAnswers(answersForUi);
+                                    setResultComments([]);
+                                    setQuizResult({
+                                        score,
+                                        correctAnswers: Math.round((score / 100) * quizQuestionsLen),
+                                        totalQuestions: quizQuestionsLen,
+                                        timeTaken: Math.max(0, fallbackTimeTaken),
+                                        answers: answersForUi,
+                                        isPractice: !Boolean(fullQuiz?.isPublished),
+                                        passThreshold: Boolean(fullQuiz?.isPublished)
+                                            ? Math.max(
+                                                  1,
+                                                  Math.min(
+                                                      100,
+                                                      Number(
+                                                          (fullQuiz as any)?.passPercentage ??
+                                                              (fullQuiz as any)?.pass_percentage ??
+                                                              70
+                                                      )
+                                                  )
+                                              )
+                                            : null,
+                                        passed: Boolean(fullQuiz?.isPublished)
+                                            ? score >=
+                                              Math.max(
+                                                  1,
+                                                  Math.min(
+                                                      100,
+                                                      Number(
+                                                          (fullQuiz as any)?.passPercentage ??
+                                                              (fullQuiz as any)?.pass_percentage ??
+                                                              70
+                                                      )
+                                                  )
+                                              )
+                                            : null,
+                                    });
+                                    setShowResults(true);
+                                };
+
+                                if (snapshotQuestions.length > 0) {
+                                    openResultsFromSnapshots();
+                                    return;
                                 }
 
                                 // Step 1: prefer row-specific resultUrl when provided by backend.
@@ -2331,7 +3123,11 @@ export function StudentQuizSection({
 
                                 if (
                                     normalizedAnswersResolved.length === 0 &&
-                                    (!Array.isArray((fullQuiz as any)?.questions) || (fullQuiz as any).questions.length === 0) &&
+                                    (!Array.isArray((fullQuiz as any)?.questions) ||
+                                        (fullQuiz as any).questions.filter((q: any) =>
+                                            String(q?.question || '').trim()
+                                        ).length === 0) &&
+                                    snapshotAnswersRaw.length === 0 &&
                                     (attemptId == null || attemptId === '') &&
                                     !resultUrl
                                 ) {
@@ -2365,19 +3161,7 @@ export function StudentQuizSection({
                                 if (quizId != null) {
                                     try {
                                         const commentsRes: any = await api.get(`/quizzes/${quizId}/comments`);
-                                        const rawRows = Array.isArray(commentsRes?.data)
-                                            ? commentsRes.data
-                                            : Array.isArray(commentsRes?.data?.items)
-                                                ? commentsRes.data.items
-                                                : Array.isArray(commentsRes?.items)
-                                                    ? commentsRes.items
-                                                    : [];
-                                        loadedComments = rawRows.map((c: any, idx: number) => ({
-                                            id: c?.id ?? `comment-${idx}`,
-                                            author: c?.author ?? c?.createdByName ?? c?.userName ?? 'Lecturer',
-                                            createdAt: c?.createdAt ?? c?.created_at ?? c?.time ?? '',
-                                            text: c?.text ?? c?.comment ?? c?.content ?? c?.body ?? '',
-                                        }));
+                                        loadedComments = mapQuizCommentRows(commentsRes);
                                     } catch {
                                         loadedComments = [];
                                     }
@@ -2428,7 +3212,14 @@ export function StudentQuizSection({
                     <div className="grid grid-cols-3 gap-4 pt-4 border-t border-gray-200 text-sm">
                         <div>
                             <p className="text-gray-500 mb-1">Questions</p>
-                            <p className="text-gray-900">{quiz.questions.length}</p>
+                            <p className="text-gray-900">
+                                {Array.isArray((quiz as any)?.questionsSnapshot) &&
+                                (quiz as any).questionsSnapshot.length > 0
+                                    ? (quiz as any).questionsSnapshot.length
+                                    : Array.isArray(quiz.questions) && quiz.questions.length > 0
+                                      ? quiz.questions.length
+                                      : Number((quiz as any)?.estimatedQuestions || 0) || 5}
+                            </p>
                         </div>
                         <div>
                             <p className="text-gray-500 mb-1">Duration</p>
@@ -2703,8 +3494,8 @@ export function StudentQuizSection({
 
         return (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-                <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-                    <div className="p-6 border-b border-gray-200">
+                <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden">
+                    <div className="p-6 border-b border-gray-200 shrink-0">
                         <div className="flex items-start justify-between">
                             <div>
                                 <h2 className="mb-2">Quiz Results</h2>
@@ -2726,7 +3517,7 @@ export function StudentQuizSection({
                         </div>
                     </div>
 
-                    <div className="p-6">
+                    <div className="p-6 overflow-y-auto flex-1 min-h-0">
                         {/* Score Summary */}
                         <div className="flex flex-wrap items-center justify-end gap-2 mb-4">
                             <button
@@ -2925,25 +3716,82 @@ export function StudentQuizSection({
                                 })}
                             </div>
                         </div>
-                        {resultComments.length > 0 && (
-                            <div className="mt-8">
-                                <h3 className="mb-4">Comments from Lecturer</h3>
+                        <div className="mt-8 border-t border-gray-200 pt-6">
+                            <div className="flex items-center justify-between gap-3 mb-4">
+                                <h3 className="flex items-center gap-2 m-0">
+                                    <MessageSquare size={20} className="text-blue-600" />
+                                    {isQuizAlreadyShared(selectedQuiz)
+                                        ? 'Comments with lecturer'
+                                        : 'Comments'}
+                                </h3>
+                                <button
+                                    type="button"
+                                    onClick={() => void loadResultComments(selectedQuiz)}
+                                    disabled={resultCommentsLoading}
+                                    className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 disabled:opacity-50"
+                                >
+                                    <RefreshCw
+                                        size={14}
+                                        className={resultCommentsLoading ? 'animate-spin' : ''}
+                                    />
+                                    Refresh
+                                </button>
+                            </div>
+                            {isQuizAlreadyShared(selectedQuiz) &&
+                            resultComments.length === 0 &&
+                            !resultCommentsLoading ? (
+                                <p className="text-sm text-gray-500 mb-3">
+                                    Your quiz was shared. Your lecturer can leave comments here — check back later or tap Refresh.
+                                </p>
+                            ) : null}
+                            {resultCommentsLoading ? (
+                                <p className="text-sm text-gray-500">Loading comments…</p>
+                            ) : resultComments.length === 0 ? (
+                                <p className="text-sm text-gray-500">No comments yet.</p>
+                            ) : (
                                 <div className="space-y-3">
-                                    {resultComments.map((c: any) => (
-                                        <div key={String(c?.id)} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                    {resultComments.map((c) => (
+                                        <div
+                                            key={String(c.id)}
+                                            className="rounded-lg border border-gray-200 bg-gray-50 p-3"
+                                        >
                                             <p className="text-xs text-gray-500">
-                                                {String(c?.author || 'Lecturer')} • {formatHourMinute(c?.createdAt)}
+                                                {c.author} • {formatHourMinute(c.createdAt)}
                                             </p>
-                                            <p className="text-sm text-gray-800 mt-1">{String(c?.text || '')}</p>
+                                            <p className="text-sm text-gray-800 mt-1 whitespace-pre-wrap">
+                                                {c.text}
+                                            </p>
                                         </div>
                                     ))}
                                 </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
 
-                    <div className="p-6 border-t border-gray-200 flex items-center gap-3">
+                    <div className="p-6 border-t border-gray-200 flex items-center gap-3 shrink-0 bg-white relative z-10">
+                        {!isQuizAlreadyShared(selectedQuiz) && (
+                            <button
+                                type="button"
+                                disabled={sharingQuiz}
+                                onClick={() => void shareQuizWithLecturer(selectedQuiz)}
+                                className="flex-1 flex items-center justify-center gap-2 bg-white border border-blue-600 text-blue-600 py-3 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                                <Share2 size={18} aria-hidden />
+                                {sharingQuiz ? 'Sharing…' : 'Share'}
+                            </button>
+                        )}
+                        {isQuizAlreadyShared(selectedQuiz) && (
+                            <button
+                                type="button"
+                                disabled
+                                className="flex-1 flex items-center justify-center gap-2 border border-gray-300 bg-gray-50 text-gray-500 py-3 rounded-lg cursor-not-allowed"
+                            >
+                                <Share2 size={18} aria-hidden />
+                                Already shared
+                            </button>
+                        )}
                         <button
+                            type="button"
                             onClick={() => {
                                 setShowResults(false);
                                 setSelectedQuiz(null);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { BookOpen, User, GraduationCap } from 'lucide-react';
-import api from '../../services/api';
+import api, { getApiErrorMessage } from '../../services/api';
 
 interface RegisterProps {
   onRegister: (role: 'instructor' | 'student', userData: any) => void;
@@ -53,8 +53,8 @@ export function Register({ onBackToLogin }: RegisterProps) {
 
     if (!formData.password) {
       newErrors.password = 'Password is required';
-    } else if (formData.password.length < 6) {
-      newErrors.password = 'Password must be at least 6 characters';
+    } else if (formData.password.length < 8) {
+      newErrors.password = 'Password must be at least 8 characters';
     }
 
     if (!formData.confirmPassword) {
@@ -88,7 +88,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
       setErrors({});
       onBackToLogin();
       } catch (err: any) {
-        setErrors({ otpCode: String(err?.response?.data?.message || 'OTP verification failed.') });
+        setErrors({ otpCode: getApiErrorMessage(err, 'Xác minh OTP thất bại.') });
       } finally {
         setSubmitting(false);
       }
@@ -107,14 +107,17 @@ export function Register({ onBackToLogin }: RegisterProps) {
         user_code: formData.id,
       });
       if (!res?.success) {
-        setErrors({ email: 'Registration failed.' });
+        const msg = String(res?.message || '').trim();
+        setErrors({
+          email: msg || 'Registration failed.',
+        });
         return;
       }
       setStep('otp');
       setMessage('OTP has been sent. Please check your email.');
       setResendAvailableAtMs(Date.now() + RESEND_COOLDOWN_MS);
     } catch (err: any) {
-      setErrors({ email: String(err?.response?.data?.message || 'Registration failed.') });
+      setErrors({ email: getApiErrorMessage(err, 'Đăng ký thất bại.') });
     } finally {
       setSubmitting(false);
     }
@@ -150,7 +153,7 @@ export function Register({ onBackToLogin }: RegisterProps) {
     } catch (err: any) {
       setErrors((prev) => ({
         ...prev,
-        otpCode: String(err?.response?.data?.message || 'Failed to resend OTP.'),
+        otpCode: getApiErrorMessage(err, 'Không thể gửi lại OTP.'),
       }));
     } finally {
       setResendingOtp(false);

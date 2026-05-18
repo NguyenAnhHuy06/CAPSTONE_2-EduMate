@@ -8,6 +8,12 @@ const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const mysql = require("mysql2/promise");
 const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const {
+  DEFAULT_SAFE_MESSAGE,
+  logApiError,
+  sendErrorResponse,
+  globalApiErrorHandler,
+} = require("./api-errors");
 
 const app = express();
 const PORT = 3001;
@@ -506,6 +512,10 @@ app.post("/api/auth/register", async (req, res) => {
   if (existed) {
     return res.status(409).json({ success: false, message: "Email already registered." });
   }
+  const codeTaken = users.some((u) => String(u.user_code || "").trim().toLowerCase() === code.toLowerCase());
+  if (codeTaken) {
+    return res.status(409).json({ success: false, message: "This Student/Lecturer ID is already registered." });
+  }
   const otp = String(Math.floor(100000 + Math.random() * 900000));
   const password_hash = await bcrypt.hash(pw, 10);
   pendingRegs.set(em, {
@@ -638,6 +648,19 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
 
   const baseUrl = `${req.protocol}://${req.get("host")}`;
 
+  const bodyUploaderId = req.body?.uploaderId != null ? Number(req.body.uploaderId) : null;
+  const bearerUserId = getBearerUserIdMock(req);
+  const uploaderId = Number.isFinite(bodyUploaderId) ? bodyUploaderId : bearerUserId;
+  const uploaderRow =
+    uploaderId != null ? users.find((u) => Number(u?.user_id) === Number(uploaderId)) : null;
+  const uploaderRoleRaw = String(uploaderRow?.role || "STUDENT").toUpperCase();
+  const uploaderRole =
+    uploaderRoleRaw === "LECTURER"
+      ? "lecturer"
+      : uploaderRoleRaw === "ADMIN"
+        ? "admin"
+        : "student";
+
   const newDocument = {
     id: Date.now(),
     title: title.trim(),
@@ -655,7 +678,9 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
     uploadedAt: new Date().toISOString(),
     /** Moderation: pending until PATCH …/verify — must stay in memory for for-quiz (do not cap too low). */
     verificationStatus: "pending",
-    uploaderRole: "lecturer",
+    uploaderId: uploaderId != null ? uploaderId : undefined,
+    uploaderRole,
+    uploaderName: resolveUserDisplayName(uploaderRow, ""),
     chunkCount: 2,
     inDatabase: true,
     commentsCount: 0,
@@ -672,6 +697,22 @@ app.post("/api/documents/upload", upload.single("documentFile"), (req, res) => {
     success: true,
     message: "Document uploaded successfully.",
     data: newDocument,
+  });
+});
+
+app.post("/api/documents/:id/report", (req, res) => {
+  const docId = toNum(req.params.id, NaN);
+  if (!Number.isFinite(docId)) {
+    return res.status(400).json({ success: false, message: "Invalid document id." });
+  }
+  const reason = String(req.body?.reason || "").trim();
+  if (!reason) {
+    return res.status(400).json({ success: false, message: "Report reason is required." });
+  }
+  return res.status(201).json({
+    success: true,
+    message: "Report submitted. Thank you for helping keep EduMate safe.",
+    data: { documentId: docId, reason },
   });
 });
 
@@ -698,7 +739,7 @@ app.post("/api/questions/media/upload-s3", uploadMedia.single("mediaFile"), asyn
     if (req.file?.path) deleteFileIfExists(req.file.path);
     return res.status(500).json({
       success: false,
-      message: "S3 is not configured. Set AWS_REGION, AWS_S3_BUCKET, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.",
+      message: "Dịch vụ lưu trữ media chưa sẵn sàng. Vui lòng thử lại sau.",
     });
   }
   if (!req.file) {
@@ -741,11 +782,13 @@ app.post("/api/questions/media/upload-s3", uploadMedia.single("mediaFile"), asyn
       },
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "S3 upload failed.",
-      error: err?.message || "Unknown S3 error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      "Không thể tải media lên. Vui lòng thử lại.",
+      err,
+      "POST /api/questions/media/upload-s3"
+    );
   } finally {
     if (req.file?.path) deleteFileIfExists(req.file.path);
   }
@@ -784,11 +827,13 @@ app.get("/api/questions/media/file", async (req, res) => {
     }
     body.pipe(res);
   } catch (err) {
-    return res.status(404).json({
-      success: false,
-      message: "Media file not found on S3.",
-      error: err?.message || "Unknown S3 error.",
-    });
+    return sendErrorResponse(
+      res,
+      404,
+      "Không tìm thấy file media.",
+      err,
+      "GET /api/questions/media/file"
+    );
   }
 });
 
@@ -1182,10 +1227,21 @@ function historyOwnerMatchesQuery(uid, createdBy) {
  * Shape matches FE usage in Generate-Quizz.html.
  */
 app.get("/api/quizzes/history", (req, res) => {
-  const uid = req.query?.userId != null ? String(req.query.userId) : null;
+  const uid = req.query?.userId != null ? String(req.query.userId).trim() : null;
   const ownerOnly =
     String(req.query?.ownerOnly ?? "false").toLowerCase() === "true" ||
     String(req.query?.onlyMine ?? "false").toLowerCase() === "true";
+  /** Student / profile: ?userId=… without ownerOnly — only quizzes this user completed. */
+  const studentAttemptMode = Boolean(uid) && !ownerOnly;
+
+  function attemptUserMatches(aUserId, queryUid) {
+    if (queryUid == null || String(queryUid).trim() === "") return false;
+    const q = String(queryUid).trim();
+    const a = aUserId;
+    if (a == null || a === "") return false;
+    return String(a).trim() === q || Number(a) === Number(q);
+  }
+
   const attemptsByQuiz = new Map();
   for (const a of quizAttempts) {
     if (String(a.status || "") !== "completed") continue;
@@ -1196,6 +1252,10 @@ app.get("/api/quizzes/history", (req, res) => {
 
   const historyRows = quizzes
     .filter((q) => {
+      if (studentAttemptMode) {
+        const mine = (attemptsByQuiz.get(q.id) || []).filter((a) => attemptUserMatches(a.userId, uid));
+        return mine.length > 0;
+      }
       if (!ownerOnly || !uid) return true;
       // Keep published list behavior as before (shared/global),
       // only restrict non-published rows to owner.
@@ -1203,6 +1263,18 @@ app.get("/api/quizzes/history", (req, res) => {
       return historyOwnerMatchesQuery(uid, q.createdBy);
     })
     .map((q) => {
+      const allAttempts = attemptsByQuiz.get(q.id) || [];
+      let relevantAttempts = allAttempts;
+      if (studentAttemptMode) {
+        relevantAttempts = allAttempts.filter((a) => attemptUserMatches(a.userId, uid));
+      }
+      relevantAttempts = [...relevantAttempts].sort((a, b) => {
+        const ta = new Date(a.completedAt || a.createdAt || 0).getTime();
+        const tb = new Date(b.completedAt || b.createdAt || 0).getTime();
+        return tb - ta;
+      });
+      const latest = relevantAttempts[0] || null;
+
       const sharedByUserId = Number(q.sharedByUserId ?? 0) || null;
       const sharedUser =
         sharedByUserId != null
@@ -1224,13 +1296,21 @@ app.get("/api/quizzes/history", (req, res) => {
         createdAt: q.createdAt,
         publishedAt: q.publishedAt || null,
         isPublished: Boolean(q.isPublished),
-        lastAttemptAt: q.lastAttemptAt,
-        scorePercent: q.scorePercent,
+        lastAttemptAt:
+          latest?.completedAt ||
+          latest?.createdAt ||
+          q.lastAttemptAt,
+        scorePercent:
+          latest != null && latest.scorePercent != null ? latest.scorePercent : q.scorePercent,
         questionCount: q.questionsCount,
-        attemptsCount: (attemptsByQuiz.get(q.id) || []).length,
-        lastAttemptId: ((attemptsByQuiz.get(q.id) || [])[0] || {}).id || null,
+        attemptsCount: studentAttemptMode ? relevantAttempts.length : allAttempts.length,
+        lastAttemptId: latest?.id ?? null,
+        timeTakenSeconds: latest?.time_taken_seconds ?? null,
+        time_taken_seconds: latest?.time_taken_seconds ?? null,
         courseCode: q.courseCode || "DOC",
         createdBy: q.createdBy ?? null,
+        /** Present when list is scoped to one student's attempts (mock student history). */
+        attemptUserId: studentAttemptMode && uid ? Number(uid) || uid : null,
         sharedForReview: Boolean(q.sharedForReview),
         sharedFromStudent: Boolean(q.sharedForReview),
         sharedAt: q.sharedAt || null,
@@ -1239,6 +1319,8 @@ app.get("/api/quizzes/history", (req, res) => {
         sharedByUserCode: resolvedSharedCode,
         lecturerEdited: Boolean(q.lecturerEdited),
         lecturerEditedAt: q.lecturerEditedAt || null,
+        s3Key: q.sourceKey ?? q.s3Key ?? null,
+        sourceKey: q.sourceKey ?? q.s3Key ?? null,
       };
     });
 
@@ -1246,6 +1328,7 @@ app.get("/api/quizzes/history", (req, res) => {
     success: true,
     total: historyRows.length,
     data: historyRows,
+    scopedToAttemptUser: Boolean(studentAttemptMode),
   });
 });
 
@@ -1905,11 +1988,13 @@ app.get("/api/questions/bank", async (req, res) => {
       data,
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "GET /api/questions/bank"
+    );
   }
 });
 
@@ -1952,11 +2037,13 @@ app.post("/api/questions/bank", async (req, res) => {
       data: { id: Number(result.insertId) },
     });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "POST /api/questions/bank"
+    );
   }
 });
 
@@ -2003,11 +2090,13 @@ app.patch("/api/questions/bank/:id", async (req, res) => {
     }
     return res.status(200).json({ success: true, message: "Question updated successfully." });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "PATCH /api/questions/bank/:id"
+    );
   }
 });
 
@@ -2036,11 +2125,13 @@ app.delete("/api/questions/bank/:id", async (req, res) => {
     }
     return res.status(200).json({ success: true, message: "Question deleted successfully." });
   } catch (err) {
-    return res.status(500).json({
-      success: false,
-      message: "Question bank MySQL error.",
-      error: err?.message || "Unknown database error.",
-    });
+    return sendErrorResponse(
+      res,
+      500,
+      DEFAULT_SAFE_MESSAGE,
+      err,
+      "DELETE /api/questions/bank/:id"
+    );
   }
 });
 
@@ -2049,13 +2140,16 @@ app.delete("/api/questions/bank/:id", async (req, res) => {
  * FE sends { quizId, userId, score }.
  */
 app.post("/api/quiz/attempts", (req, res) => {
-  const { quizId, userId, score, phase, answers, timeTaken } = req.body || {};
-  const qid = Number(quizId);
+  const body = req.body || {};
+  const { score, phase, answers, timeTaken } = body;
+  const quizIdRaw = body.quizId ?? body.quiz_id;
+  const userIdRaw = body.userId ?? body.user_id;
+  const qid = Number(quizIdRaw);
   const answersLen = Array.isArray(answers) ? answers.length : 0;
   console.log("[QUIZ_ATTEMPT]", {
     phase: String(phase || "complete"),
     quizId: qid,
-    userId: userId ?? null,
+    userId: userIdRaw ?? null,
     answersLen,
   });
 
@@ -2066,7 +2160,7 @@ app.post("/api/quiz/attempts", (req, res) => {
     });
   }
 
-  const quizRow = quizzes.find((q) => q.id === qid);
+  const quizRow = quizzes.find((q) => Number(q.id) === Number(qid));
   if (!quizRow) {
     return res.status(404).json({
       success: false,
@@ -2079,7 +2173,7 @@ app.post("/api/quiz/attempts", (req, res) => {
     quizAttempts.unshift({
       id: Date.now(),
       quizId: qid,
-      userId: userId ?? null,
+      userId: userIdRaw ?? null,
       score: null,
       scorePercent: null,
       totalQuestions: Number(quizRow.questionsCount) || 0,
@@ -2173,7 +2267,7 @@ app.post("/api/quiz/attempts", (req, res) => {
   quizAttempts.unshift({
     id: attemptId,
     quizId: qid,
-    userId: userId ?? null,
+    userId: userIdRaw ?? null,
     score: finalScore,
     scorePercent,
     totalQuestions: questionsCount,
@@ -2428,29 +2522,8 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  if (req.file && req.file.path) {
-    deleteFileIfExists(req.file.path);
-  }
-
-  if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "File exceeds 10MB. Please choose a file 10MB or smaller.",
-      });
-    }
-
-    return res.status(400).json({
-      success: false,
-      message: err.message || "File upload error.",
-    });
-  }
-
-  return res.status(400).json({
-    success: false,
-    message: err.message || "A server error occurred.",
-  });
+  if (req.file && req.file.path) deleteFileIfExists(req.file.path);
+  return globalApiErrorHandler(err, req, res, next);
 });
 
 app.listen(PORT, () => {

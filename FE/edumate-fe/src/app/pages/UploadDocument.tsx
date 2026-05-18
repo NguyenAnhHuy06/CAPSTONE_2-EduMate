@@ -2,7 +2,11 @@
 
 import { useState } from 'react';
 import { Upload, FileText, CheckCircle } from 'lucide-react';
+
 import { getApiBaseUrl } from '@/services/api';
+import { SAFE_ERROR, sanitizeApiUserMessage } from '@/utils/safeErrorMessage';
+
+
 
 interface UploadDocumentProps {
   userRole: 'instructor' | 'student';
@@ -15,14 +19,19 @@ export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocum
   const [formData, setFormData] = useState({
     type: 'general',
     year: '',
+    semester: '',
     courseCode: '',
     courseName: '',
     topicTitle: '',
     description: '',
   });
+
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [courseSuggestions, setCourseSuggestions] = useState<{course_code: string; course_name: string}[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showNameSuggestions, setShowNameSuggestions] = useState(false);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     setFormData({
@@ -34,6 +43,21 @@ export function UploadDocument({ userRole, onUploadComplete, user }: UploadDocum
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFile(e.target.files[0]);
+    }
+  };
+
+  const fetchCourseSuggestions = async (query: string) => {
+    if (!query.trim()) {
+      setCourseSuggestions([]);
+      return;
+    }
+    try {
+      const res: any = await api.get(`/documents/course-suggestions?query=${encodeURIComponent(query)}`);
+      if (res.success) {
+        setCourseSuggestions(res.data);
+      }
+    } catch (err) {
+      console.error("Error fetching course suggestions:", err);
     }
   };
 
@@ -61,6 +85,7 @@ const handleSubmit = async (e: React.FormEvent) => {
     form.append("title", formData.topicTitle);
     form.append("category", formData.type);
     form.append("year", formData.year);
+    form.append("semester", formData.semester);
     form.append("subjectCode", formData.courseCode);
     form.append("subjectName", formData.courseName);
     form.append("tags", formData.courseCode);
@@ -87,7 +112,8 @@ const handleSubmit = async (e: React.FormEvent) => {
           body: form,
         });
     } catch (err) {
-      throw new Error("Could not connect to server (CORS / server down)");
+      console.error('[UploadDocument] network failed:', err);
+      throw new Error(SAFE_ERROR.network);
     }
 
     let data;
@@ -95,11 +121,13 @@ const handleSubmit = async (e: React.FormEvent) => {
     try {
       data = await res.json();
     } catch (err) {
-      throw new Error("Server did not return valid JSON");
+      console.error('[UploadDocument] invalid JSON:', err);
+      throw new Error(SAFE_ERROR.generic);
     }
 
     if (!res.ok) {
-      throw new Error(data.message || "Upload failed");
+      const msg = sanitizeApiUserMessage(String(data?.message || ''));
+      throw new Error(msg || SAFE_ERROR.upload);
     }
 
     setUploadSuccess(true);
@@ -109,6 +137,7 @@ const handleSubmit = async (e: React.FormEvent) => {
       setFormData({
         type: 'general',
         year: '',
+        semester: '',
         courseCode: '',
         courseName: '',
         topicTitle: '',
@@ -125,8 +154,12 @@ const handleSubmit = async (e: React.FormEvent) => {
       onUploadComplete();
     }, 2000);
 
-  } catch (err: any) {
-    alert(err.message || "An error occurred during upload. Please try again.");
+  } catch (err: unknown) {
+    const msg =
+      err instanceof Error && sanitizeApiUserMessage(err.message)
+        ? err.message
+        : SAFE_ERROR.upload;
+    alert(msg);
   } finally {
     setUploading(false);
   }
@@ -214,16 +247,35 @@ const handleSubmit = async (e: React.FormEvent) => {
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
           >
-            <option value="">Select year</option>
-            <option value="NĂM 1 (2022-2023)">Year 1 (2022-2023)</option>
-            <option value="NĂM 2 (2023-2024)">Year 2 (2023-2024)</option>
-            <option value="NĂM 3 (2024-2025)">Year 3 (2024-2025)</option>
-            <option value="NĂM 4 (2025-2026)">Year 4 (2025-2026)</option>
+          <option value="">Select year</option>
+          <option value="YEAR 1">Year 1</option>
+          <option value="YEAR 2">Year 2</option>
+          <option value="YEAR 3">Year 3</option>
+          <option value="YEAR 4">Year 4</option>
+          </select>
+        </div>
+
+        {/* Semester */}
+        <div className="mb-4">
+          <label className="block text-gray-700 text-lg mb-2">
+            Semester *
+          </label>
+          <select
+            name="semester"
+            aria-label="Select semester"
+            value={formData.semester}
+            onChange={handleInputChange}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
+            required
+          >
+            <option value="">Select semester</option>
+            <option value="SEMESTER 1">Semester 1</option>
+            <option value="SEMESTER 2">Semester 2</option>
           </select>
         </div>
 
         {/* Course Code */}
-        <div className="mb-4">
+        <div className="mb-4 relative">
           <label className="block text-gray-700 text-lg mb-2">
             Course Code *
           </label>
@@ -231,15 +283,42 @@ const handleSubmit = async (e: React.FormEvent) => {
             type="text"
             name="courseCode"
             value={formData.courseCode}
-            onChange={handleInputChange}
+            onChange={(e) => {
+              handleInputChange(e);
+              fetchCourseSuggestions(e.target.value);
+            }}
+            onFocus={() => setShowSuggestions(true)}
+            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
             placeholder="e.g., CS101, MATH201"
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
           />
+          {showSuggestions && courseSuggestions.length > 0 && (
+            <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg mt-1 max-h-40 overflow-y-auto shadow-lg">
+              {courseSuggestions.map((suggestion, index) => (
+                <li
+                  key={index}
+                  className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
+                  onClick={() => {
+                    setFormData({
+                      ...formData,
+                      courseCode: suggestion.course_code,
+                      courseName: suggestion.course_name || formData.courseName
+                    });
+                    setCourseSuggestions([]);
+                    setShowSuggestions(false);
+                  }}
+                >
+                  <span className="font-semibold">{suggestion.course_code}</span>
+                  {suggestion.course_name && ` - ${suggestion.course_name}`}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {/* Course Name */}
-        <div className="mb-4">
+        <div className="mb-4 relative">
           <label className="block text-gray-700 text-lg mb-2">
             Course Name *
           </label>
@@ -247,11 +326,38 @@ const handleSubmit = async (e: React.FormEvent) => {
             type="text"
             name="courseName"
             value={formData.courseName}
-            onChange={handleInputChange}
+            onChange={(e) => {
+              handleInputChange(e);
+              fetchCourseSuggestions(e.target.value);
+            }}
+            onFocus={() => setShowNameSuggestions(true)}
+            onBlur={() => setTimeout(() => setShowNameSuggestions(false), 200)}
             placeholder="e.g., Introduction to Computer Science"
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-600"
             required
           />
+          {showNameSuggestions && courseSuggestions.length > 0 && (
+            <ul className="absolute z-10 w-full bg-white border border-gray-300 rounded-lg mt-1 max-h-40 overflow-y-auto shadow-lg">
+              {courseSuggestions.map((suggestion, index) => (
+                <li
+                  key={index}
+                  className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
+                  onClick={() => {
+                    setFormData({
+                      ...formData,
+                      courseCode: suggestion.course_code,
+                      courseName: suggestion.course_name || formData.courseName
+                    });
+                    setCourseSuggestions([]);
+                    setShowNameSuggestions(false);
+                  }}
+                >
+                  <span className="font-semibold">{suggestion.course_code}</span>
+                  {suggestion.course_name && ` - ${suggestion.course_name}`}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {/* Topic Title */}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, ClipboardList, Edit2, Play, X } from 'lucide-react';
-import api from '../../../services/api';
+import api, { getApiErrorMessage } from '../../../services/api';
 import { EDUMATE_FLASHCARDS_SAVED_EVENT } from '../FlashcardCreator';
 import {
   getCurrentUserId,
@@ -118,7 +118,7 @@ export function FlashcardViewer({ document, user, onBack, onEditSet }: Flashcard
           setActiveSetId(null);
         }
       } catch (err: any) {
-        setError(err?.response?.data?.message || err?.message || 'Could not load flashcards.');
+        setError(getApiErrorMessage(err, 'Không thể tải flashcard.'));
       } finally {
         if (!silent) setLoading(false);
       }

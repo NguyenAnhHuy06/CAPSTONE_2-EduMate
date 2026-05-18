@@ -10,7 +10,7 @@ import {
   RotateCw,
 } from 'lucide-react';
 import { useNotification } from './NotificationContext';
-import api, { getStoredAuthToken } from '../../services/api';
+import api, { getApiErrorMessage, getStoredAuthToken } from '../../services/api';
 import { getCurrentUserId, upsertLocalFlashcardSet } from '../../utils/flashcardLocalSets';
 import {
   flashcardGenerateLanguageFields,
@@ -279,7 +279,7 @@ export function FlashcardCreator({
       setFlashcardGeneratingStatus('failed', {
         jobId: newJobId,
         title: jobTitle,
-        error: err?.response?.data?.message || err?.message || 'Could not generate flashcards.',
+        error: getApiErrorMessage(err, 'Không thể tạo flashcard.'),
       });
       if (err?.response?.status === 401) {
         setAuthBlocked(true);
@@ -287,7 +287,7 @@ export function FlashcardCreator({
       showNotification({
         type: 'error',
         title: 'Generation failed',
-        message: err?.response?.data?.message || err?.message || 'Could not generate flashcards.',
+        message: getApiErrorMessage(err, 'Không thể tạo flashcard.'),
         duration: 4000,
       });
     } finally {
@@ -407,7 +407,7 @@ export function FlashcardCreator({
       showNotification({
         type: 'error',
         title: 'Save failed',
-        message: err?.response?.data?.message || err?.message || 'Could not save flashcards.',
+        message: getApiErrorMessage(err, 'Không thể lưu flashcard.'),
         duration: 4000,
       });
     } finally {

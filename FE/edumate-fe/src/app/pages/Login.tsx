@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { BookOpen } from 'lucide-react';
-import api from '../../services/api';
+import api, { getApiErrorMessage } from '../../services/api';
+import { sanitizeApiUserMessage } from '@/utils/safeErrorMessage';
 
 interface LoginProps {
   onLogin: (role: 'instructor' | 'student' | 'admin', userData: any) => void;
@@ -22,7 +23,9 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
       const user = res?.user || res?.data?.user || null;
       if (!res?.success) {
         const code = res?.code;
-        const msg = res?.message != null ? String(res.message).trim() : '';
+        const msg = sanitizeApiUserMessage(
+          res?.message != null ? String(res.message).trim() : ''
+        );
         if (msg) setError(msg);
         else if (code === 'WRONG_PASSWORD') setError('Incorrect password.');
         else if (code === 'UNKNOWN_EMAIL') setError('No account found for this email.');
@@ -40,24 +43,26 @@ export function Login({ onLogin, onGoToRegister }: LoginProps) {
       localStorage.setItem('edumate_user', JSON.stringify(user));
       setError('');
       onLogin(role, user);
-    } catch (err: any) {
-      const status = err?.response?.status;
-      const data = err?.response?.data;
-      const msg = data?.message != null ? String(data.message).trim() : '';
-      const code = data?.code;
+    } catch (err: unknown) {
+      const ax = err as { response?: { status?: number; data?: { code?: string } } };
+      const status = ax?.response?.status;
+      const code = ax?.response?.data?.code;
+      const msg = getApiErrorMessage(err, '');
 
-      if (status === 401) {
+      if (status === 403) {
+        setError(msg || 'Vui lòng xác minh email trước khi đăng nhập.');
+      } else if (status === 401) {
         if (msg) {
           setError(msg);
         } else if (code === 'WRONG_PASSWORD') {
-          setError('Incorrect password.');
+          setError('Mật khẩu không đúng.');
         } else if (code === 'UNKNOWN_EMAIL') {
-          setError('No account found for this email.');
+          setError('Không tìm thấy tài khoản với email này.');
         } else {
-          setError('No account found or incorrect password.');
+          setError('Email hoặc mật khẩu không đúng.');
         }
       } else {
-        setError(msg || 'Sign-in failed. Please try again.');
+        setError(msg || getApiErrorMessage(err));
       }
     } finally {
       setSubmitting(false);
