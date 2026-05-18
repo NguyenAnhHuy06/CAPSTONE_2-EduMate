@@ -1,4 +1,4 @@
-const { generateQuiz } = require("./quizService");
+const { generateQuiz, generateQuizFromText } = require("./quizService");
 
 /**
  * Wrapper keeping the legacy function name.
@@ -8,4 +8,4 @@ async function generateQuizWithAI(params) {
   return generateQuiz(params);
 }
 
-module.exports = { generateQuizWithAI, generateQuiz };
+module.exports = { generateQuizWithAI, generateQuiz, generateQuizFromText };

@@ -969,7 +969,11 @@ async function startQuizAttempt({ quizId, userId }) {
   if (!Number.isFinite(qid)) throw new Error("quizId không hợp lệ.");
   await assertQuizExists(qid, p);
   await p.execute("DELETE FROM quiz_attempts WHERE quiz_id = ? AND (user_id <=> ?) AND completed_at IS NULL", [qid, userId || null]);
-  await p.execute("INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,0,NULL)", [qid, userId || null]);
+  const [hdr] = await p.execute(
+    "INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,0,NULL)",
+    [qid, userId || null]
+  );
+  return Number(hdr.insertId);
 }
 
 async function finishQuizAttempt({ quizId, userId, score, completedAt = null, answers = [], timeTaken = null }) {

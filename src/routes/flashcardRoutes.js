@@ -7,6 +7,7 @@ const path = require("path");
 const s3 = require("../services/s3Upload");
 const { extractDocumentText } = require("../services/extractDocumentText");
 const { runAsyncJob, getAsyncJob } = require("../services/asyncJobStore");
+const { flashcardVarietyBlock } = require("../utils/aiVarietyHints");
 const db = require("../config/teamDb");
 const { activityLogMiddleware } = require("../middleware/activityLog");
 
@@ -106,7 +107,7 @@ async function callOpenRouterForFlashcards({ apiKey, prompt }) {
     const fetchFn = global.fetch || require("node-fetch");
     const payload = {
         model: resolveFlashcardOpenRouterModel(),
-        temperature: 0.2,
+        temperature: 0.55,
         max_tokens: 1200,
         messages: [{ role: "user", content: prompt }],
     };
@@ -436,10 +437,26 @@ async function buildGeneratedFlashcards(reqLike) {
 
     if (!contextText.trim()) throw new Error("No text extracted from document.");
 
+    const varietySeed =
+        body.varietySeed ??
+        body.variety_seed ??
+        body.flashcardSetId ??
+        body.flashcard_set_id ??
+        body.jobId ??
+        `fc-${Date.now()}`;
+    const langHint = String(
+        body.outputLanguage ?? body.output_language ?? body.language ?? body.promptLanguage ?? ""
+    ).trim();
+    const langLine = langHint
+        ? `Write all card text in language code "${langHint}" (match the source document language).`
+        : "Write all card text in the same language as the source document.";
+
     const prompt = `You are an AI study assistant. Generate exactly 5 flashcards from this text.
 Return ONLY a valid JSON array (no markdown), each item: {"front":"short question","back":"short answer"}.
 Example: [{"front":"What is X?","back":"X is ..."},{"front":"...","back":"..."}]
 Do not use front_1/back_1 keys. Both front and back are required.
+${langLine}
+${flashcardVarietyBlock(varietySeed)}
 
 Text:
 ${contextText}`;

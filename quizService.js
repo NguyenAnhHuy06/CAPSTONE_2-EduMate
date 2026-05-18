@@ -8,6 +8,7 @@ const {
   languageLabel,
   languageRequirement,
 } = require("./src/utils/quizLanguage");
+const { quizVarietyBlock, priorQuestionsAvoidBlock } = require("./src/utils/aiVarietyHints");
 
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "deepseek/deepseek-chat";
@@ -310,6 +311,26 @@ function getQuiz(questions, history, count = 5) {
   return randomSample(questions, Math.min(k, questions.length));
 }
 
+function normalizeQuestionKey(question) {
+  return String(question || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s\u00C0-\u1EF9]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function dedupeQuestions(questions) {
+  const seen = new Set();
+  const out = [];
+  for (const q of questions || []) {
+    const key = normalizeQuestionKey(q?.question);
+    if (!key || key.length < 8 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+}
+
 function calculateQuestionCount(chunks) {
   const words = chunks.join(" ").split(/\s+/).filter(Boolean).length;
 
@@ -344,13 +365,80 @@ async function fallbackContextFromSourceFile(s3Key, maxContextChars = 6000) {
   }
 }
 
-async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" }) {
+async function generateQuizFromText({
+  text,
+  numQuestions = 5,
+  languageHint = "Auto",
+  varietySeed,
+  avoidQuestionStems = [],
+}) {
+  const MAX_CONTEXT = 15000;
+  const context = String(text || "").trim().slice(0, MAX_CONTEXT);
+  if (!context) throw new Error("Document has no extractable text for quiz generation.");
+
+  const lang = resolveQuizLanguage(languageHint, context);
+  const words = context.split(/\s+/).filter(Boolean).length;
+  const maxByText = Math.min(100, Math.max(3, Math.floor(words / 40)));
+  const qCount = Math.min(maxByText, Math.max(1, Number(numQuestions) || 10));
+  const seed =
+    varietySeed || `quiz-text-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+  const strictSystem = [
+    "Generate multiple-choice questions based ONLY on the provided context.",
+    `Language of questions/options: ${languageLabel(lang)}.`,
+    languageRequirement(lang),
+    "Do not use external knowledge.",
+    quizVarietyBlock(seed),
+    priorQuestionsAvoidBlock(avoidQuestionStems),
+    'If insufficient data, return exactly: {"questions":[]}.',
+  ].join("\n");
+
+  const user = [
+    `Generate exactly ${qCount} unique questions in ${languageLabel(lang)}.`,
+    "Return STRICT JSON only:",
+    '{"questions":[{"question":"string","options":["a","b","c","d"],"correctAnswer":"A","explanation":"string"}]}',
+    "- Each question must cover a different concept from the context.",
+    "- options must be full text in the document language, not single letters.",
+    "",
+    "Context:",
+    context,
+  ].join("\n");
+
+  const payload = {
+    model: OPENROUTER_MODEL,
+    temperature: 0.62,
+    max_tokens: computeQuizMaxTokens(qCount),
+    messages: [
+      { role: "system", content: strictSystem },
+      { role: "user", content: user },
+    ],
+    response_format: { type: "json_object" },
+  };
+
+  const completion = await callOpenRouterWithRetry(payload);
+  const content = getAssistantMessageText(completion?.choices?.[0]);
+  let questions = dedupeQuestions(parseQuizResponse(content));
+  if (questions.length > qCount) questions = questions.slice(0, qCount);
+  return { questions, targetCount: qCount };
+}
+
+async function generateQuiz({
+  s3Key,
+  query,
+  numQuestions,
+  languageHint = "Auto",
+  varietySeed,
+  avoidQuestionStems = [],
+}) {
+  const seed =
+    varietySeed || `quiz-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const retrievalQuery = String(query || "core concept and key facts").trim();
   let { context, chunks } = await retrieveTopChunks({
     s3Key,
     query: retrievalQuery,
-    topK: 5,
-    maxContextChars: 8000,
+    topK: 8,
+    maxContextChars: 10000,
+    varietySeed: seed,
   });
   if (!String(context || "").trim()) {
     const fb = await fallbackContextFromSourceFile(s3Key, 6000);
@@ -369,19 +457,29 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" 
   if (!context.trim()) return { questions: [], targetCount: qCount };
 
   const lang = resolveQuizLanguage(languageHint, context);
-  const strictSystem = `Generate multiple-choice questions based ONLY on the provided context.
-Language of questions/options: ${languageLabel(lang)}.
-${languageRequirement(lang)}
-Do not use external knowledge.
-If insufficient data, return exactly the JSON: {"questions":[]}.`;
-  const relaxedSystem = `Generate multiple-choice questions based ONLY on the provided context.
-Language of questions/options: ${languageLabel(lang)}.
-${languageRequirement(lang)}
-Do not use external knowledge.
-Try your best to produce at least 3 meaningful questions when context has usable content.`;
+  const avoidBlock = priorQuestionsAvoidBlock(avoidQuestionStems);
+  const strictSystem = [
+    "Generate multiple-choice questions based ONLY on the provided context.",
+    `Language of questions/options: ${languageLabel(lang)}.`,
+    languageRequirement(lang),
+    "Do not use external knowledge.",
+    quizVarietyBlock(seed),
+    avoidBlock,
+    'If insufficient data, return exactly: {"questions":[]}.',
+  ].join("\n");
+  const relaxedSystem = [
+    "Generate multiple-choice questions based ONLY on the provided context.",
+    `Language of questions/options: ${languageLabel(lang)}.`,
+    languageRequirement(lang),
+    "Do not use external knowledge.",
+    quizVarietyBlock(seed),
+    avoidBlock,
+    "Try your best to produce at least 3 meaningful unique questions when context has usable content.",
+  ].join("\n");
 
   const user = [
-    `Generate exactly ${qCount} questions in ${languageLabel(lang)}.`,
+    `Generate exactly ${qCount} unique questions in ${languageLabel(lang)}.`,
+    "- Each question must test a different fact or idea from the context.",
     "Return STRICT JSON only with this format:",
     "{",
     '  "questions": [',
@@ -406,7 +504,7 @@ Try your best to produce at least 3 meaningful questions when context has usable
   async function askOnce(systemPrompt) {
     const payload = {
       model: OPENROUTER_MODEL,
-      temperature: 0.2,
+      temperature: 0.62,
       max_tokens: computeQuizMaxTokens(qCount),
       messages: [
         { role: "system", content: systemPrompt },
@@ -417,7 +515,7 @@ Try your best to produce at least 3 meaningful questions when context has usable
     const completion = await callOpenRouterWithRetry(payload);
     const choice0 = completion?.choices?.[0];
     const content = getAssistantMessageText(choice0);
-    const parsed = parseQuizResponse(content);
+    let parsed = dedupeQuestions(parseQuizResponse(content));
     return parsed.length > qCount ? parsed.slice(0, qCount) : parsed;
   }
 
@@ -425,13 +523,16 @@ Try your best to produce at least 3 meaningful questions when context has usable
   if (!questions.length && String(context || "").trim()) {
     questions = await askOnce(relaxedSystem);
   }
+  questions = dedupeQuestions(questions);
   return { questions, targetCount: qCount };
 }
 
 module.exports = {
   generateQuiz,
+  generateQuizFromText,
   calculateQuestionCount,
   getQuiz,
   callOpenRouterWithRetry,
+  dedupeQuestions,
 };
 

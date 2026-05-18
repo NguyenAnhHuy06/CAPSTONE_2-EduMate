@@ -1,4 +1,5 @@
 const { retrieveTopChunks } = require("./vectorSearch");
+const { quizVarietyBlock, priorQuestionsAvoidBlock } = require("../utils/aiVarietyHints");
 const crypto = require("crypto");
 const {
   resolveQuizLanguage,
@@ -156,7 +157,14 @@ function calculateQuestionCount(chunks) {
   return Math.min(q, 18);
 }
 
-async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" }) {
+async function generateQuiz({
+  s3Key,
+  query,
+  numQuestions,
+  languageHint = "Auto",
+  varietySeed,
+  avoidQuestionStems = [],
+}) {
   const retrievalQuery = String(query || "core concept and key facts").trim();
   const { context, chunks } = await retrieveTopChunks({
     s3Key,
@@ -171,14 +179,18 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" 
   if (!context.trim()) return { questions: [], targetCount: qCount };
 
   const lang = resolveQuizLanguage(languageHint, context);
+  const seed = varietySeed || `quiz-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const system =
     `Generate multiple-choice questions based ONLY on the provided context.\n` +
     `Language of questions/options: ${languageLabel(lang)}.\n` +
     `${languageRequirement(lang)}\n` +
     `Do not use external knowledge.\n` +
+    `${quizVarietyBlock(seed)}\n` +
+    `${priorQuestionsAvoidBlock(avoidQuestionStems)}\n` +
     `If insufficient data, return exactly the JSON: {"questions":[]}.`;
   const user = [
-    `Generate exactly ${qCount} questions in ${languageLabel(lang)}.`,
+    `Generate exactly ${qCount} unique questions in ${languageLabel(lang)}.`,
+    "- Each question must test a different fact from the context.",
     "Return STRICT JSON only with this format:", "{", '  "questions": [', "    {",
     '      "question": "string",',
     '      "options": ["Option text 1", "Option text 2", "Option text 3", "Option text 4"],',
@@ -193,7 +205,7 @@ async function generateQuiz({ s3Key, query, numQuestions, languageHint = "Auto" 
 
   const useJsonSchema = String(process.env.QUIZ_OPENROUTER_JSON_MODE || "0").trim() !== "0";
   const payload = {
-    model: OPENROUTER_MODEL, temperature: 0.2, max_tokens: computeQuizMaxTokens(qCount),
+    model: OPENROUTER_MODEL, temperature: 0.45, max_tokens: computeQuizMaxTokens(qCount),
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
   };
   if (useJsonSchema) payload.response_format = { type: "json_object" };
@@ -216,7 +228,13 @@ async function generateQuizWithAI(params) { return generateQuiz(params); }
  * Tạo quiz trực tiếp từ raw text (không cần embedding/MySQL).
  * Dùng cho luồng: tải file S3 → trích text → AI quiz.
  */
-async function generateQuizFromText({ text, numQuestions = 5, languageHint = "Auto" }) {
+async function generateQuizFromText({
+  text,
+  numQuestions = 5,
+  languageHint = "Auto",
+  varietySeed,
+  avoidQuestionStems = [],
+}) {
   const MAX_CONTEXT = 15000;
   const context = String(text || "").trim().slice(0, MAX_CONTEXT);
   if (!context) throw new Error("Tài liệu trống, không thể tạo quiz.");
@@ -230,17 +248,20 @@ async function generateQuizFromText({ text, numQuestions = 5, languageHint = "Au
   const qCount = Math.min(maxByText, Math.max(1, Number(numQuestions) || 10));
   console.log(`[generateQuizFromText] will generate ${qCount} questions (maxByText=${maxByText})`);
 
+  const seed = varietySeed || `quiz-text-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const system =
     `You are an expert quiz generator. Generate multiple-choice questions based ONLY on the provided context.\n` +
     `Language of questions/options: ${languageLabel(lang)}.\n` +
     `${languageRequirement(lang)}\n` +
     `Do not use external knowledge.\n` +
+    `${quizVarietyBlock(seed)}\n` +
+    `${priorQuestionsAvoidBlock(avoidQuestionStems)}\n` +
     `Each question must have exactly 4 options and 1 correct answer.\n` +
     `If the document has insufficient content, generate as many questions as you can.\n` +
     `Return ONLY valid JSON, no markdown, no extra text.`;
 
   const user = [
-    `Generate exactly ${qCount} questions in ${languageLabel(lang)}.`,
+    `Generate exactly ${qCount} unique questions in ${languageLabel(lang)}.`,
     "Return STRICT JSON only with this format:",
     "{",
     '  "questions": [',
@@ -268,7 +289,7 @@ async function generateQuizFromText({ text, numQuestions = 5, languageHint = "Au
   const maxTokensNeeded = Math.min(16000, 500 + qCount * 220);
   const payload = {
     model: OPENROUTER_MODEL,
-    temperature: 0.3,
+    temperature: 0.45,
     max_tokens: maxTokensNeeded,
     messages: [{ role: "system", content: system }, { role: "user", content: user }],
     response_format: { type: "json_object" },

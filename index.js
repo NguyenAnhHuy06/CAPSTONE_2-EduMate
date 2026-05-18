@@ -16,8 +16,9 @@ const { promisify } = require("util");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 
-const { generateQuizWithAI } = require("./generateQuizWithAI");
+const { generateQuizWithAI, generateQuizFromText } = require("./generateQuizWithAI");
 const { getQuiz } = require("./quizService");
+const { extractDocumentText } = require("./extractDocumentText");
 const s3 = require("./s3Upload");
 const db = require("./db");
 require("./src/models/associations");
@@ -472,6 +473,27 @@ function isAllowedStudentEmail(email) {
   return /@dtu\.edu\.vn$/i.test(String(email || "").trim());
 }
 
+function isAllowedLecturerEmail(email) {
+  return /@duytan\.edu\.vn$/i.test(String(email || "").trim());
+}
+
+function normalizePublicRegistrationRole(roleRaw) {
+  const r = String(roleRaw || "STUDENT")
+    .trim()
+    .toUpperCase()
+    .replace(/-/g, "_");
+  if (
+    r === "LECTURER" ||
+    r === "TEACHER" ||
+    r === "INSTRUCTOR" ||
+    r === "FACULTY" ||
+    r === "LECTURE"
+  ) {
+    return "LECTURER";
+  }
+  return "STUDENT";
+}
+
 function otpExpiryMs() {
   const mins = Number(process.env.OTP_EXPIRES_MINUTES || 5);
   if (!Number.isFinite(mins) || mins <= 0) return 5 * 60 * 1000;
@@ -613,8 +635,7 @@ app.post("/api/auth/register", async (req, res) => {
     ).trim();
     const email = String(req.body.email ?? "").trim().toLowerCase();
     const password = String(req.body.password ?? "").trim();
-    /** Public registration must not allow role escalation — always STUDENT in MySQL `users.role`. */
-    const role = "STUDENT";
+    const role = normalizePublicRegistrationRole(req.body.role);
     const userCode = req.body.user_code ?? req.body.userCode ?? null;
 
     if (!fullName) {
@@ -638,11 +659,19 @@ app.post("/api/auth/register", async (req, res) => {
         message: "Password must be at least 8 characters.",
       });
     }
-    if (!isAllowedStudentEmail(email)) {
+    if (role === "LECTURER") {
+      if (!isAllowedLecturerEmail(email)) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_EMAIL_DOMAIN",
+          message: "Lecturer registration email must end with @duytan.edu.vn.",
+        });
+      }
+    } else if (!isAllowedStudentEmail(email)) {
       return res.status(400).json({
         success: false,
         code: "INVALID_EMAIL_DOMAIN",
-        message: "Registration email must end with @dtu.edu.vn.",
+        message: "Student registration email must end with @dtu.edu.vn.",
       });
     }
 
@@ -711,10 +740,10 @@ app.post("/api/auth/send-otp", async (req, res) => {
     if (!email) {
       return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
     }
-    if (!isAllowedStudentEmail(email)) {
+    if (!isAllowedStudentEmail(email) && !isAllowedLecturerEmail(email)) {
       return res.status(400).json({
         success: false,
-        message: "OTP email must end with @dtu.edu.vn.",
+        message: "OTP email must end with @dtu.edu.vn or @duytan.edu.vn.",
       });
     }
     const code = generateOtpCode();
@@ -1040,13 +1069,24 @@ async function savePublishedQuizToS3(quizRow) {
   const qid = Number(quizRow?.quiz_id ?? quizRow?.quizId);
   if (!Number.isFinite(qid) || qid <= 0) return null;
   const qs = Array.isArray(quizRow?.questions) ? quizRow.questions : [];
+  const createdByRaw = Number(quizRow?.created_by ?? quizRow?.createdBy);
+  const createdBy =
+    Number.isFinite(createdByRaw) && createdByRaw > 0 ? createdByRaw : null;
+  let creatorName = String(quizRow?.creator_name || quizRow?.creatorName || "").trim();
+  if (!creatorName || creatorName.toLowerCase() === "lecturer") {
+    const resolved = createdBy != null ? await resolveUserDisplayName(createdBy) : null;
+    creatorName = resolved || creatorName || "Unknown lecturer";
+  }
   const payload = {
     quizId: qid,
     title: String(quizRow?.title || "Published Quiz"),
     courseCode: String(quizRow?.course_code || quizRow?.courseCode || "DOC"),
     questionCount: qs.length,
     attemptsCount: Number(quizRow?.attempts_count || 0),
-    creatorName: String(quizRow?.creator_name || quizRow?.creatorName || "Lecturer"),
+    creatorName,
+    createdBy,
+    scheduleStartAt: quizRow?.schedule_start_at ?? quizRow?.scheduleStartAt ?? null,
+    scheduleEndAt: quizRow?.schedule_end_at ?? quizRow?.scheduleEndAt ?? null,
     publishedAt: quizRow?.published_at || quizRow?.publishedAt || new Date().toISOString(),
     createdAt: quizRow?.created_at || quizRow?.createdAt || new Date().toISOString(),
     // Keep quiz payload for future consumption if needed by FE.
@@ -1103,6 +1143,14 @@ async function listPublishedQuizzesFromS3(limit = 20) {
       const raw = String(got?.buffer || "").trim();
       if (!raw) continue;
       const parsed = JSON.parse(raw);
+      const createdByRaw = Number(parsed?.createdBy ?? parsed?.created_by);
+      const createdBy =
+        Number.isFinite(createdByRaw) && createdByRaw > 0 ? createdByRaw : null;
+      const scheduleEndAt = parsed?.scheduleEndAt ?? parsed?.schedule_end_at ?? null;
+      if (scheduleEndAt) {
+        const endMs = new Date(scheduleEndAt).getTime();
+        if (Number.isFinite(endMs) && endMs <= Date.now()) continue;
+      }
       out.push({
         quizId: Number(parsed?.quizId || 0),
         title: String(parsed?.title || "Published Quiz"),
@@ -1110,6 +1158,9 @@ async function listPublishedQuizzesFromS3(limit = 20) {
         questionCount: Number(parsed?.questionCount || 0),
         attemptsCount: Number(parsed?.attemptsCount || 0),
         creatorName: String(parsed?.creatorName || "Lecturer"),
+        createdBy,
+        scheduleStartAt: parsed?.scheduleStartAt ?? parsed?.schedule_start_at ?? null,
+        scheduleEndAt,
         publishedAt: parsed?.publishedAt || obj?.lastModified || null,
         createdAt: parsed?.createdAt || obj?.lastModified || null,
       });
@@ -1130,10 +1181,15 @@ async function getPublishedQuizDetailFromS3(quizId) {
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     const questions = Array.isArray(parsed?.questions) ? parsed.questions : [];
+    const createdByRaw = Number(parsed?.createdBy ?? parsed?.created_by);
+    const createdBy =
+      Number.isFinite(createdByRaw) && createdByRaw > 0 ? createdByRaw : null;
     return {
       quiz_id: qid,
       title: String(parsed?.title || "Published Quiz"),
       is_published: 1,
+      created_by: createdBy,
+      createdBy,
       course_code: String(parsed?.courseCode || "DOC"),
       creator_name: String(parsed?.creatorName || "Lecturer"),
       created_at: parsed?.createdAt || parsed?.publishedAt || null,
@@ -1169,6 +1225,145 @@ async function getPublishedQuizDetailFromS3(quizId) {
   } catch (_) {
     return null;
   }
+}
+
+async function deletePublishedQuizFromS3(quizId) {
+  if (!s3.isS3Configured()) return;
+  const qid = Number(quizId);
+  if (!Number.isFinite(qid) || qid <= 0) return;
+  const keys = [buildPublishedQuizKey(qid), buildPublishedQuestionBankKey(qid)];
+  for (const key of keys) {
+    try {
+      await s3.deleteObject(key);
+    } catch (e) {
+      console.warn("[delete-published-s3]", key, e?.message || e);
+    }
+  }
+}
+
+/** DB row owner check, or S3-only published snapshot (legacy orphans). */
+function parseQuizScheduleFromRequest(body) {
+  const b = body && typeof body === "object" ? body : {};
+  return {
+    startAt: db.parseScheduleDatetimeInput(
+      b.startDate ?? b.start_date ?? b.scheduleStartAt ?? b.schedule_start_at
+    ),
+    endAt: db.parseScheduleDatetimeInput(
+      b.endDate ?? b.end_date ?? b.scheduleEndAt ?? b.schedule_end_at
+    ),
+  };
+}
+
+async function expireScheduledPublishedQuizzes() {
+  if (!db.isConfigured()) return { deleted: 0 };
+  let deleted = 0;
+  const expiredDbIds = await db.listExpiredPublishedQuizIds();
+  for (const id of expiredDbIds) {
+    try {
+      await db.deleteQuizById(id);
+      await deletePublishedQuizFromS3(id);
+      deleted += 1;
+    } catch (e) {
+      console.warn("[expire-published-quiz]", id, e?.message || e);
+    }
+  }
+  if (s3.isS3Configured()) {
+    try {
+      const rows = await listPublishedQuizzesFromS3(200);
+      const now = Date.now();
+      for (const row of rows || []) {
+        const endRaw = row?.scheduleEndAt;
+        if (!endRaw) continue;
+        const endMs = new Date(endRaw).getTime();
+        if (!Number.isFinite(endMs) || endMs > now) continue;
+        const id = Number(row?.quizId);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        if (expiredDbIds.includes(id)) continue;
+        await deletePublishedQuizFromS3(id);
+        deleted += 1;
+      }
+    } catch (e) {
+      console.warn("[expire-published-s3]", e?.message || e);
+    }
+  }
+  return { deleted };
+}
+
+async function ensureQuizInDbForAttempts(quizId) {
+  const qid = Number(quizId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  let row = await db.getQuizWithQuestions(qid);
+  if (row) return row;
+  const s3Row = await getPublishedQuizDetailFromS3(qid);
+  if (!s3Row) return null;
+  return db.materializePublishedQuizSnapshot(s3Row);
+}
+
+async function canUserDeletePublishedQuiz(quizId, userId) {
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0) return false;
+
+  const dbRow = db.isConfigured() ? await db.getQuizWithQuestions(quizId) : null;
+  if (dbRow) {
+    return db.canUserDeleteQuiz(quizId, uid);
+  }
+
+  const s3Row = await getPublishedQuizDetailFromS3(quizId);
+  if (!s3Row) return false;
+
+  let role = "";
+  try {
+    role = await db.getUserRole(uid);
+  } catch (_) {
+    return false;
+  }
+  const normalized = String(role || "").trim().toUpperCase();
+  if (normalized === "ADMIN") return true;
+  if (!["LECTURER", "TEACHER"].includes(normalized)) return false;
+
+  const owner = db.resolveQuizOwnerUserId({
+    created_by: s3Row.created_by ?? s3Row.createdBy,
+    questions: s3Row.questions,
+    source_file_url: s3Row.source_file_url,
+  });
+  if (owner != null && owner === uid) return true;
+  if (owner != null) return db.usersShareQuizOwnership(owner, uid);
+  // Legacy S3 snapshot with no owner metadata — allow lecturer cleanup (orphan).
+  return true;
+}
+
+async function viewerIsLecturerOrAdmin(userId) {
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0) return false;
+  try {
+    const role = await db.getUserRole(uid);
+    const normalized = String(role || "").trim().toUpperCase();
+    return normalized === "ADMIN" || normalized === "LECTURER" || normalized === "TEACHER";
+  } catch (_) {
+    return false;
+  }
+}
+
+async function resolveUserDisplayName(userId) {
+  const uid = Number(userId);
+  if (!Number.isFinite(uid) || uid <= 0 || !db.isConfigured()) return null;
+  try {
+    const pool = db.getPool();
+    for (const sql of [
+      "SELECT name FROM users WHERE user_id = ? LIMIT 1",
+      "SELECT full_name AS name FROM users WHERE user_id = ? LIMIT 1",
+      "SELECT email AS name FROM users WHERE user_id = ? LIMIT 1",
+    ]) {
+      try {
+        const [rows] = await pool.execute(sql, [uid]);
+        const n = String(rows?.[0]?.name || "").trim();
+        if (n) return n;
+      } catch (_) {
+        /* column may not exist */
+      }
+    }
+  } catch (_) {}
+  return null;
 }
 
 async function listS3DocsForQuiz() {
@@ -1249,6 +1444,24 @@ function countFromKeyMap(map, s3Key) {
     if (db.normalizeDocumentKeyForLookup(String(mk)) === nk) return Number(mv);
   }
   return 0;
+}
+
+/** Record opening a document in the library (one count per open). Best-effort. */
+async function recordDocumentView(rawDocumentId, s3Key) {
+  if (!db.isConfigured()) return null;
+  try {
+    const raw = rawDocumentId != null && String(rawDocumentId).trim() !== "" ? rawDocumentId : null;
+    if (raw != null) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) {
+        return await db.incrementDocumentViewCountByDocumentId(n);
+      }
+    }
+    return await db.incrementDocumentViewCountByS3Key(s3Key);
+  } catch (e) {
+    console.warn("[documents] view count:", e.message);
+    return null;
+  }
 }
 
 /** Record a successful file download (presigned URL or streamed buffer). Best-effort; ignores failures. */
@@ -1358,6 +1571,7 @@ async function buildDocumentsForQuizList(options = {}) {
       chunkCount: chunks,
       estimatedQuestions,
       downloadCount: Number(m?.download_count ?? 0),
+      viewCount: Number(m?.view_count ?? 0),
       attemptsCount: countFromKeyMap(attemptByKey, o.key),
       commentsCount: countFromKeyMap(commentByKey, o.key),
     };
@@ -1623,6 +1837,32 @@ app.post("/api/documents/comments", async (req, res) => {
   } catch (err) {
     console.error("[api/documents/comments POST]", err);
     return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
+  }
+});
+
+app.post("/api/documents/record-view", async (req, res) => {
+  try {
+    const rawDocumentId =
+      req.body?.documentId ?? req.body?.document_id ?? req.query?.documentId ?? req.query?.document_id;
+    const s3Key = String(
+      req.body?.s3Key ?? req.body?.s3_key ?? req.query?.s3Key ?? req.query?.s3_key ?? ""
+    ).trim();
+
+    if (
+      (rawDocumentId == null || String(rawDocumentId).trim() === "") &&
+      !s3Key
+    ) {
+      return res.status(400).json({ success: false, message: "documentId or s3Key is required." });
+    }
+
+    const viewCount = await recordDocumentView(rawDocumentId, s3Key);
+    return res.json({
+      success: true,
+      data: { viewCount: viewCount != null ? viewCount : 0 },
+    });
+  } catch (err) {
+    console.error("[api/documents/record-view]", err);
+    return res.status(500).json({ success: false, message: MSG_TRY_AGAIN });
   }
 });
 
@@ -2163,6 +2403,7 @@ app.get("/api/quizzes/history", async (req, res) => {
     const withShareFlags = merged.map((row) => ({
       ...row,
       is_published: row?.isPublished ? 1 : 0,
+      createdBy: row?.createdBy ?? row?.created_by ?? null,
       sharedForReview: Boolean(
         row?.sharedForReview ??
         row?.shared_from_student ??
@@ -2262,14 +2503,8 @@ app.get("/api/quizzes/shared-by-students", async (req, res) => {
     if (!db.isConfigured()) {
       return res.status(200).json({ success: true, data: [], message: MSG_DATA_UNAVAILABLE });
     }
-    const limit = req.query.limit;
-    const userId =
-      req.query.userId ??
-      req.query.user_id ??
-      req.query.viewerUserId ??
-      req.query.viewer_user_id ??
-      getBearerUserId(req);
-    const data = await db.listLecturerReviewedQuizzes(limit, userId);
+    const limit = req.query.limit ?? 200;
+    const data = await db.listQuizzesSharedByStudents(limit);
     const normalized = (Array.isArray(data) ? data : []).map((row) => ({
       ...row,
       quiz_id: row?.quizId ?? null,
@@ -2373,9 +2608,30 @@ app.post("/api/quizzes/:id/share", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized." });
     }
 
-    const quizRow = await db.getQuizWithQuestions(quizId);
+    let quizRow = await db.getQuizWithQuestions(quizId);
     if (!quizRow) {
+      const s3Only = await getPublishedQuizDetailFromS3(quizId);
+      if (s3Only) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Published lecturer quizzes cannot be shared. Create a quiz from your document (Available tab) to share with your lecturer.",
+        });
+      }
       return res.status(404).json({ success: false, message: "Quiz not found." });
+    }
+    const isPublishedLecturerQuiz =
+      db.quizRowIsPublished(quizRow) &&
+      (() => {
+        const owner = Number(quizRow.created_by);
+        return !Number.isFinite(owner) || owner <= 0 || owner !== Number(ownerUserId);
+      })();
+    if (isPublishedLecturerQuiz) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Published lecturer quizzes cannot be shared. Create a quiz from your document (Available tab) to share with your lecturer.",
+      });
     }
     const createdBy = Number(quizRow.created_by);
     if (!Number.isFinite(createdBy) || createdBy !== Number(ownerUserId)) {
@@ -2395,33 +2651,19 @@ app.post("/api/quizzes/:id/share", async (req, res) => {
       await db.replaceQuizQuestions(quizId, normalizedQuestions);
     }
 
-    // Ensure share columns exist on older schemas.
-    try {
-      const pool = db.getPool();
-      await pool.execute("ALTER TABLE quizzes ADD COLUMN shared_for_review TINYINT(1) NOT NULL DEFAULT 0");
-    } catch (_) {}
-    try {
-      const pool = db.getPool();
-      await pool.execute("ALTER TABLE quizzes ADD COLUMN shared_at DATETIME NULL DEFAULT NULL");
-    } catch (_) {}
-
-    try {
-      const pool = db.getPool();
-      await pool.execute(
-        "UPDATE quizzes SET shared_for_review = 1, shared_at = NOW() WHERE quiz_id = ?",
-        [quizId]
-      );
-    } catch {
-      // If schema is still incompatible, keep share route successful without hard fail.
-    }
+    await db.shareQuizForReview({ quizId, userId: ownerUserId });
 
     return res.status(200).json({
       success: true,
       message: "Quiz shared for lecturer review.",
-      data: { quizId, sharedForReview: true },
+      data: { quizId, sharedForReview: true, sharedFromStudent: true },
     });
   } catch (err) {
     console.error("[api/quizzes/:id/share]", err);
+    const msg = String(err?.message || "");
+    if (msg.includes("Complete the quiz") || msg.includes("Only students")) {
+      return res.status(400).json({ success: false, message: msg });
+    }
     return res.status(400).json({ success: false, message: MSG_TRY_AGAIN });
   }
 });
@@ -2901,6 +3143,10 @@ app.post("/api/quiz/attempts", async (req, res) => {
       });
     }
     const quizId = req.body.quizId ?? req.body.quiz_id;
+    const ensured = await ensureQuizInDbForAttempts(quizId);
+    if (!ensured) {
+      return res.status(404).json({ success: false, message: "Quiz not found." });
+    }
 
     const defaultUserIdRaw = process.env.DEFAULT_QUIZ_USER_ID;
     const defaultUserId = defaultUserIdRaw ? Number(defaultUserIdRaw) : null;
@@ -2912,8 +3158,12 @@ app.post("/api/quiz/attempts", async (req, res) => {
     const phase = String(req.body.phase ?? req.body.stage ?? "").toLowerCase();
 
     if (phase === "start") {
-      await db.startQuizAttempt({ quizId, userId });
-      return res.status(201).json({ success: true, message: "Attempt start recorded." });
+      const attemptId = await db.startQuizAttempt({ quizId, userId });
+      return res.status(201).json({
+        success: true,
+        message: "Attempt start recorded.",
+        data: { attemptId: Number.isFinite(Number(attemptId)) ? Number(attemptId) : null },
+      });
     }
 
     const score = req.body.score ?? req.body.correctCount ?? req.body.correct;
@@ -2965,6 +3215,10 @@ app.post("/api/quiz/attempts", async (req, res) => {
     });
   } catch (err) {
     console.error("[api/quiz/attempts]", err);
+    const msg = String(err?.message || "");
+    if (msg.includes("Quiz not found")) {
+      return res.status(404).json({ success: false, message: "Quiz not found." });
+    }
     return res.status(400).json({
       success: false,
       message: MSG_TRY_AGAIN,
@@ -3126,12 +3380,77 @@ async function handleQuizGenerate(req, res) {
     }
 
     const language = req.body.language ?? "Auto";
-    const { questions: rawQuiz, targetCount } = await generateQuizWithAI({
-      s3Key,
-      query: req.body.query ?? req.body.topic ?? req.body.keyword,
-      numQuestions: req.body.numQuestions ?? req.body.num_questions,
-      languageHint: language,
-    });
+    const numQuestions = req.body.numQuestions ?? req.body.num_questions ?? 10;
+    const varietySeed =
+      req.body.varietySeed ??
+      req.body.variety_seed ??
+      req.body.jobId ??
+      `quiz-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+    const avoidQuestionStems = [];
+    const requestedQuizId = Number(req.body.quizId ?? req.body.quiz_id);
+    if (db.isConfigured()) {
+      try {
+        if (Number.isFinite(requestedQuizId) && requestedQuizId > 0) {
+          const row = await db.getQuizWithQuestions(requestedQuizId);
+          for (const q of row?.questions || []) {
+            const t = String(q.question_text || q.question || "").trim();
+            if (t) avoidQuestionStems.push(t);
+          }
+        }
+        const teamDb = require("./src/config/teamDb");
+        if (teamDb.isConfigured()) {
+          const existingId = await teamDb.findQuizByS3Key(s3Key);
+          if (
+            existingId &&
+            Number(existingId) > 0 &&
+            Number(existingId) !== requestedQuizId
+          ) {
+            const row = await db.getQuizWithQuestions(existingId);
+            for (const q of row?.questions || []) {
+              const t = String(q.question_text || q.question || "").trim();
+              if (t) avoidQuestionStems.push(t);
+            }
+          }
+        }
+      } catch (stemErr) {
+        console.warn("[quiz/generate] prior question stems:", stemErr.message);
+      }
+    }
+
+    let rawQuiz = [];
+    let targetCount = Number(numQuestions) || 10;
+
+    try {
+      const { buffer, contentType } = await s3.getObjectBuffer(s3Key);
+      const ext = path.extname(s3Key).toLowerCase();
+      const text = await extractDocumentText(buffer, ext, contentType || "");
+      const fromText = await generateQuizFromText({
+        text,
+        numQuestions,
+        languageHint: language,
+        varietySeed,
+        avoidQuestionStems,
+      });
+      rawQuiz = Array.isArray(fromText?.questions) ? fromText.questions : [];
+      targetCount = fromText?.targetCount ?? targetCount;
+    } catch (textGenErr) {
+      console.warn("[quiz/generate] full-text generation failed:", textGenErr.message);
+    }
+
+    if (!rawQuiz.length) {
+      const vectorResult = await generateQuizWithAI({
+        s3Key,
+        query: req.body.query ?? req.body.topic ?? req.body.keyword,
+        numQuestions,
+        languageHint: language,
+        varietySeed,
+        avoidQuestionStems,
+      });
+      rawQuiz = Array.isArray(vectorResult?.questions) ? vectorResult.questions : [];
+      targetCount = vectorResult?.targetCount ?? targetCount;
+    }
+
     const history = req.body.history ?? req.body.userHistory ?? [];
     const quiz = getQuiz(rawQuiz, history, targetCount);
 
@@ -3174,7 +3493,6 @@ async function handleQuizGenerate(req, res) {
           message: "Authentication required to save generated quiz.",
         });
       }
-      const requestedQuizId = Number(req.body.quizId ?? req.body.quiz_id);
       const status = String(req.body.status ?? "").trim().toLowerCase();
       const autoPublish =
         status === "published" ||
@@ -3185,11 +3503,12 @@ async function handleQuizGenerate(req, res) {
       if (Number.isFinite(requestedQuizId) && requestedQuizId > 0) {
         const canManage = await db.canUserManageQuiz(requestedQuizId, createdBy);
         if (!canManage) {
-          return res.status(403).json({
-            success: false,
-            message: "You do not have permission to edit this quiz.",
-          });
-        }
+          // Students taking a published lecturer quiz must get a new personal copy,
+          // not overwrite the shared quiz.
+          console.log(
+            `[quiz/generate] user ${createdBy} cannot manage quiz ${requestedQuizId}; creating new quiz`
+          );
+        } else {
         await db.updateQuizTitle(requestedQuizId, quizTitle);
         await db.replaceQuizQuestions(requestedQuizId, quiz);
         if (autoPublish) {
@@ -3228,6 +3547,7 @@ async function handleQuizGenerate(req, res) {
           autoOpen: true,
           navigateReplace: payload.navigateReplace !== false,
         });
+        }
       }
 
       const idxMeta = req._quizIndexMeta || {};
@@ -3329,6 +3649,7 @@ app.get("/api/quizzes/published", async (req, res) => {
   // Published list can update during session; keep dev UX consistent.
   res.setHeader("Cache-Control", "no-store");
   try {
+    await expireScheduledPublishedQuizzes();
     const lim = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
     const fromS3 = s3.isS3Configured() ? await listPublishedQuizzesFromS3(lim * 2) : [];
     const fromDb = db.isConfigured() ? await db.listPublishedQuizzes(lim * 2) : [];
@@ -3346,16 +3667,86 @@ app.get("/api/quizzes/published", async (req, res) => {
         ...prev,
         ...row,
         creatorName: row?.creatorName ?? prev?.creatorName ?? null,
+        createdBy: row?.createdBy ?? prev?.createdBy ?? null,
         courseCode: row?.courseCode ?? prev?.courseCode ?? "DOC",
         questionCount: Number(row?.questionCount ?? prev?.questionCount ?? 0),
       });
     }
+    const missingOwnerIds = [...byId.values()]
+      .filter((row) => {
+        const o = Number(row?.createdBy);
+        return !(Number.isFinite(o) && o > 0);
+      })
+      .map((row) => Number(row?.quizId))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    if (missingOwnerIds.length && db.isConfigured()) {
+      try {
+        const placeholders = missingOwnerIds.map(() => "?").join(",");
+        const [rows] = await db.getPool().execute(
+          `SELECT quiz_id, created_by FROM quizzes WHERE quiz_id IN (${placeholders})`,
+          missingOwnerIds
+        );
+        for (const r of rows || []) {
+          const id = Number(r.quiz_id);
+          const owner = Number(r.created_by);
+          if (!Number.isFinite(id) || id <= 0 || !(Number.isFinite(owner) && owner > 0)) continue;
+          const prev = byId.get(id);
+          if (prev) byId.set(id, { ...prev, createdBy: owner });
+        }
+      } catch (e) {
+        console.warn("[api/quizzes/published] owner enrich:", e?.message || e);
+      }
+    }
+
+    const viewerId = Number(
+      getBearerUserId(req) ?? req.query.userId ?? req.query.user_id ?? 0
+    );
     let data = [...byId.values()].sort((a, b) => {
       const ta = new Date(a?.publishedAt || a?.createdAt || 0).getTime();
       const tb = new Date(b?.publishedAt || b?.createdAt || 0).getTime();
       return tb - ta;
     });
     data = data.slice(0, lim);
+    const lecturerViewer =
+      Number.isFinite(viewerId) && viewerId > 0 ? await viewerIsLecturerOrAdmin(viewerId) : false;
+    const enriched = [];
+    for (const row of data) {
+      const owner = Number(row?.createdBy);
+      let isOwner = false;
+      if (
+        Number.isFinite(viewerId) &&
+        viewerId > 0 &&
+        Number.isFinite(owner) &&
+        owner > 0
+      ) {
+        isOwner =
+          owner === viewerId ||
+          (await db.usersShareQuizOwnership(owner, viewerId));
+      }
+      let canDelete = isOwner;
+      if (!canDelete && lecturerViewer && !(Number.isFinite(owner) && owner > 0)) {
+        const dbRow = db.isConfigured() ? await db.getQuizWithQuestions(row.quizId) : null;
+        if (!dbRow) canDelete = true;
+      }
+      let creatorName = row?.creatorName;
+      let publishedByEmail = null;
+      if (Number.isFinite(owner) && owner > 0) {
+        publishedByEmail = await db.getUserEmail(owner);
+      }
+      if (isOwner && lecturerViewer) {
+        const name = await resolveUserDisplayName(viewerId);
+        if (name) creatorName = name;
+        publishedByEmail = (await db.getUserEmail(viewerId)) || publishedByEmail;
+      }
+      enriched.push({
+        ...row,
+        creatorName: creatorName || row?.creatorName,
+        publishedByEmail,
+        isOwner,
+        canDelete,
+      });
+    }
+    data = enriched;
 
     return res.status(200).json({ success: true, data });
   } catch (err) {
@@ -3383,6 +3774,7 @@ app.patch("/api/quizzes/:id", async (req, res) => {
         message: "You do not have permission to edit this quiz.",
       });
     }
+    await db.setQuizPublisherOwnership(quizId, userId);
     let row = await db.getQuizWithQuestions(quizId);
     if (!row) {
       return res.status(404).json({ success: false, message: "Quiz not found." });
@@ -3398,14 +3790,36 @@ app.patch("/api/quizzes/:id", async (req, res) => {
     if (req.body.title != null && String(req.body.title).trim()) {
       await db.updateQuizTitle(quizId, req.body.title);
     }
+    const hasScheduleField =
+      req.body.startDate != null ||
+      req.body.start_date != null ||
+      req.body.endDate != null ||
+      req.body.end_date != null ||
+      req.body.scheduleStartAt != null ||
+      req.body.schedule_start_at != null ||
+      req.body.scheduleEndAt != null ||
+      req.body.schedule_end_at != null;
+    const saveAsDraft = (() => {
+      const st = String(req.body?.status ?? "").trim().toLowerCase();
+      return st === "draft" || st === "unpublished" || st === "0" || st === "false";
+    })();
+    if (hasScheduleField) {
+      const schedule = parseQuizScheduleFromRequest(req.body);
+      if (!saveAsDraft) {
+        const scheduleErr = db.validateQuizSchedule(schedule);
+        if (scheduleErr) {
+          return res.status(400).json({ success: false, message: scheduleErr });
+        }
+      }
+      await db.setQuizSchedule(quizId, schedule);
+    }
     if (Array.isArray(req.body.questions)) {
       await db.replaceQuizQuestions(quizId, req.body.questions);
     }
     // Support FE "Save draft" toggle (draft=0, published=1).
     // Publishing still requires the dedicated /publish endpoint (S3 sync + rollback).
     try {
-      const st = String(req.body?.status ?? "").trim().toLowerCase();
-      if (st === "draft" || st === "unpublished" || st === "0" || st === "false") {
+      if (saveAsDraft) {
         await db.setQuizPublished(quizId, false);
       }
     } catch (_) {}
@@ -3466,9 +3880,18 @@ app.post("/api/quizzes", async (req, res) => {
     if (!questions.length) {
       return res.status(400).json({ success: false, message: "Please provide at least one question." });
     }
+    let courseId = req.body.courseId ?? req.body.course_id ?? null;
+    const courseCode = String(req.body.courseCode ?? req.body.course_code ?? "").trim();
+    if (!courseId && courseCode) {
+      try {
+        courseId = await db.findOrCreateCourseIdByCode(courseCode);
+      } catch (e) {
+        console.warn("[api/quizzes POST] course:", e?.message || e);
+      }
+    }
     const quizId = await db.saveQuizWithQuestions({
       title,
-      courseId: req.body.courseId ?? req.body.course_id ?? null,
+      courseId,
       createdBy: uid,
       questions,
       sourceFileUrl: req.body.s3Key ?? req.body.sourceFileUrl ?? null,
@@ -3494,6 +3917,12 @@ app.post("/api/quizzes", async (req, res) => {
           message: "Cloud storage is unavailable right now.",
         });
       }
+      const schedule = parseQuizScheduleFromRequest(req.body);
+      const scheduleErr = db.validateQuizSchedule(schedule);
+      if (scheduleErr) {
+        return res.status(400).json({ success: false, message: scheduleErr });
+      }
+      await db.setQuizSchedule(quizId, schedule);
       await db.setQuizPublished(quizId, true);
       const publishedRow = await db.getQuizWithQuestions(quizId);
       try {
@@ -3535,38 +3964,40 @@ app.post("/api/quizzes/:id/publish", async (req, res) => {
     }
     const quizId = req.params.id;
     const userId = getBearerUserId(req) ?? req.body.userId ?? req.body.user_id ?? req.query?.userId ?? req.query?.user_id;
-    const ok = await db.canUserManageQuiz(quizId, userId);
+    const ok = await db.canUserDeleteQuiz(quizId, userId);
     if (!ok) {
       return res.status(403).json({
         success: false,
-        message: "You do not have permission to publish this quiz.",
+        message: "You can only publish quizzes you created.",
       });
     }
+    const schedule = parseQuizScheduleFromRequest(req.body);
+    const scheduleErr = db.validateQuizSchedule(schedule);
+    if (scheduleErr) {
+      return res.status(400).json({ success: false, message: scheduleErr });
+    }
+    await db.setQuizSchedule(quizId, schedule);
     await db.setQuizPublished(quizId, true);
+    await db.setQuizPublisherOwnership(quizId, userId);
+    await db.ensureQuizCreatedByFromInference(quizId);
     const row = await db.getQuizWithQuestions(quizId);
     let publishedS3Key = null;
     let questionBankS3Key = null;
+    let s3Warning = null;
     try {
       publishedS3Key = await savePublishedQuizToS3(row);
       questionBankS3Key = await saveQuestionBankToS3(row);
     } catch (e) {
-      // Keep DB/S3 state consistent: if cloud publish fails, revert published flag.
-      try {
-        await db.setQuizPublished(quizId, false);
-      } catch (_) {
-        // Ignore rollback failure here; primary error message remains generic.
-      }
       console.error("[publish->s3]", e);
-      return res.status(500).json({
-        success: false,
-        message: MSG_TRY_AGAIN,
-      });
+      s3Warning =
+        "Quiz is published in the system, but cloud storage sync failed. Students may not see it until sync succeeds.";
     }
     return res.status(200).json({
       success: true,
       data: row,
       s3Key: publishedS3Key,
       questionBankS3Key,
+      warning: s3Warning,
     });
   } catch (err) {
     console.error("[api/quizzes/:id/publish]", err);
@@ -3589,14 +4020,19 @@ app.delete("/api/quizzes/:id", async (req, res) => {
       req.body?.user_id ??
       req.query?.userId ??
       req.query?.user_id;
-    const ok = await db.canUserManageQuiz(quizId, userId);
+    const ok = await canUserDeletePublishedQuiz(quizId, userId);
     if (!ok) {
       return res.status(403).json({
         success: false,
-        message: "You do not have permission to delete this quiz.",
+        message:
+          "You can only delete quizzes you created. This quiz belongs to another lecturer or is a shared student quiz.",
       });
     }
-    await db.deleteQuizById(quizId);
+    const dbRow = await db.getQuizWithQuestions(quizId);
+    if (dbRow) {
+      await db.deleteQuizById(quizId);
+    }
+    await deletePublishedQuizFromS3(quizId);
     return res.status(200).json({ success: true });
   } catch (err) {
     console.error("[api/quizzes/:id DELETE]", err);
@@ -3678,6 +4114,13 @@ app.get("/api/quizzes/:id", async (req, res) => {
       payload.sharedByUserName = null;
     }
     payload.questions = normalizeQuestionsForClient(payload.questions || []);
+    const ownerId = db.resolveQuizOwnerUserId({
+      created_by: payload.created_by,
+      source_file_url: payload.source_file_url,
+      questions: payload.questions,
+    });
+    payload.createdBy = ownerId;
+    payload.created_by = ownerId;
     const envMins = Number(process.env.QUIZ_DEFAULT_TIME_LIMIT_MINUTES);
     const fallbackMins = Number.isFinite(envMins) && envMins > 0 ? envMins : 10;
     payload.timeLimitMinutes = Number(payload.time_limit_minutes ?? payload.timeLimitMinutes) || fallbackMins;
@@ -4081,6 +4524,14 @@ async function start() {
     console.log(`Server listening at http://localhost:${PORT}`);
     console.log("Routes: GET /api/documents/download-file (save to disk), GET /api/documents/download-url (presigned JSON).");
     console.log("Realtime: Socket.IO ready (events: async-job:completed, async-job:failed, quiz:ready).");
+    void expireScheduledPublishedQuizzes().catch((e) => {
+      console.warn("[expire-published-quiz] startup:", e?.message || e);
+    });
+    setInterval(() => {
+      void expireScheduledPublishedQuizzes().catch((e) => {
+        console.warn("[expire-published-quiz] interval:", e?.message || e);
+      });
+    }, 60 * 1000);
   });
   server.on("error", (err) => {
     if (err && err.code === "EADDRINUSE") {

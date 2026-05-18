@@ -43,6 +43,13 @@ function createPoolConfig() {
   };
 }
 
+function formatPoolTarget(cfg) {
+  const host = cfg?.host || "localhost";
+  const port = cfg?.port || 3306;
+  const database = cfg?.database || "?";
+  return `${host}:${port}/${database}`;
+}
+
 let pool;
 
 function isConfigured() {
@@ -64,6 +71,7 @@ function getPool() {
       waitForConnections: true,
       connectionLimit: 10,
       enableKeepAlive: true,
+      connectTimeout: Number(process.env.MYSQL_CONNECT_TIMEOUT_MS || 15000),
     });
   }
   return pool;
@@ -99,8 +107,12 @@ async function ensureQuizLifecycleColumns() {
     "ALTER TABLE quizzes ADD COLUMN document_id INT NULL DEFAULT NULL",
     "ALTER TABLE quizzes ADD COLUMN shared_for_review TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE quizzes ADD COLUMN shared_at DATETIME NULL DEFAULT NULL",
+    "ALTER TABLE quizzes ADD COLUMN shared_from_student TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE quizzes ADD COLUMN shared_by_user_id INT NULL DEFAULT NULL",
     "ALTER TABLE quizzes ADD COLUMN reviewed_by_lecturer TINYINT(1) NOT NULL DEFAULT 0",
     "ALTER TABLE quizzes ADD COLUMN reviewed_at DATETIME NULL DEFAULT NULL",
+    "ALTER TABLE quizzes ADD COLUMN schedule_start_at DATETIME NULL DEFAULT NULL",
+    "ALTER TABLE quizzes ADD COLUMN schedule_end_at DATETIME NULL DEFAULT NULL",
   ];
   for (const sql of stmts) {
     try {
@@ -224,6 +236,24 @@ async function ensureDocumentDownloadCountColumn() {
   }
 }
 
+async function ensureDocumentViewCountColumn() {
+  const p = getPool();
+  try {
+    const [[row]] = await p.execute(
+      `SELECT COUNT(*) AS c FROM information_schema.tables
+       WHERE table_schema = DATABASE() AND table_name = 'documents'`
+    );
+    if (Number(row?.c) < 1) return;
+    await p.execute(
+      "ALTER TABLE documents ADD COLUMN view_count INT NOT NULL DEFAULT 0"
+    );
+  } catch (e) {
+    if (e.code !== "ER_DUP_FIELDNAME") {
+      console.warn("ensureDocumentViewCountColumn:", e.message);
+    }
+  }
+}
+
 /** Threaded discussion on course materials (by document_id or S3 key). */
 async function ensureDocumentCommentsTable() {
   const p = getPool();
@@ -288,7 +318,36 @@ async function ensureActivityLogsTable() {
 
 async function initDb() {
   const p = getPool();
-  await p.execute("SELECT 1");
+  const target = formatPoolTarget(createPoolConfig());
+  const maxAttempts = Number(process.env.MYSQL_CONNECT_RETRIES || 3);
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await p.execute("SELECT 1");
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      const retryable =
+        e.code === "ETIMEDOUT" ||
+        e.code === "ECONNREFUSED" ||
+        e.code === "ENOTFOUND" ||
+        e.code === "EHOSTUNREACH";
+      if (!retryable || attempt >= maxAttempts) {
+        const err = new Error(
+          `Cannot reach MySQL at ${target} (${e.code || e.message}). Check VPN/network, firewall, and that MySQL is listening.`
+        );
+        err.code = e.code;
+        err.cause = e;
+        throw err;
+      }
+      console.warn(
+        `MySQL connect attempt ${attempt}/${maxAttempts} failed (${e.code}), retrying...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+  if (lastErr) throw lastErr;
   try {
     await ensureCoursesTable();
   } catch (e) {
@@ -324,6 +383,11 @@ async function initDb() {
     await ensureDocumentDownloadCountColumn();
   } catch (e) {
     console.warn("ensureDocumentDownloadCountColumn (init):", e.message);
+  }
+  try {
+    await ensureDocumentViewCountColumn();
+  } catch (e) {
+    console.warn("ensureDocumentViewCountColumn (init):", e.message);
   }
   try {
     await ensureDocumentCommentsTable();
@@ -690,6 +754,37 @@ async function incrementDocumentDownloadCountByS3Key(s3Key) {
     if (nk && nk !== k) id = await getDocumentIdByS3Key(nk);
   }
   if (id != null) await incrementDocumentDownloadCountByDocumentId(id);
+}
+
+async function incrementDocumentViewCountByDocumentId(documentId) {
+  const id = parseOptionalInt(documentId);
+  if (id == null) return null;
+  try {
+    await getPool().execute(
+      `UPDATE documents SET view_count = IFNULL(view_count, 0) + 1 WHERE document_id = ?`,
+      [id]
+    );
+    const [[row]] = await getPool().execute(
+      `SELECT IFNULL(view_count, 0) AS view_count FROM documents WHERE document_id = ?`,
+      [id]
+    );
+    return Number(row?.view_count ?? 0);
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR" || e.code === "ER_NO_SUCH_TABLE") return null;
+    throw e;
+  }
+}
+
+async function incrementDocumentViewCountByS3Key(s3Key) {
+  const k = String(s3Key || "").trim();
+  if (!k) return null;
+  let id = await getDocumentIdByS3Key(k);
+  if (id == null) {
+    const nk = normalizeDocumentKeyForLookup(k);
+    if (nk && nk !== k) id = await getDocumentIdByS3Key(nk);
+  }
+  if (id == null) return null;
+  return incrementDocumentViewCountByDocumentId(id);
 }
 
 /**
@@ -1068,6 +1163,7 @@ async function getMetaMapForS3Keys(keys) {
     const [r] = await p.execute(
       `SELECT d.document_id, d.title, d.file_url, d.course_id, d.uploader_id, d.created_at, d.status,
         IFNULL(d.download_count, 0) AS download_count,
+        IFNULL(d.view_count, 0) AS view_count,
         d.description, d.category,
         c.course_code,
         u.name AS uploader_name,
@@ -1246,7 +1342,9 @@ async function listQuizHistory(limit = 20, userId = null, ownerOnly = false, pub
   const docCategoryLine = `      (SELECT dcat.category FROM documents dcat WHERE dcat.document_id = q.document_id LIMIT 1) AS document_category,
 `;
   let sql = `
-    SELECT q.quiz_id, q.title, q.created_at, q.published_at, q.is_published, q.source_file_url, q.document_id,
+    SELECT q.quiz_id, q.title, q.created_at, q.published_at, q.is_published, q.created_by, q.source_file_url, q.document_id,
+      COALESCE(q.shared_for_review, 0) AS shared_for_review,
+      COALESCE(q.shared_from_student, 0) AS shared_from_student,
       c.course_code,
 ${docCategoryLine}      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
       (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
@@ -1258,11 +1356,10 @@ ${docCategoryLine}      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id
     LEFT JOIN courses c ON c.course_id = q.course_id
     WHERE (q.source_file_url IS NULL OR q.source_file_url NOT LIKE 'question-bank://%')
   `;
-  const params = [];
+  let params = [];
   if (uid != null) {
     if (ownerOnly) {
-      sql += ` AND q.created_by = ?`;
-      params.push(uid);
+      ({ sql, params } = appendSqlQuizOwnerMatch(sql, params, uid, "q"));
     } else {
       sql += ` AND (q.created_by = ? OR EXISTS (
         SELECT 1 FROM quiz_attempts qa2 WHERE qa2.quiz_id = q.quiz_id AND qa2.user_id = ?)`;
@@ -1329,6 +1426,9 @@ ${docCategoryLine}      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id
     scorePercent: scoreToPercent(row.last_score, row.question_count),
     lastAttemptAt: row.last_completed_at,
     isPublished: Number(row.is_published ?? 0) === 1,
+    createdBy: row.created_by != null ? Number(row.created_by) : null,
+    sharedForReview: Number(row.shared_for_review ?? 0) === 1,
+    sharedFromStudent: Number(row.shared_from_student ?? 0) === 1,
   }));
 }
 
@@ -1336,36 +1436,200 @@ async function listPublishedQuizzes(limit = 20) {
   const p = getPool();
   const lim = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const sql = `
-    SELECT q.quiz_id, q.title, q.source_file_url, q.created_at, q.published_at,
+    SELECT q.quiz_id, q.title, q.source_file_url, q.created_at, q.published_at, q.created_by,
       c.course_code,
       (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
       (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
+      (SELECT qqm.media_url FROM quiz_questions qqm
+        WHERE qqm.quiz_id = q.quiz_id AND qqm.media_url IS NOT NULL AND qqm.media_url != ''
+        ORDER BY qqm.question_id ASC LIMIT 1) AS sample_media_url,
       u.name AS creator_name
     FROM quizzes q
     LEFT JOIN courses c ON c.course_id = q.course_id
     LEFT JOIN users u ON u.user_id = q.created_by
     WHERE q.is_published = 1
+      AND (q.schedule_end_at IS NULL OR q.schedule_end_at > NOW())
     ORDER BY COALESCE(q.published_at, q.created_at) DESC
     LIMIT ${lim}
   `;
   try {
     const [rows] = await p.execute(sql);
-    return rows.map((row) => ({
-      quizId: row.quiz_id,
-      title: humanizeQuizTitleForDisplay(row.title || row.source_file_url),
-      createdAt: row.created_at,
-      publishedAt: row.published_at,
-      courseCode: row.course_code,
-      questionCount: Number(row.question_count || 0),
-      attemptsCount: Number(row.attempts_count || 0),
-      creatorName: row.creator_name || null,
-    }));
+    return rows.map((row) => {
+      const ownerId = resolveQuizOwnerUserId({
+        created_by: row.created_by,
+        source_file_url: row.source_file_url,
+        questions: row.sample_media_url
+          ? [{ media_url: row.sample_media_url }]
+          : [],
+      });
+      return {
+        quizId: row.quiz_id,
+        title: humanizeQuizTitleForDisplay(row.title || row.source_file_url),
+        createdAt: row.created_at,
+        publishedAt: row.published_at,
+        courseCode: row.course_code,
+        questionCount: Number(row.question_count || 0),
+        attemptsCount: Number(row.attempts_count || 0),
+        creatorName: row.creator_name || null,
+        createdBy: ownerId,
+      };
+    });
   } catch (e) {
-    if (e.code === "ER_BAD_FIELD_ERROR" && String(e.sqlMessage || e.message).includes("is_published")) {
-      return [];
+    if (e.code === "ER_BAD_FIELD_ERROR") {
+      const msg = String(e.sqlMessage || e.message || "");
+      if (msg.includes("is_published")) return [];
+      if (msg.includes("schedule_end_at")) {
+        const sqlLegacy = sql.replace(
+          "AND (q.schedule_end_at IS NULL OR q.schedule_end_at > NOW())",
+          ""
+        );
+        try {
+          const [legacyRows] = await p.execute(sqlLegacy);
+          return legacyRows.map((row) => {
+            const ownerId = resolveQuizOwnerUserId({
+              created_by: row.created_by,
+              source_file_url: row.source_file_url,
+              questions: row.sample_media_url ? [{ media_url: row.sample_media_url }] : [],
+            });
+            return {
+              quizId: row.quiz_id,
+              title: humanizeQuizTitleForDisplay(row.title || row.source_file_url),
+              createdAt: row.created_at,
+              publishedAt: row.published_at,
+              courseCode: row.course_code,
+              questionCount: Number(row.question_count || 0),
+              attemptsCount: Number(row.attempts_count || 0),
+              creatorName: row.creator_name || null,
+              createdBy: ownerId,
+            };
+          });
+        } catch (_) {
+          return [];
+        }
+      }
     }
     throw e;
   }
+}
+
+/** All quizzes students shared for lecturer review (pending or already reviewed). */
+async function listQuizzesSharedByStudents(limit = 50) {
+  const p = getPool();
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 500);
+  const sql = `
+    SELECT
+      q.quiz_id,
+      q.title,
+      q.created_by,
+      q.created_at,
+      q.shared_at,
+      q.reviewed_at,
+      q.shared_by_user_id,
+      q.shared_for_review,
+      q.shared_from_student,
+      q.reviewed_by_lecturer,
+      q.source_file_url,
+      q.document_id,
+      q.is_published,
+      c.course_code,
+      d.category AS document_category,
+      (SELECT COUNT(*) FROM quiz_questions qq WHERE qq.quiz_id = q.quiz_id) AS question_count,
+      (SELECT COUNT(*) FROM quiz_attempts qa0 WHERE qa0.quiz_id = q.quiz_id) AS attempts_count,
+      u.name AS shared_by_name,
+      u.email AS shared_by_email
+    FROM quizzes q
+    LEFT JOIN courses c ON c.course_id = q.course_id
+    LEFT JOIN documents d ON d.document_id = q.document_id
+    LEFT JOIN users u ON u.user_id = COALESCE(q.shared_by_user_id, q.created_by)
+    WHERE COALESCE(q.shared_for_review, 0) = 1
+       OR COALESCE(q.shared_from_student, 0) = 1
+    ORDER BY COALESCE(q.shared_at, q.created_at) DESC
+    LIMIT ${lim}
+  `;
+  try {
+    const [rows] = await p.execute(sql);
+    return rows.map((row) => ({
+      quizId: Number(row.quiz_id),
+      title: humanizeQuizTitleForDisplay(row.title || row.source_file_url),
+      createdAt: row.created_at || null,
+      sharedAt: row.shared_at || null,
+      reviewedAt: row.reviewed_at || null,
+      reviewedByLecturer: Number(row.reviewed_by_lecturer || 0) === 1,
+      sharedForReview: true,
+      sharedFromStudent:
+        Number(row.shared_from_student || 0) === 1 ||
+        Number(row.shared_for_review || 0) === 1,
+      sharedByUserId:
+        row.shared_by_user_id != null
+          ? Number(row.shared_by_user_id)
+          : row.created_by != null
+            ? Number(row.created_by)
+            : null,
+      sharedByName: row.shared_by_name != null ? String(row.shared_by_name) : null,
+      sharedByEmail: row.shared_by_email != null ? String(row.shared_by_email) : null,
+      s3Key: row.source_file_url || "",
+      documentId: row.document_id != null ? Number(row.document_id) : null,
+      courseCode: row.course_code || null,
+      documentCategory: row.document_category || null,
+      questionCount: Number(row.question_count || 0),
+      attemptsCount: Number(row.attempts_count || 0),
+      isPublished: Number(row.is_published ?? 0) === 1,
+    }));
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") return [];
+    throw e;
+  }
+}
+
+async function shareQuizForReview({ quizId, userId }) {
+  const p = getPool();
+  const qid = Number(quizId);
+  const uid = parseOptionalInt(userId);
+  if (!Number.isFinite(qid) || qid <= 0) throw new Error("Invalid quiz id.");
+  if (uid == null) throw new Error("Invalid user id.");
+  await assertQuizExists(qid, p);
+
+  const role = String((await getUserRole(uid)) || "").trim().toUpperCase();
+  if (role !== "STUDENT" && role !== "USER") {
+    throw new Error("Only students can share quizzes for lecturer review.");
+  }
+
+  const [attemptRows] = await p.execute(
+    `SELECT 1 FROM quiz_attempts
+     WHERE quiz_id = ? AND user_id = ? AND completed_at IS NOT NULL
+     LIMIT 1`,
+    [qid, uid]
+  );
+  if (!attemptRows.length) {
+    throw new Error("Complete the quiz before sharing it with your lecturer.");
+  }
+
+  const variants = [
+    `UPDATE quizzes
+     SET shared_for_review = 1,
+         shared_from_student = 1,
+         shared_by_user_id = ?,
+         shared_at = COALESCE(shared_at, NOW()),
+         is_published = 0
+     WHERE quiz_id = ?`,
+    `UPDATE quizzes
+     SET shared_for_review = 1,
+         shared_at = COALESCE(shared_at, NOW()),
+         is_published = 0
+     WHERE quiz_id = ?`,
+  ];
+  let ok = false;
+  for (let i = 0; i < variants.length; i++) {
+    try {
+      await p.execute(variants[i], i === 0 ? [uid, qid] : [qid]);
+      ok = true;
+      break;
+    } catch (e) {
+      if (e.code === "ER_BAD_FIELD_ERROR") continue;
+      throw e;
+    }
+  }
+  if (!ok) throw new Error("Could not update quiz share status.");
 }
 
 async function listLecturerReviewedQuizzes(limit = 20, viewerUserId = null) {
@@ -1760,6 +2024,133 @@ function isAdminRole(role) {
     .toLowerCase() === "admin";
 }
 
+/** Parse user-{id} from S3 paths, source_file_url, or encoded URLs. */
+function inferUserIdFromPathString(str) {
+  const url = String(str || "").trim();
+  if (!url) return null;
+  const m =
+    url.match(/(?:^|[/\\%])user-(\d+)(?:[/\\%]|$)/i) ||
+    url.match(/user-(\d+)/i);
+  if (!m) return null;
+  const uid = Number(m[1]);
+  return Number.isFinite(uid) && uid > 0 ? uid : null;
+}
+
+/** Legacy rows may lack created_by; infer from question media paths user-{id}/. */
+function inferQuizOwnerUserIdFromQuestions(questions) {
+  const list = Array.isArray(questions) ? questions : [];
+  for (const q of list) {
+    const url = String(q?.media_url || q?.mediaUrl || "").trim();
+    const uid = inferUserIdFromPathString(url);
+    if (uid != null) return uid;
+  }
+  return null;
+}
+
+function resolveQuizOwnerUserId(row) {
+  if (!row) return null;
+  const fromCol = parseOptionalInt(row.created_by);
+  if (fromCol != null && fromCol > 0) return fromCol;
+  const fromQuestions = inferQuizOwnerUserIdFromQuestions(row.questions);
+  if (fromQuestions != null) return fromQuestions;
+  const src =
+    row.source_file_url ?? row.sourceFileUrl ?? row.s3Key ?? row.source_key ?? "";
+  return inferUserIdFromPathString(src);
+}
+
+const userEmailCache = new Map();
+
+async function getUserEmail(userId) {
+  const id = parseOptionalInt(userId);
+  if (id == null) return null;
+  if (userEmailCache.has(id)) return userEmailCache.get(id);
+  try {
+    const [rows] = await getPool().execute(
+      `SELECT email FROM users WHERE user_id = ? LIMIT 1`,
+      [id]
+    );
+    const email =
+      rows[0]?.email != null ? String(rows[0].email).trim().toLowerCase() : null;
+    userEmailCache.set(id, email);
+    return email;
+  } catch (_) {
+    userEmailCache.set(id, null);
+    return null;
+  }
+}
+
+function isDemoLecturerEmail(email) {
+  return /^lecturer\.demo@/i.test(String(email || "").trim());
+}
+
+/** Capstone demo: lecturer.demo@dtu.edu.vn and lecturer.demo@edumate.local share ownership. */
+async function areLinkedDemoLecturerAccounts(userIdA, userIdB) {
+  const a = parseOptionalInt(userIdA);
+  const b = parseOptionalInt(userIdB);
+  if (a == null || b == null) return false;
+  if (a === b) return true;
+  const emailA = await getUserEmail(a);
+  const emailB = await getUserEmail(b);
+  return isDemoLecturerEmail(emailA) && isDemoLecturerEmail(emailB);
+}
+
+async function usersShareQuizOwnership(ownerId, viewerId) {
+  const owner = parseOptionalInt(ownerId);
+  const viewer = parseOptionalInt(viewerId);
+  if (owner == null || viewer == null) return false;
+  if (owner === viewer) return true;
+  return areLinkedDemoLecturerAccounts(owner, viewer);
+}
+
+async function setQuizPublisherOwnership(quizId, publisherUserId) {
+  const id = Number(quizId);
+  const uid = parseOptionalInt(publisherUserId);
+  if (!Number.isFinite(id) || id <= 0 || uid == null) return;
+  await getPool().execute(`UPDATE quizzes SET created_by = ? WHERE quiz_id = ?`, [uid, id]);
+}
+
+/** Backfill created_by when legacy rows only have user-{id} in paths. */
+async function ensureQuizCreatedByFromInference(quizId) {
+  const id = Number(quizId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const p = getPool();
+  const [rows] = await p.execute(
+    "SELECT quiz_id, created_by, source_file_url FROM quizzes WHERE quiz_id = ? LIMIT 1",
+    [id]
+  );
+  if (!rows.length) return null;
+  const existing = parseOptionalInt(rows[0].created_by);
+  if (existing != null && existing > 0) return existing;
+  const row = await getQuizWithQuestions(id);
+  if (!row) return null;
+  const inferred = resolveQuizOwnerUserId(row);
+  if (inferred == null) return null;
+  await p.execute(
+    "UPDATE quizzes SET created_by = ? WHERE quiz_id = ? AND (created_by IS NULL OR created_by = 0)",
+    [inferred, id]
+  );
+  return inferred;
+}
+
+function appendSqlQuizOwnerMatch(sql, params, uid, alias = "q") {
+  const id = parseOptionalInt(uid);
+  if (id == null) return { sql, params };
+  const likeAny = `%user-${id}%`;
+  const likeSlash = `%/user-${id}/%`;
+  return {
+    sql: `${sql} AND (
+      ${alias}.created_by = ?
+      OR ${alias}.source_file_url LIKE ?
+      OR EXISTS (
+        SELECT 1 FROM quiz_questions qq_own
+        WHERE qq_own.quiz_id = ${alias}.quiz_id
+          AND (qq_own.media_url LIKE ? OR qq_own.media_url LIKE ?)
+      )
+    )`,
+    params: [...params, id, likeAny, likeAny, likeSlash],
+  };
+}
+
 async function canUserManageQuiz(quizId, userId) {
   const row = await getQuizWithQuestions(quizId);
   if (!row) return false;
@@ -1778,8 +2169,30 @@ async function canUserManageQuiz(quizId, userId) {
     Number(row.shared_from_student || 0) === 1;
   if (sharedFlag) return true;
 
-  // Otherwise only owner lecturer can manage.
-  return row.created_by != null && Number(row.created_by) === uid;
+  const owner = resolveQuizOwnerUserId(row);
+  if (owner == null) return false;
+  if (owner === uid) return true;
+  return areLinkedDemoLecturerAccounts(owner, uid);
+}
+
+/** Delete/publish: owner only (not "any lecturer" on shared student quizzes). */
+async function canUserDeleteQuiz(quizId, userId) {
+  await ensureQuizCreatedByFromInference(quizId);
+  const row = await getQuizWithQuestions(quizId);
+  if (!row) return false;
+  const uid = parseOptionalInt(userId);
+  if (uid == null) return false;
+  const role = await getUserRole(uid);
+  if (isAdminRole(role)) return true;
+  if (!isLecturerRole(role)) return false;
+  const sharedFlag =
+    Number(row.shared_for_review || 0) === 1 ||
+    Number(row.shared_from_student || 0) === 1;
+  if (sharedFlag) return false;
+  const owner = resolveQuizOwnerUserId(row);
+  if (owner == null) return false;
+  if (owner === uid) return true;
+  return areLinkedDemoLecturerAccounts(owner, uid);
 }
 
 async function replaceQuizQuestions(quizId, questions) {
@@ -1813,6 +2226,69 @@ async function markQuizReviewedByLecturer(quizId, reviewerUserId) {
      WHERE quiz_id = ?`,
     [id]
   );
+}
+
+function parseScheduleDatetimeInput(raw) {
+  if (raw == null || String(raw).trim() === "") return null;
+  const d = new Date(raw);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d;
+}
+
+function validateQuizSchedule({ startAt = null, endAt = null } = {}) {
+  const now = Date.now();
+  const skewMs = 60 * 1000;
+  if (startAt instanceof Date && Number.isFinite(startAt.getTime())) {
+    if (startAt.getTime() < now - skewMs) {
+      return "Start date & time cannot be in the past.";
+    }
+  }
+  if (endAt instanceof Date && Number.isFinite(endAt.getTime())) {
+    if (endAt.getTime() < now - skewMs) {
+      return "End date & time cannot be in the past.";
+    }
+    if (startAt instanceof Date && Number.isFinite(startAt.getTime()) && endAt.getTime() < startAt.getTime()) {
+      return "End date & time must be on or after the start.";
+    }
+  }
+  return null;
+}
+
+async function setQuizSchedule(quizId, { startAt = null, endAt = null } = {}) {
+  const id = Number(quizId);
+  if (!Number.isFinite(id) || id <= 0) throw new Error("Invalid quizId.");
+  const p = getPool();
+  const startVal =
+    startAt instanceof Date && Number.isFinite(startAt.getTime()) ? startAt : null;
+  const endVal = endAt instanceof Date && Number.isFinite(endAt.getTime()) ? endAt : null;
+  try {
+    await p.execute(
+      `UPDATE quizzes SET schedule_start_at = ?, schedule_end_at = ? WHERE quiz_id = ?`,
+      [startVal, endVal, id]
+    );
+    return true;
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") return false;
+    throw e;
+  }
+}
+
+async function listExpiredPublishedQuizIds() {
+  const p = getPool();
+  try {
+    const [rows] = await p.execute(
+      `SELECT quiz_id FROM quizzes
+       WHERE is_published = 1
+         AND schedule_end_at IS NOT NULL
+         AND schedule_end_at <= NOW()`
+    );
+    return rows
+      .map((r) => Number(r.quiz_id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+  } catch (e) {
+    if (e.code === "ER_BAD_FIELD_ERROR") return [];
+    throw e;
+  }
 }
 
 async function setQuizPublished(quizId, published = true) {
@@ -2296,6 +2772,62 @@ async function assertQuizExists(quizId, p = getPool()) {
   if (!rows.length) throw new Error("Quiz not found.");
 }
 
+/** Copy a published snapshot (e.g. S3 JSON) into MySQL so attempts can be recorded. */
+async function materializePublishedQuizSnapshot(snapshot) {
+  const qid = Number(snapshot?.quiz_id ?? snapshot?.quizId);
+  if (!Number.isFinite(qid) || qid <= 0) return null;
+  const existing = await getQuizWithQuestions(qid);
+  if (existing) return existing;
+
+  const p = getPool();
+  const title = trunc255(snapshot.title || "Published Quiz");
+  const createdBy = resolveQuizOwnerUserId(snapshot);
+  const publishedAt =
+    snapshot.published_at ||
+    snapshot.publishedAt ||
+    snapshot.created_at ||
+    snapshot.createdAt ||
+    new Date();
+
+  const variants = [
+    {
+      sql: `INSERT INTO quizzes (quiz_id, title, created_by, is_published, published_at) VALUES (?,?,?,1,?)`,
+      params: [qid, title, createdBy, publishedAt],
+    },
+    {
+      sql: `INSERT INTO quizzes (quiz_id, title, created_by, is_published) VALUES (?,?,?,1)`,
+      params: [qid, title, createdBy],
+    },
+    {
+      sql: `INSERT INTO quizzes (quiz_id, title, created_by) VALUES (?,?,?)`,
+      params: [qid, title, createdBy],
+    },
+    { sql: `INSERT INTO quizzes (quiz_id, title) VALUES (?,?)`, params: [qid, title] },
+  ];
+  let ok = false;
+  for (const v of variants) {
+    try {
+      await p.execute(v.sql, v.params);
+      ok = true;
+      break;
+    } catch (e) {
+      if (e.code === "ER_DUP_ENTRY") {
+        ok = true;
+        break;
+      }
+      if (e.code === "ER_BAD_FIELD_ERROR") continue;
+      throw e;
+    }
+  }
+  if (!ok) return null;
+
+  const questions = (Array.isArray(snapshot.questions) ? snapshot.questions : [])
+    .map((q) => normalizeQuestionInput(q))
+    .filter(Boolean);
+  if (questions.length) await replaceQuizQuestions(qid, questions);
+  return getQuizWithQuestions(qid);
+}
+
 /**
  * One "Take Quiz" attempt: insert on start (completed_at NULL, score = 0).
  * MySQL column completed_at must allow NULL.
@@ -2312,10 +2844,11 @@ async function startQuizAttempt({ quizId, userId }) {
     `DELETE FROM quiz_attempts WHERE quiz_id = ? AND (user_id <=> ?) AND completed_at IS NULL`,
     [qid, uid]
   );
-  await p.execute(
+  const [hdr] = await p.execute(
     `INSERT INTO quiz_attempts (quiz_id, user_id, score, completed_at) VALUES (?,?,0,NULL)`,
     [qid, uid]
   );
+  return Number(hdr.insertId);
 }
 
 // Quiz comments
@@ -3813,20 +4346,24 @@ async function getLecturerQuizAnalytics(userId, { topQuestions = 5 } = {}) {
   const p = getPool();
   const tq = Math.min(Math.max(Number(topQuestions) || 5, 1), 20);
 
-  const [perfRows] = await p.execute(
-    `SELECT q.quiz_id, q.title, q.is_published,
+  let perfSql = `
+     SELECT q.quiz_id, q.title, q.is_published,
             COUNT(DISTINCT qa.attempt_id) AS attempts_count,
             COUNT(DISTINCT CASE WHEN qa.user_id IS NOT NULL THEN qa.user_id END) AS participants_count,
             AVG(CASE WHEN qa.completed_at IS NOT NULL THEN qa.score END) AS avg_score,
             AVG(CASE WHEN qa.completed_at IS NOT NULL AND qa.score >= 70 THEN 100 ELSE 0 END) AS pass_rate
      FROM quizzes q
      LEFT JOIN quiz_attempts qa ON qa.quiz_id = q.quiz_id
-     WHERE q.created_by = ?
-       AND (q.source_file_url IS NULL OR q.source_file_url NOT LIKE 'question-bank://%')
-     GROUP BY q.quiz_id, q.title, q.is_published
-     ORDER BY q.quiz_id DESC`,
-    [uid]
-  );
+     WHERE (q.source_file_url IS NULL OR q.source_file_url NOT LIKE 'question-bank://%')`;
+  let perfParams = [];
+  ({ sql: perfSql, params: perfParams } = appendSqlQuizOwnerMatch(
+    perfSql,
+    perfParams,
+    uid,
+    "q"
+  ));
+  perfSql += ` GROUP BY q.quiz_id, q.title, q.is_published ORDER BY q.quiz_id DESC`;
+  const [perfRows] = await p.execute(perfSql, perfParams);
 
   const performance = perfRows.map((r) => ({
     quizId: Number(r.quiz_id),
@@ -3849,24 +4386,25 @@ async function getLecturerQuizAnalytics(userId, { topQuestions = 5 } = {}) {
     ? (performance.filter((x) => Number(x.attempts || 0) > 0).length / totalQuizzes) * 100
     : 0;
 
-  const [challengingRows] = await p.execute(
-    `SELECT qq.question_id, qq.question_text,
+  let chSql = `
+     SELECT qq.question_id, qq.question_text,
             COUNT(qa2.attempt_id) AS attempts_count,
             SUM(CASE WHEN qa2.is_correct = 1 THEN 1 ELSE 0 END) AS correct_hits
      FROM quizzes q
      INNER JOIN quiz_questions qq ON qq.quiz_id = q.quiz_id
      LEFT JOIN quiz_answers qa2 ON qa2.question_id = qq.question_id
      LEFT JOIN quiz_attempts atp ON atp.attempt_id = qa2.attempt_id AND atp.completed_at IS NOT NULL
-     WHERE q.created_by = ?
-       AND (q.source_file_url IS NULL OR q.source_file_url NOT LIKE 'question-bank://%')
+     WHERE (q.source_file_url IS NULL OR q.source_file_url NOT LIKE 'question-bank://%')`;
+  let chParams = [];
+  ({ sql: chSql, params: chParams } = appendSqlQuizOwnerMatch(chSql, chParams, uid, "q"));
+  chSql += `
      GROUP BY qq.question_id, qq.question_text
      HAVING attempts_count > 0
      ORDER BY
        (SUM(CASE WHEN qa2.is_correct = 1 THEN 1 ELSE 0 END) / NULLIF(COUNT(qa2.attempt_id), 0)) ASC,
        attempts_count DESC
-     LIMIT ${tq}`,
-    [uid]
-  );
+     LIMIT ${tq}`;
+  const [challengingRows] = await p.execute(chSql, chParams);
 
   const challengingQuestions = challengingRows.map((r) => {
     const attempts = Math.max(0, Number(r.attempts_count || 0));
@@ -3905,6 +4443,8 @@ module.exports = {
   getDocumentIdByS3Key,
   incrementDocumentDownloadCountByDocumentId,
   incrementDocumentDownloadCountByS3Key,
+  incrementDocumentViewCountByDocumentId,
+  incrementDocumentViewCountByS3Key,
   countAttemptsBySourceFileUrls,
   countChunksByS3Key,
   getConcatenatedChunksByS3Key,
@@ -3928,6 +4468,8 @@ module.exports = {
   listQuizHistory,
   listLecturerReviewedQuizzes,
   listPublishedQuizzes,
+  listQuizzesSharedByStudents,
+  shareQuizForReview,
   startQuizAttempt,
   finishQuizAttempt,
   finishQuizAttemptWithAnswers,
@@ -3949,9 +4491,21 @@ module.exports = {
   updateUserPassword,
   isUserAccountDeactivated,
   canUserManageQuiz,
+  canUserDeleteQuiz,
+  usersShareQuizOwnership,
+  setQuizPublisherOwnership,
+  getUserEmail,
+  resolveQuizOwnerUserId,
+  ensureQuizCreatedByFromInference,
+  materializePublishedQuizSnapshot,
+  inferUserIdFromPathString,
   replaceQuizQuestions,
   updateQuizTitle,
   setQuizPublished,
+  parseScheduleDatetimeInput,
+  validateQuizSchedule,
+  setQuizSchedule,
+  listExpiredPublishedQuizIds,
   markQuizReviewedByLecturer,
   deleteQuizById,
   addQuizComment,

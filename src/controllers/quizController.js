@@ -16,6 +16,11 @@ async function buildQuizGenerationResult(reqLike, onProgress = () => {}) {
   const user = reqLike?.user || {};
   const s3Key = body.s3Key != null && String(body.s3Key).trim() ? String(body.s3Key).trim() : "";
   const reindex = body.reindex === true || body.reindex === "true";
+  const varietySeed =
+    body.varietySeed ??
+    body.variety_seed ??
+    body.jobId ??
+    `quiz-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
   if (!s3Key) {
     const err = new Error("Thiếu s3Key.");
@@ -33,8 +38,19 @@ async function buildQuizGenerationResult(reqLike, onProgress = () => {}) {
     throw err;
   }
 
+  const forceNew =
+    body.forceNew === true ||
+    body.forceNew === "true" ||
+    body.forceNew === 1 ||
+    body.regenerate === true ||
+    body.regenerate === "true";
+  const reuseExisting =
+    !forceNew &&
+    !reindex &&
+    (body.reuseExisting === true || body.reuseExisting === "true");
+
   onProgress({ progress: 15, message: "Checking existing quiz..." });
-  if (!reindex) {
+  if (reuseExisting) {
     try {
       const existingQuizId = await db.findQuizByS3Key(s3Key);
       if (existingQuizId) {
@@ -56,6 +72,20 @@ async function buildQuizGenerationResult(reqLike, onProgress = () => {}) {
     }
   }
 
+  const avoidQuestionStems = [];
+  const requestedQuizId = Number(body.quizId ?? body.quiz_id);
+  if (Number.isFinite(requestedQuizId) && requestedQuizId > 0) {
+    try {
+      const existing = await db.getQuizQuestionsById(requestedQuizId);
+      for (const q of existing) {
+        const t = String(q.question_text || q.question || "").trim();
+        if (t) avoidQuestionStems.push(t);
+      }
+    } catch (_) {
+      // ignore
+    }
+  }
+
   const numQuestions = Number(body.numQuestions) || 20;
   let rawQuiz = [];
   let idxMeta = null;
@@ -72,6 +102,8 @@ async function buildQuizGenerationResult(reqLike, onProgress = () => {}) {
         text,
         numQuestions,
         languageHint: body.language || "Auto",
+        varietySeed,
+        avoidQuestionStems,
       });
       rawQuiz = Array.isArray(directResult?.questions) ? directResult.questions : [];
     } catch (fastErr) {
@@ -90,6 +122,8 @@ async function buildQuizGenerationResult(reqLike, onProgress = () => {}) {
         query: body.query ?? body.topic ?? body.keyword ?? "core concepts and key facts",
         numQuestions,
         languageHint: body.language || "Auto",
+        varietySeed,
+        avoidQuestionStems,
       });
       rawQuiz = Array.isArray(aiResult?.questions) ? aiResult.questions : [];
     } catch (aiErr) {
@@ -107,6 +141,8 @@ async function buildQuizGenerationResult(reqLike, onProgress = () => {}) {
         text,
         numQuestions,
         languageHint: body.language || "Auto",
+        varietySeed,
+        avoidQuestionStems,
       });
       rawQuiz = Array.isArray(directResult?.questions) ? directResult.questions : [];
     } catch (directErr) {
@@ -350,8 +386,12 @@ const recordQuizAttempt = async (req, res) => {
     console.log("[recordQuizAttempt] body =", req.body);
 
     if (phase === "start") {
-      await db.startQuizAttempt({ quizId, userId });
-      return res.status(201).json({ success: true, message: "Đã ghi lượt bắt đầu làm bài." });
+      const attemptId = await db.startQuizAttempt({ quizId, userId });
+      return res.status(201).json({
+        success: true,
+        message: "Đã ghi lượt bắt đầu làm bài.",
+        data: { attemptId: Number.isFinite(Number(attemptId)) ? Number(attemptId) : null },
+      });
     }
 
     const score = req.body.score ?? req.body.correctCount ?? req.body.correct;

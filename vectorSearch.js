@@ -68,17 +68,54 @@ function capContext(chunks, maxChars = 2000) {
   return out.join("\n\n");
 }
 
-async function retrieveTopChunks({ s3Key, query, topK = 3, maxContextChars = 2000 }) {
+function hashSeed(seed) {
+  const s = String(seed || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+function rotateScoredChunks(scored, varietySeed) {
+  if (!scored.length) return scored;
+  const offset = hashSeed(varietySeed) % scored.length;
+  return [...scored.slice(offset), ...scored.slice(0, offset)];
+}
+
+async function retrieveTopChunks({
+  s3Key,
+  query,
+  topK = 3,
+  maxContextChars = 2000,
+  varietySeed,
+}) {
   const segments = await db.listSegmentsByS3Key(s3Key);
   if (!segments.length) return { context: "", chunks: [] };
 
-  const queryEmbedding = await safeEmbedding(query);
-  const pre = keywordFilter(uniqueByContent(segments), query);
-  const scored = pre
+  const angleHints = [
+    "definitions and terminology",
+    "processes steps and procedures",
+    "comparisons and relationships",
+    "examples applications and outcomes",
+    "constraints rules and requirements",
+  ];
+  let retrievalQuery = String(query || "core concept and key facts").trim();
+  if (varietySeed) {
+    const hint = angleHints[hashSeed(varietySeed) % angleHints.length];
+    retrievalQuery = `${retrievalQuery} — focus: ${hint}`;
+  }
+
+  const queryEmbedding = await safeEmbedding(retrievalQuery);
+  const pre = keywordFilter(uniqueByContent(segments), retrievalQuery);
+  const scoredAll = pre
     .map((c) => ({ ...c, score: cosineSimilarity(queryEmbedding, c.embedding) }))
     .filter((c) => Number.isFinite(c.score))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+    .sort((a, b) => b.score - a.score);
+
+  const poolK = Math.min(scoredAll.length, Math.max(topK * 3, topK + 4));
+  const pool = rotateScoredChunks(scoredAll.slice(0, poolK), varietySeed);
+  const scored = pool.slice(0, topK);
 
   return {
     chunks: scored,
