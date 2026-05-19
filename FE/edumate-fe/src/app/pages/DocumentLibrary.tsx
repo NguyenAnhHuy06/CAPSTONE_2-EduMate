@@ -106,6 +106,35 @@ function mapUploaderRole(roleRaw: string | undefined): 'instructor' | 'student' 
   return 'instructor'
 }
 
+// Convert Vietnamese year labels from AWS to English, stripping academic year ranges.
+// e.g. "NĂM 1 (2022-2023)" → "1st Year", "NAM 2 (2023-2024)" → "2nd Year"
+function normalizeYearLabel(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const s = raw.trim()
+  // Match patterns like "NĂM 1", "NAM 1", "Năm 1" optionally followed by " (YYYY-YYYY)"
+  const m = s.match(/n[aă]m\s*(\d+)/i)
+  if (m) {
+    const n = parseInt(m[1], 10)
+    const suffix = n === 1 ? 'st' : n === 2 ? 'nd' : n === 3 ? 'rd' : 'th'
+    return `${n}${suffix} Year`
+  }
+  // Fallback: strip any " (YYYY-YYYY)" range and return as-is
+  return s.replace(/\s*\(\d{4}[-–]\d{4}\)/, '').trim() || undefined
+}
+
+// Convert Vietnamese semester labels from AWS to English.
+// e.g. "HỌC KỲ 1", "HOC KY 2" → "Semester 1", "Semester 2"
+function normalizeSemesterLabel(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const s = raw.trim()
+  const m = s.match(/h[oọ]c\s*k[yỳ]\s*(\d+)/i)
+  if (m) {
+    return `Semester ${parseInt(m[1], 10)}`
+  }
+  // Fallback: strip any " (YYYY-YYYY)" range
+  return s.replace(/\s*\(\d{4}[-–]\d{4}\)/, '').trim() || undefined
+}
+
 function normalizeCourseName(courseCode: string, subjectName: string): string {
   const code = String(courseCode || '').trim()
   const raw = String(subjectName || '').trim()
@@ -169,6 +198,10 @@ function mapApiRowToDoc(apiRow: any): CourseMaterialDoc {
       subject = subject || parts[3]
     }
   }
+
+  // Normalize Vietnamese labels from AWS → English display labels
+  year = normalizeYearLabel(year)
+  semester = normalizeSemesterLabel(semester)
 
   return {
     id,
@@ -326,8 +359,9 @@ export function DocumentLibrary({
 
       const matchesCategory =
         categoryFilter === 'all' ||
-        (categoryFilter === 'uncategorized'
-          ? doc.categoryKey === 'uncategorized'
+        (categoryFilter === 'general'
+          // Treat both 'general' and 'general-major' as "General" (backend may store either)
+          ? (doc.categoryKey === 'general' || doc.categoryKey === 'general-major')
           : doc.categoryKey === categoryFilter)
 
       const matchesYear = yearFilter === 'all' || doc.year === yearFilter
@@ -617,9 +651,7 @@ export function DocumentLibrary({
               >
                 <option value="all">All categories</option>
                 <option value="general">General</option>
-                <option value="general-major">General Major</option>
                 <option value="specialized">Specialized</option>
-                <option value="uncategorized">Uncategorized</option>
               </select>
             </div>
             

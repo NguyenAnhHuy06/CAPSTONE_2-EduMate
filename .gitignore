@@ -4,6 +4,10 @@ dist/
 .DS_Store
 *.log
 uploads/
+
+# Vite/React build — rebuild with npm run build in FE/edumate-fe
+FE/edumate-fe/dist/
+
 .vscode/
 .idea/
 build/
